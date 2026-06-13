@@ -16,7 +16,7 @@ import '/client/components/cards/attachments.js';
 import '/client/components/cards/cardCustomFields.js';
 import '/client/components/cards/cardDate.js';
 import '/client/components/cards/cardDescription.js';
-import '/client/components/cards/cardDetailt.js';
+import '/client/components/cards/cardDetails.js';
 import '/client/components/cards/cardStickers.js';
 import '/client/components/cards/cardTime.js';
 import '/client/components/cards/checklists.js';
