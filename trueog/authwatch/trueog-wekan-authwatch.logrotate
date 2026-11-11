@@ -1,0 +1,13 @@
+# Installed to /etc/logrotate.d/trueog-wekan-authwatch by install-wekan-authwatch.sh. The log only gains a
+# line when the service starts, the number of linked accounts changes, an account is locked or unlocked, or
+# a problem is first seen (supervise-daemon keeps it open in append mode, hence copytruncate).
+/var/log/wekan/trueog-wekan-authwatch.log {
+	monthly
+	rotate 12
+	compress
+	delaycompress
+	missingok
+	notifempty
+	copytruncate
+	su system system
+}

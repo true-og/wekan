@@ -1,0 +1,35 @@
+#!/sbin/openrc-run
+# /etc/init.d/trueog-wekan-authwatch: locks a WeKan account within about a second of its Staff-Auth account
+# being deactivated or deleted, and unlocks it when that account is active again. Reads Staff-Auth's users
+# table (role wekan_authwatch: uuid and deactivated only) and WeKan's users; see the header of
+# /usr/local/sbin/trueog-wekan-authwatch.mjs. Runs as system (WeKan's user, owner of /opt/wekan/wekan.env)
+# with the same Node as WeKan (node= in /etc/conf.d/wekan). Stopping it is safe: Staff-Auth still refuses
+# sign-in for deactivated or deleted accounts; only WeKan sessions already open would then stay.
+description="TrueOG WeKan lock on Staff-Auth deactivation"
+
+node=$(sed -n 's/^node="\(.*\)"$/\1/p' /etc/conf.d/wekan 2>/dev/null)
+
+export USER=system HOME=/home/system PGPASSFILE=/etc/trueog-wekan-authwatch/pgpass
+
+supervisor="supervise-daemon"
+command="$node"
+command_args="/usr/local/sbin/trueog-wekan-authwatch.mjs"
+command_user="system:system"
+directory="/"
+pidfile="/run/trueog-wekan-authwatch.pid"
+respawn_delay=5
+respawn_max=0
+output_log="/var/log/wekan/trueog-wekan-authwatch.log"
+error_log="/var/log/wekan/trueog-wekan-authwatch.log"
+
+depend() {
+	need net
+	after wekan ferretdb postgresql
+}
+
+start_pre() {
+	[ -n "$node" ] && [ -x "$node" ] || { eerror "no Node from node= in /etc/conf.d/wekan"; return 1; }
+	[ -r /usr/local/sbin/trueog-wekan-authwatch.mjs ] || { eerror "/usr/local/sbin/trueog-wekan-authwatch.mjs is missing"; return 1; }
+	checkpath -d -m 0755 -o system:system /var/log/wekan
+	checkpath -f -m 0640 -o system:system /var/log/wekan/trueog-wekan-authwatch.log
+}

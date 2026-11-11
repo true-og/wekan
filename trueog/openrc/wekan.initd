@@ -1,0 +1,106 @@
+#!/sbin/openrc-run
+description="Wekan service"
+
+: ${user:="system"}
+: ${node:="/home/system/.nvm/versions/node/v24.16.0/bin/node"}
+: ${env_file:="/opt/wekan/wekan.env"}
+: ${runtime_dir:="/run/wekan"}
+: ${log_file:="/var/log/wekan/wekan.log"}
+: ${ssd:="/usr/lib/rc/sbin/start-stop-daemon"}
+
+. "$env_file"
+
+command="/usr/bin/setpriv"
+command_args="--reuid=$user --regid=$user --init-groups $node current/bundle/main.js"
+directory="/opt/wekan"
+pidfile="$runtime_dir/wekan.pid"
+
+export HOME="/home/$user"
+export USER="$user"
+export LOGNAME="$user"
+
+depend() {
+    after mountall bootmisc networking ferretdb
+}
+
+start_pre() {
+    checkpath -d -m 0750 -o "$user:$user" "$runtime_dir"
+    checkpath -d -m 0755 -o "$user:$user" "$(dirname "$log_file")"
+    checkpath -f -m 0644 -o "$user:$user" "$log_file"
+
+    # Remove state left by the previous tmux-based service.
+    if [ -S "$runtime_dir/tmux.sock" ]; then
+        rm -f "$runtime_dir/tmux.sock"
+    fi
+
+    return 0
+}
+
+start() {
+    if is_running; then
+        ewarn "Wekan is already running"
+        return 0
+    fi
+
+    [ -f "$pidfile" ] && rm -f "$pidfile"
+
+    ebegin "Starting Wekan"
+    "$ssd" --start \
+        --background \
+        --make-pidfile \
+        --pidfile "$pidfile" \
+        --chdir "$directory" \
+        --exec "$command" \
+        --stdout "$log_file" \
+        --stderr "$log_file" \
+        -- $command_args
+    eend $? "Failed to start Wekan"
+}
+
+stop() {
+    if ! is_running; then
+        rm -f "$pidfile"
+        ewarn "Wekan is not running"
+        return 0
+    fi
+
+    ebegin "Stopping Wekan"
+    "$ssd" --stop \
+        --pidfile "$pidfile" \
+        --retry TERM/15/KILL/5
+    local retval=$?
+    rm -f "$pidfile"
+    eend "$retval" "Failed to stop Wekan"
+}
+
+status() {
+    if is_running; then
+        einfo "Wekan is running (PID $(cat "$pidfile"))"
+        return 0
+    fi
+
+    einfo "Wekan is stopped"
+    return 3
+}
+
+is_running() {
+    local pid
+
+    [ -r "$pidfile" ] || return 1
+    pid="$(cat "$pidfile")"
+    case "$pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+
+    kill -0 "$pid" 2>/dev/null || return 1
+    [ "$(readlink -f "/proc/$pid/exe" 2>/dev/null)" = "$node" ]
+}
+
+console() {
+    touch "$log_file"
+    exec tail -n 100 -f "$log_file"
+}
+
+extra_commands="console"
+extra_started_commands="console"
+description_console="Follow the Wekan log"
