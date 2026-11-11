@@ -2549,7 +2549,11 @@ Users.after.insert(async (userId, doc) => {
   }
 
   const disableRegistration = (await ReactiveCache.getCurrentSetting()).disableRegistration;
-  if (doc.authenticationMethod !== 'ldap' && disableRegistration) {
+  // TrueOG: an account created by the OIDC service (services.oidc, which only the server-side OIDC login sets)
+  // needs no invitation code: the identity provider (Staff-Auth) decides who gets in. Without this, with
+  // registration disabled, a first OIDC sign-in created the account and then failed with
+  // error-invitation-code-not-exist. Password registration stays closed.
+  if (doc.authenticationMethod !== 'ldap' && disableRegistration && !doc.services?.oidc) {
     let invitationCode = null;
     // #6620: authenticationMethod is only set for oauth2/ldap signups (see
     // ATCreateUserServer/enrollOrLoginOidcUser above) - a normal
