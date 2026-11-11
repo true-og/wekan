@@ -1,255 +1,656 @@
 template(name="setting")
   .setting-content
-    unless currentUser.isAdmin
+    //- Multitenancy option D (docs/Design/Multitenancy/Multitenancy.md, D.9): an
+    //- Organization's own admin opens this page for ONE pane - Visibility, and in it
+    //- only "Change color", the site theme of their Organization. Everything else
+    //- here is instance-wide and stays site-admin only, pane by pane and group by
+    //- group.
+    unless currentUser.isAdminOrOrgAdmin
       | {{_ 'error-notAuthorized'}}
     else
-      .content-title.ext-box
-        if isGeneralSetting
-          span
-            span.emoji-icon
-            i.fa.fa-key
-            | {{_ 'registration'}}
-        else if isEmailSetting
-          span
-            span.emoji-icon
-            i.fa.fa-envelope
-            | {{_ 'email'}}
-        else if isAccountSetting
-          span
-            span.emoji-icon
-            i.fa.fa-users
-            | {{_ 'accounts'}}
-        else if isTableVisibilityModeSetting
-          span
-            span.emoji-icon
-            i.fa.fa-eye
-            | {{_ 'tableVisibilityMode'}}
-        else if isAnnouncementSetting
-          span
-            span.emoji-icon
-            i.fa.fa-bullhorn
-            | {{_ 'admin-announcement'}}
-        else if isAccessibilitySetting
-          span
-            span.emoji-icon
-            i.fa.fa-universal-access
-            | {{_ 'accessibility'}}
-        else if isLayoutSetting
-          span
-            span.emoji-icon
-            i.fa.fa-link
-            | {{_ 'layout'}}
-        else if isWebhookSetting
-          span
-            span.emoji-icon
-            i.fa.fa-globe
-            | {{_ 'global-webhook'}}
-        //- COMMENTED OUT: Migration settings title section
+      //- No page-title bar here. The Admin Panel top bar already says which section
+      //- you are in, and the left menu highlights which pane is open, so a third
+      //- line repeating the pane name only cost vertical space. Admin Panel /
+      //- Problems has never had one.
       .content-body
-        .side-menu
-          ul
-            li(class="{{#if isGeneralSetting}}active{{/if}}")
-              a.js-setting-menu(data-id="registration-setting")
-                span.emoji-icon
-                i.fa.fa-key
-                | {{_ 'registration'}}
-            unless isSandstorm
-              li(class="{{#if isEmailSetting}}active{{/if}}")
-                a.js-setting-menu(data-id="email-setting")
-                  span.emoji-icon
-                  i.fa.fa-envelope
-                  | {{_ 'email'}}
-            li(class="{{#if isAccountSetting}}active{{/if}}")
-              a.js-setting-menu(data-id="account-setting")
-                span.emoji-icon
-                i.fa.fa-users
-                | {{_ 'accounts'}}
-            li(class="{{#if isTableVisibilityModeSetting}}active{{/if}}")
-              a.js-setting-menu(data-id="tableVisibilityMode-setting")
-                span.emoji-icon
-                i.fa.fa-eye
-                | {{_ 'tableVisibilityMode'}}
-            li(class="{{#if isAnnouncementSetting}}active{{/if}}")
-              a.js-setting-menu(data-id="announcement-setting")
-                span.emoji-icon
-                i.fa.fa-bullhorn
-                | {{_ 'admin-announcement'}}
-            li(class="{{#if isAccessibilitySetting}}active{{/if}}")
-              a.js-setting-menu(data-id="accessibility-setting")
-                span.emoji-icon
-                i.fa.fa-universal-access
-                | {{_ 'accessibility'}}
-            li(class="{{#if isLayoutSetting}}active{{/if}}")
-              a.js-setting-menu(data-id="layout-setting")
-                span.emoji-icon
-                i.fa.fa-link
-                | {{_ 'layout'}}
-            li(class="{{#if isWebhookSetting}}active{{/if}}")
-              a.js-setting-menu(data-id="webhook-setting")
-                span.emoji-icon
-                i.fa.fa-globe
-                | {{_ 'global-webhook'}}
-            //- COMMENTED OUT: Migration menu item
+        +leftMenu(menuItems)
         .main-body
+          //- Every Admin Panel pane opens with the same heading, and it is the
+          //- open menu entry's own label (docs/Features/All-Boards/Left-Menu.md).
+          +paneTitle(paneTitleData)
           if isLoading
             +spinner
-          else if isGeneralSetting
-            +general
-          else if isEmailSetting
-            unless isSandstorm
-              +email
-          else if isAccountSetting
-            +accountSettings
+          else if isVersionSetting
+            //- The version, database and system information. Its template lives in
+            //- informationBody.jade, with the code that loads the statistics; Blaze
+            //- templates are global, so the pane renders here.
+            +statistics
           else if isTableVisibilityModeSetting
             +tableVisibilityModeSettings
           else if isAnnouncementSetting
             +announcementSettings
           else if isAccessibilitySetting
             +accessibilitySettings
+          else if isTranslationSetting
+            +translationSettings
           else if isLayoutSetting
-            +layoutSettings
+            +pwaSettings
           else if isWebhookSetting
             +webhookSettings
+          else if isSharedLabelsSetting
+            +sharedLabelsSettings
 
 template(name="webhookSettings")
   span
      +outgoingWebhooksPopup
+  //- Internal destinations (models/lib/internalWebhookHosts.js): hosts on
+    WeKan's own network that webhooks may reach. Empty: none.
+  .webhook-internal-hosts
+    h2.admin-pane-group-title {{_ 'webhook-internal-hosts'}}
+    p.quiet {{_ 'webhook-internal-hosts-desc'}}
+    textarea.wekan-form-control.js-webhook-internal-hosts(rows="4" placeholder="nodered.lan&#10;10.0.0.5:1880" aria-label="{{_ 'webhook-internal-hosts'}}")= internalHosts
+    button.primary.js-save-webhook-internal-hosts(type="button") {{_ 'save'}}
+    span.js-webhook-internal-hosts-status
+  //- #2290: one address told about logins and new accounts. Off until an
+    event is ticked; only the user name and time unless more is ticked.
+  .account-webhook
+    h2.admin-pane-group-title {{_ 'account-webhook'}}
+    p.quiet {{_ 'account-webhook-desc'}}
+    input.wekan-form-control.js-account-webhook-url(type="url" placeholder="https://" aria-label="{{_ 'settings-group-url'}}" value=accountWebhook.url)
+    input.wekan-form-control.js-account-webhook-token(type="text" placeholder="{{_ 'webhook-token'}}" aria-label="{{_ 'webhook-token'}}" value=accountWebhook.token)
+    a.flex.js-account-webhook-tick(data-key="onLogin")
+      .materialCheckBox(class="{{#if accountWebhook.onLogin}}is-checked{{/if}}")
+      span {{_ 'account-webhook-on-login'}}
+    a.flex.js-account-webhook-tick(data-key="onRegister")
+      .materialCheckBox(class="{{#if accountWebhook.onRegister}}is-checked{{/if}}")
+      span {{_ 'account-webhook-on-register'}}
+    p.quiet {{_ 'account-webhook-fields'}}
+    each accountWebhookFields
+      a.flex.js-account-webhook-field(data-field=key)
+        .materialCheckBox(class="{{#if on}}is-checked{{/if}}")
+        span {{_ labelKey}}
+    button.primary.js-save-account-webhook(type="button") {{_ 'save'}}
+    span.js-account-webhook-status
 
+//- The Login pane. Admin Panel / PEOPLE renders this now (peopleBody.jade); it is
+//- defined here, with the other admin settings panes, because Blaze templates are
+//- global and its handlers sit beside the other settings handlers in settingBody.js.
 template(name="general")
   ul#registration-setting.setting-detail
-    li
-      a.flex.js-toggle-forgot-password
-        .materialCheckBox(class="{{#if currentSetting.disableForgotPassword}}is-checked{{/if}}")
+    if isAuthenticationSection "login"
+      li
+        h2.admin-pane-group-title {{_ 'login-allow'}}
+      //- Every row in this group is a checkbox that is TICKED when the thing is
+      //- allowed, under a title that says "Allow" once. Two of them are stored the
+      //- other way round - `disableForgotPassword` and `disableRegistration` are
+      //- "disable" flags - so the markup asks `unless`. Only the display is inverted;
+      //- the stored fields and their handlers are unchanged.
+      li
+        a.flex.js-toggle-forgot-password
+          .materialCheckBox(class="{{#unless currentSetting.disableForgotPassword}}is-checked{{/unless}}")
 
-        span {{_ 'disable-forgot-password'}}
-    li
-      a.flex.js-toggle-registration
-        .materialCheckBox(class="{{#if currentSetting.disableRegistration}}is-checked{{/if}}")
+          span {{_ 'forgot-password'}}
+      li
+        a.flex.js-toggle-registration
+          .materialCheckBox(class="{{#unless currentSetting.disableRegistration}}is-checked{{/unless}}")
 
-        span {{_ 'disable-self-registration'}}
-    li
-      .invite-people(class="{{#if currentSetting.disableRegistration}}{{else}}hide{{/if}}")
-        ul
-          li
-            .title {{_ 'invite-people'}}
-            textarea#email-to-invite.wekan-form-control(rows='5', placeholder="{{_ 'email-addresses'}}")
-          li
-            .title {{_ 'to-boards'}}
-            .bg-white
-              each boards
-                a.option.flex.js-toggle-board-choose(id= _id)
-                  .materialCheckBox(data-id= _id)
+          span {{_ 'self-registration'}}
+      li
+        a.flex.js-toggle-username-change
+          .materialCheckBox(class="{{#if allowUserNameChange}}is-checked{{/if}}")
 
-                  span= title
+          span {{_ 'accounts-allowUserNameChange'}}
+      li
+        a.flex.js-toggle-user-delete
+          .materialCheckBox(class="{{#if allowUserDelete}}is-checked{{/if}}")
 
-          li
-            button.js-email-invite.primary {{_ 'invite'}}
+          span {{_ 'accounts-allowUserDelete'}}
+      li
+        a.flex.js-toggle-display-authentication-method
+          .materialCheckBox(class="{{#if currentSetting.displayAuthenticationMethod}}is-checked{{/if}}")
 
+          span {{_ 'display-authentication-method'}}
+
+      li.admin-pane-group-separator
+        hr
+      li
+        .invite-people(class="{{#if currentSetting.disableRegistration}}{{else}}hide{{/if}}")
+          ul
+            li
+              .title {{_ 'invite-people'}}
+              textarea#email-to-invite.wekan-form-control(data-editor-submit=".js-email-invite" rows='5', placeholder="{{_ 'email-addresses'}}")
+            li
+              .title {{_ 'to-boards'}}
+              .bg-white
+                each boards
+                  a.option.flex.js-toggle-board-choose(id= _id)
+                    .materialCheckBox(data-id= _id)
+
+                    span= title
+
+            li
+              button.js-email-invite.primary {{_ 'invite'}}
+            li
+              #invite-people-infos
+      //- The default authentication method is DEFAULT_AUTHENTICATION_METHOD in
+      //- the login settings form below this pane (peopleBody.jade), where choosing
+      //- one overrides the environment variable and Default leaves it in charge.
+      li.accounts-form
+        .title {{_ 'oidc-button-text'}}
+        .form-group
+          input.wekan-form-control#oidcBtnTextvalue(type="text", placeholder="" value="{{currentSetting.oidcBtnText}}")
+        button.js-account-access-save.primary {{_ 'save'}}
+
+    //- LDAP has a section of its own now, drawn from the login settings
+    //- catalog (models/lib/authConfigCatalog.js) by peopleBody.jade, like
+    //- SAML, OAuth2/OIDC, CAS and Header login.
+
+    //- Admin Panel override of the OAUTH_<PROVIDER>_* environment variables for
+    //- Meteor's own accounts-* login services (models/lib/oauthProviders.js),
+    //- and of PASSWORDLESS_ENABLED. Same shape and rules as the LDAP block
+    //- above: every field falls back to its env var when blank, the badge names
+    //- the source in effect, and the secret is never shown - the client only
+    //- ever receives "a secret is set" (see server/models/settings.js
+    //- saveOauthProviderSettings/getOauthProviderConfigSources).
+    if isAuthenticationSection "oauth"
+      li.accounts-form
+        .description {{_ 'oauth-providers-hint'}}
+      each oauthProviderList
+        li.accounts-form.js-oauth-provider(data-provider="{{key}}")
+          .title {{_ labelKey}}
+          a.flex.js-toggle-oauth-provider-enabled(data-provider="{{key}}")
+            .materialCheckBox.js-oauth-provider-enabled(class="{{#if oauthProviderEnabled key}}is-checked{{/if}}")
+            span= enabledVar
+            span.ldap-source-badge  ({{oauthProviderSourceLabel key 'enabled'}})
+          .form-group
+            label {{_ 'oauth-provider-client-id'}}
+            input.wekan-form-control(type="text" class="js-oauth-provider-field" data-provider="{{key}}" data-field="id" placeholder="{{idVar}}" value="{{oauthProviderFieldValue key 'id'}}")
+            span.ldap-source-badge  ({{oauthProviderSourceLabel key 'id'}})
+          .form-group
+            label {{_ 'oauth-provider-secret'}}
+            .description {{oauthProviderSecretStatusText key}}
+            input.wekan-form-control(type="password" class="js-oauth-provider-secret" data-provider="{{key}}" placeholder="{{secretVar}}" value="" autocomplete="new-password")
+          button.js-oauth-provider-save.primary(data-provider="{{key}}") {{_ 'save'}}
+      li.accounts-form
+        .title {{_ 'oauth-providers-login-style'}}
+        .form-group
+          select.wekan-form-control#oauth-providers-login-style
+            each oauthLoginStyleOptions
+              option(value=value selected=selected)= label
+          span.ldap-source-badge  ({{oauthSharedSourceLabel 'loginStyle'}})
+      li.accounts-form
+        a.flex.js-toggle-oauth-merge-existing-users
+          .materialCheckBox(class="{{#if currentSetting.oauthProvidersMergeExistingUsers}}is-checked{{/if}}")
+          span {{_ 'oauth-providers-merge-existing-users'}}
+          span.ldap-source-badge  ({{oauthSharedSourceLabel 'mergeExistingUsers'}})
+      //- #1904: restrict provider logins to email domains.
+      li.accounts-form
+        label(for="oauth-providers-allowed-email-domains") {{_ 'oauth-providers-allowed-email-domains'}}
+        .form-group
+          input.wekan-form-control#oauth-providers-allowed-email-domains(type="text" value="{{currentSetting.oauthProvidersAllowedEmailDomains}}" placeholder="example.com, example.org")
+          span.ldap-source-badge  ({{oauthSharedSourceLabel 'allowedEmailDomains'}})
+      li.accounts-form
+        button.js-oauth-shared-save.primary {{_ 'save'}}
+
+    if isAuthenticationSection "passwordless"
+      li.accounts-form
+        .description {{_ 'passwordless-hint'}}
+        a.flex.js-toggle-passwordless-enabled
+          .materialCheckBox(class="{{#if currentSetting.passwordlessEnabled}}is-checked{{/if}}")
+          span {{_ 'passwordless-enabled'}}
+          span.ldap-source-badge  ({{oauthSharedSourceLabel 'passwordless'}})
+      li.accounts-form
+        button.js-passwordless-save.primary {{_ 'save'}}
+
+//- The E-mail pane. Rendered by Admin Panel / People too - see the note above.
 template(name='email')
   ul#email-setting.setting-detail
-    //if isSandstorm
-    //
-      li.smtp-form
-    //
-        .title {{_ 'smtp-host'}}
-    //
-        .description {{_ 'smtp-host-description'}}
-    //
-        .form-group
-    //
-          input.wekan-form-control#mail-server-host(type="text", placeholder="smtp.domain.com" value="{{currentSetting.mailServer.host}}")
-    //
-      li.smtp-form
-    //
-        .title {{_ 'smtp-port'}}
-    //
-        .description {{_ 'smtp-port-description'}}
-    //
-        .form-group
-    //
-          input.wekan-form-control#mail-server-port(type="text", placeholder="25" value="{{currentSetting.mailServer.port}}")
-    //
-      li.smtp-form
-    //
-        .title {{_ 'smtp-username'}}
-    //
-        .form-group
-    //
-          input.wekan-form-control#mail-server-username(type="text", placeholder="{{_ 'username'}}" value="{{currentSetting.mailServer.username}}")
-    //
-      li.smtp-form
-    //
-        .title {{_ 'smtp-password'}}
-    //
-        .form-group
-    //
-          input.wekan-form-control#mail-server-password(type="password", placeholder="{{_ 'password'}}" value="")
-    //
-      li.smtp-form
-    //
-        .title {{_ 'smtp-tls'}}
-    //
-        .form-group
-    //
-          a.flex.js-toggle-tls
-    //
-            .materialCheckBox#mail-server-tls(class="{{#if currentSetting.mailServer.enableTLS}}is-checked{{/if}}")
-    //
-    //
-            span {{_ 'smtp-tls-description'}}
-    //
-    //
-      li.smtp-form
-    //
-        .title {{_ 'send-from'}}
-    //
-        .form-group
-    //
-          input.wekan-form-control#mail-server-from(type="email", placeholder="no-reply@domain.com" value="{{currentSetting.mailServer.from}}")
-    //
-    //
-      li
-    //
-        button.js-save.primary {{_ 'save'}}
-
     li
       button.js-send-smtp-test-email.primary {{_ 'send-smtp-test'}}
+    li.smtp-form
+      a.flex.js-toggle-admin-mail-settings
+        .materialCheckBox#admin-mail-settings-enabled(class="{{#if mailSettingsEnabled}}is-checked{{/if}}")
+        span Enable below email settings
+    if mailSettingsEnabled
+      li.smtp-form
+        .title Email service
+        .form-group
+          select.wekan-form-control#mail-service
+            each mailServices
+              option(value=value selected=selected)= label
+      if isCustomSmtp
+        li.smtp-form
+          .title {{_ 'smtp-host'}}
+          .description {{_ 'smtp-host-description'}}
+          .form-group
+            input.wekan-form-control#mail-server-host(type="text", placeholder="smtp.domain.com" value="{{mailConfiguration.host}}")
+        li.smtp-form
+          .title {{_ 'smtp-port'}}
+          .description {{_ 'smtp-port-description'}}
+          .form-group
+            input.wekan-form-control#mail-server-port(type="text", placeholder="587" value="{{mailConfiguration.port}}")
+        li.smtp-form
+          a.flex.js-toggle-tls
+            .materialCheckBox#mail-server-tls(class="{{#if mailConfiguration.secure}}is-checked{{/if}}")
+            span {{_ 'smtp-tls-description'}}
+      li.smtp-form
+        .title {{_ 'smtp-username'}}
+        .form-group
+          input.wekan-form-control#mail-server-username(type="text", placeholder="{{_ 'username'}}" value="{{mailConfiguration.username}}")
+      li.smtp-form
+        .title {{_ 'smtp-password'}}
+        .description {{passwordDescription}}
+        .form-group
+          input.wekan-form-control#mail-server-password(type="password", placeholder="{{_ 'password'}}" value="" autocomplete="new-password")
+      li.smtp-form
+        .title {{_ 'send-from'}}
+        .form-group
+          input.wekan-form-control#mail-server-from(type="text", placeholder="WeKan <no-reply@domain.com>" value="{{mailConfiguration.from}}")
+    li
+      button.mail-settings-save.primary {{_ 'save'}}
 
+    //- #794: what WeKan does with email that comes back - bounces, out-of-office
+      replies, complaints - and the addresses that bounced (emailBounces.jade).
+    +emailBounces
+
+    //- #2022: admin-customizable templates for WeKan's transactional emails.
+    //- Each field is OPTIONAL and empty by default - left blank, WeKan sends
+    //- its exact current hardcoded/i18n email content, unchanged. Filled in,
+    //- it replaces that email's subject/body, with the same {token}
+    //- substitution the Rules "send email" action already uses (see
+    //- r-email-vars-hint in rules). Password-reset / account-verification
+    //- emails are deliberately NOT covered here (see the comment below).
+    li
+      h2 {{_ 'email-templates-title'}}
+      //- Password-reset / account-verification emails are deliberately not
+      //- offered here at all - see the CLAUDE.md-mandated note above and
+      //- docs/Features - so there is nothing to warn about turning off.
+    li.smtp-form
+      .title {{_ 'email-templates-invite-subject'}}
+      .description {{_ 'email-templates-invite-vars-hint'}}
+      .form-group
+        input.wekan-form-control#email-template-invite-subject(type="text" value="{{currentSetting.inviteEmailSubjectTemplate}}")
+    li.smtp-form
+      .title {{_ 'email-templates-invite-body'}}
+      .description {{_ 'email-templates-invite-vars-hint'}}
+      .form-group
+        textarea.wekan-form-control#email-template-invite-body(data-editor-submit=".js-email-templates-save" rows="4")= currentSetting.inviteEmailBodyTemplate
+    li.smtp-form
+      .title {{_ 'email-templates-activity-subject'}}
+      .description {{_ 'email-templates-activity-vars-hint'}}
+      .form-group
+        input.wekan-form-control#email-template-activity-subject(type="text" value="{{currentSetting.activityEmailSubjectTemplate}}")
+    li.smtp-form
+      .title {{_ 'email-templates-activity-body'}}
+      .description {{_ 'email-templates-activity-vars-hint'}}
+      .form-group
+        textarea.wekan-form-control#email-template-activity-body(data-editor-submit=".js-email-templates-save" rows="4")= currentSetting.activityEmailBodyTemplate
+    li
+      button.js-email-templates-save.primary {{_ 'save'}}
+
+    li.smtp-form
+      //- Not "Email domain name": the field decides who may INVITE. A non-admin
+      //- whose address ends with this domain can send board invitations, and only
+      //- while self-registration is disabled - see isNonAdminAllowedToSendMail()
+      //- in server/models/settings.js. It restricts nothing about signing in.
+      .title {{_ 'email-domain-allowed-to-invite'}}
+      .form-group
+        input.wekan-form-control#mailDomainNamevalue(type="text", placeholder="" value="{{currentSetting.mailDomainName}}")
+    li.accounts-form
+      //- One checkbox, not a Yes/No pair: the setting is on or off, and this is the
+      //- checkbox the rest of the Admin Panel uses (Announcement's "Active
+      //- System-Wide Announcement" is the same markup). Ticked = e-mail changes are
+      //- allowed. The Save button below writes it, as it did the radios.
+      a.flex.js-toggle-allow-email-change
+        .materialCheckBox#accounts-allowEmailChange(class="{{#if allowEmailChange}}is-checked{{/if}}")
+        span {{_ 'accounts-allowEmailChange'}}
+    li
+      //- One Save, BELOW both settings it writes - the invite domain above and the
+      //- Yes/No beside it. It used to sit inside the Yes/No row, where it read as
+      //- part of that one radio pair.
+      button.js-save.primary {{_ 'save'}}
+
+
+//- Admin Panel / Settings / Visibility, in four named groups: what All Boards
+//- shows, the URLs, the product name and the logos. The groups are what makes a
+//- long single list readable - the settings themselves are unchanged, and so are
+//- their ids, so the one Save button at the bottom still reads every field it did
+//- before (it looks them up by id, not by position).
+//-
+//- A group title is smaller than the pane title above it (.admin-pane-group-title
+//- vs .admin-pane-title, settingBody.css), so the page reads as one heading with
+//- groups under it rather than as several pages.
 template(name='tableVisibilityModeSettings')
   ul#tableVisibilityMode-setting.setting-detail
+    //- Every group here writes the INSTANCE settings, so it is site-admin only.
+    //- The one exception is "Change color" below, which an Organization's own
+    //- admin sets for their Organization (models/lib/tenantAdmin.js themeTarget).
+    if isSiteAdmin
+      li
+        h2.admin-pane-group-title {{_ 'all-boards-hide'}}
+      //- One checkbox per setting instead of a Yes/No pair: each of these is on or
+      //- off, and the group's own title already says what ticking one means (All
+      //- Boards: Hide …). Same checkbox as everywhere else in the Admin Panel -
+      //- Announcement's "Active System-Wide Announcement" - so it has the plain
+      //- square when off, the green tick when on, and the animation between.
+      //- The Save button below reads the ticks, as it read the radios.
+      li.tableVisibilityMode-form
+        //- "Public boards", under the "All Boards: Hide" title above: ticked hides
+        //- them, which is what allowPrivateOnly does. The setting's own key keeps its
+        //- sentence - boardBody.jade shows it as the message on a board you may not
+        //- open, where a two-word label would say nothing.
+        a.flex.js-toggle-all-boards-hide
+          .materialCheckBox#accounts-allowPrivateOnly(class="{{#if allowPrivateOnly}}is-checked{{/if}}")
+          span {{_ 'public-boards'}}
+      li.tableVisibilityMode-form
+        //- #4475: ticked forbids anyone who is not a site admin from creating
+        //- new boards. Same Save button and same collection as the setting
+        //- above - only the checked key differs.
+        a.flex.js-toggle-all-boards-hide
+          .materialCheckBox#accounts-boardCreationAdminOnly(class="{{#if boardCreationAdminOnly}}is-checked{{/if}}")
+          span {{_ 'board-creation-admin-only'}}
+      li.tableVisibilityMode-form
+        //- #4575: ticked lets a board admin open an Instance or Public board
+        //- to editing by every signed-in user. Off: no board can.
+        a.flex.js-toggle-all-boards-hide
+          .materialCheckBox#accounts-allowInstanceEditing(class="{{#if allowInstanceEditing}}is-checked{{/if}}")
+          span {{_ 'instance-editing-allowed'}}
+      li.hideBoardActivities-form
+        a.flex.js-toggle-all-boards-hide
+          .materialCheckBox#hide-board-activities(class="{{#if currentSetting.hideBoardActivitiesOnAllBoards}}is-checked{{/if}}")
+          span {{_ 'board-activities'}}
+      li.tableVisibilityMode-form
+        a.flex.js-toggle-all-boards-hide
+          .materialCheckBox#hide-card-counter-list(class="{{#if currentSetting.hideCardCounterList}}is-checked{{/if}}")
+          span {{_ 'card-counter-list'}}
+      li.tableVisibilityMode-form
+        a.flex.js-toggle-all-boards-hide
+          .materialCheckBox#hide-board-member-list(class="{{#if currentSetting.hideBoardMemberList}}is-checked{{/if}}")
+          span {{_ 'board-member-list'}}
+      li.tableVisibilityMode-form
+        .title {{_ 'wait-spinner'}}
+        +selectSpinnerName(spinnerName=currentSetting.spinnerName)
+      //- #4421: an org whose "Public" means "public within our organization"
+      //- rather than public on the internet can replace the wording shown
+      //- under Private/Public in the board visibility popup and the
+      //- create-board popup. Empty = unchanged i18n default text
+      //- (imports/i18n/lib/visibilityDesc.js).
+      li.tableVisibilityMode-form
+        .title {{_ 'custom-private-desc'}}
+        .form-group
+          textarea.wekan-form-control#custom-private-board-desc(data-editor-submit=".js-visibility-all-boards-save" rows="2" placeholder="{{_ 'custom-private-desc-placeholder'}}")= currentSetting.customPrivateBoardDesc
+      li.tableVisibilityMode-form
+        .title {{_ 'custom-public-desc'}}
+        .form-group
+          textarea.wekan-form-control#custom-public-board-desc(data-editor-submit=".js-visibility-all-boards-save" rows="2" placeholder="{{_ 'custom-public-desc-placeholder'}}")= currentSetting.customPublicBoardDesc
+      li
+        //- One Save per section, at its end, above the rule that closes it. It writes
+        //- this section's fields and nothing else, so saving one group can never
+        //- overwrite what you were editing in another.
+        button.js-visibility-all-boards-save.primary {{_ 'save'}}
+
+      li.admin-pane-group-separator
+        hr
+      //- #6736: which optional features this WeKan offers. A ticked feature is
+      //- on for everyone; an unticked one is hidden from the interface (not
+      //- greyed out), keeps its data, and changes no permission. The rows come
+      //- from models/lib/instanceFeatures.js, so the page and the places that
+      //- hide a feature read the same catalog.
+      li
+        h2.admin-pane-group-title {{_ 'features'}}
+      li.tableVisibilityMode-form
+        .title {{_ 'features-desc'}}
+      each featureRows
+        li.tableVisibilityMode-form.js-feature-row(data-feature=key)
+          a.flex.js-toggle-feature
+            .materialCheckBox.js-feature-enabled(class="{{#if enabled}}is-checked{{/if}}")
+            span {{_ labelKey}}
+            if awaitingApproval
+              span.feature-awaiting-approval  {{_ 'feature-awaiting-approval'}}
+          .feature-desc {{_ descKey}}
+      li.tableVisibilityMode-form
+        a.flex.js-toggle-feature
+          .materialCheckBox#feature-approval-required(class="{{#if currentSetting.featureApprovalRequired}}is-checked{{/if}}")
+          span {{_ 'feature-approval-required'}}
+      li.tableVisibilityMode-form
+        a.flex.js-toggle-feature
+          .materialCheckBox#feature-preview-admins(class="{{#if currentSetting.featurePreviewAdmins}}is-checked{{/if}}")
+          span {{_ 'feature-preview-admins'}}
+      li.tableVisibilityMode-form
+        .title {{_ 'feature-pilot-users'}}
+        .form-group
+          textarea.wekan-form-control#feature-pilot-users(data-editor-submit=".js-visibility-features-save" rows="2" placeholder="{{_ 'feature-pilot-users-placeholder'}}")= featurePilotUsernames
+      //- The card fields every board shows: one tick per field type of Board
+      //- Settings / Card, all ticked by default. Unticked hides it on every
+      //- card, minicard and Board Settings / Card - visibility only, no data or
+      //- board setting changes. No ordering here: the order is each board's own.
+      //- models/lib/cardFieldVisibility.js
+      li.tableVisibilityMode-form
+        .title {{_ 'card-field-visibility'}}
+        .feature-desc {{_ 'card-field-visibility-desc'}}
+      each cardFieldRows
+        li.tableVisibilityMode-form.js-card-field-row(data-card-field=key)
+          a.flex.js-toggle-feature
+            .materialCheckBox.js-card-field-enabled(class="{{#if enabled}}is-checked{{/if}}")
+            span.card-field-visibility-label
+              each icon in icons
+                i.fa(class=icon)
+              |  {{title}}
+      li
+        button.js-visibility-features-save.primary {{_ 'save'}}
+        span.js-visibility-features-status
+
+      //- #2460: SQRL sign-in, and #4198: public boards on the fediverse
+        (ActivityPub) - optional features this WeKan offers, each off by
+        default and saved as soon as it is switched.
+      li.tableVisibilityMode-form
+        a.flex.js-toggle-sqrl
+          .materialCheckBox#sqrl-enabled(class="{{#if currentSetting.sqrlEnabled}}is-checked{{/if}}")
+          span {{_ 'sqrl-enabled'}}
+        .feature-desc {{_ 'sqrl-desc'}}
+      li.tableVisibilityMode-form
+        a.flex.js-toggle-activity-pub
+          .materialCheckBox#activity-pub-enabled(class="{{#if currentSetting.activityPubEnabled}}is-checked{{/if}}")
+          span {{_ 'activity-pub-enabled'}}
+        .feature-desc {{_ 'activity-pub-desc'}}
+
+      li.admin-pane-group-separator
+        hr
+      //- #2217: boards may show their Rules to members, read-only. Off by
+        default; each board admin then decides on the board's Rules page.
+      li
+        h2.admin-pane-group-title {{_ 'rules'}}
+      li.tableVisibilityMode-form
+        a.flex.js-toggle-rules-read-only
+          .materialCheckBox#rules-read-only-for-members(class="{{#if currentSetting.rulesReadOnlyForMembers}}is-checked{{/if}}")
+          span {{_ 'rules-read-only-for-members'}}
+        .feature-desc {{_ 'rules-read-only-for-members-desc'}}
+
+      li.admin-pane-group-separator
+        hr
+      //- Optional APIs (models/lib/optionalApis.js): REST APIs in the shape of
+        Trello's, Jira's, GitHub's and Gitea's, so their clients can use WeKan
+        as their backend. Each is off until ticked, and has no rights of its
+        own: it is WeKan's REST API, with the caller's own permissions.
+      li
+        h2.admin-pane-group-title {{_ 'optional-apis'}}
+      li.tableVisibilityMode-form
+        .title {{_ 'optional-apis-desc'}}
+      each optionalApiRows
+        li.tableVisibilityMode-form.js-optional-api-row(data-api=key)
+          a.flex.js-toggle-feature
+            .materialCheckBox.js-optional-api-enabled(class="{{#if enabled}}is-checked{{/if}}")
+            span {{_ labelKey}}
+          .feature-desc {{_ descKey}}
+          .feature-desc
+            code {{base}}
+      li
+        button.js-optional-apis-save.primary {{_ 'save'}}
+        span.js-optional-apis-status
+
+      li.admin-pane-group-separator
+        hr
+      li
+        h2.admin-pane-group-title {{_ 'date'}}
+      li.tableVisibilityMode-form
+        a.flex.js-toggle-date-format
+          .materialCheckBox#global-date-format-enabled(class="{{#if currentSetting.hideDateFormat}}is-checked{{/if}}")
+          span {{_ 'date-format'}}:
+        select.wekan-form-control#global-date-format(aria-label="{{_ 'date-format'}}")
+          option(value="YYYY-MM-DD" selected="{{#if isGlobalDateFormat 'YYYY-MM-DD'}}selected{{/if}}") {{_ 'date-format-yyyy-mm-dd'}} · {{_ 'time'}}
+          option(value="DD-MM-YYYY" selected="{{#if isGlobalDateFormat 'DD-MM-YYYY'}}selected{{/if}}") {{_ 'date-format-dd-mm-yyyy'}} · {{_ 'time'}}
+          option(value="MM-DD-YYYY" selected="{{#if isGlobalDateFormat 'MM-DD-YYYY'}}selected{{/if}}") {{_ 'date-format-mm-dd-yyyy'}} · {{_ 'time'}}
+          option(value="YYYY-MM-DD-date-only" selected="{{#if isGlobalDateFormat 'YYYY-MM-DD-date-only'}}selected{{/if}}") {{_ 'date'}}: {{_ 'date-format-yyyy-mm-dd'}}
+          option(value="DD-MM-YYYY-date-only" selected="{{#if isGlobalDateFormat 'DD-MM-YYYY-date-only'}}selected{{/if}}") {{_ 'date'}}: {{_ 'date-format-dd-mm-yyyy'}}
+          option(value="MM-DD-YYYY-date-only" selected="{{#if isGlobalDateFormat 'MM-DD-YYYY-date-only'}}selected{{/if}}") {{_ 'date'}}: {{_ 'date-format-mm-dd-yyyy'}}
+      li
+        button.js-visibility-date-save.primary {{_ 'save'}}
+      li.admin-pane-group-separator
+        hr
+      li
+        h2.admin-pane-group-title {{_ 'settings-group-url'}}
+      li
+        a(href="/support" style="text-decoration: underline; color: blue;") {{_ 'support'}}
+      li
+        a.flex.js-toggle-support
+          .materialCheckBox(class="{{#if currentSetting.supportPageEnabled}}is-checked{{/if}}")
+
+          span {{_ 'support-page-enabled'}}
+      li
+        .support-content(class="{{#if currentSetting.supportPageEnabled}}{{else}}hide{{/if}}")
+          ul
+            li
+              a.flex.js-toggle-support-public
+                .materialCheckBox(class="{{#if currentSetting.supportPagePublic}}is-checked{{/if}}")
+
+                span {{_ 'public'}}
+            li
+              .title {{_ 'support-title'}}
+              textarea#support-title.wekan-form-control(data-editor-submit=".js-visibility-url-save")= currentSetting.supportTitle
+            li
+              .title {{_ 'support-content'}}
+              textarea#support-page-text.wekan-form-control(data-editor-submit=".js-visibility-url-save")= currentSetting.supportPageText
+      li.tableVisibilityMode-form
+        .title {{_ 'custom-help-link-url'}}
+        .form-group
+          input.wekan-form-control#custom-help-link-url(type="text", placeholder="" value="{{currentSetting.customHelpLinkUrl}}")
+      li.tableVisibilityMode-form
+        .title {{_ 'custom-legal-notice-link-url'}}
+        .form-group
+          input.wekan-form-control#legalNoticevalue(type="text", placeholder="" value="{{currentSetting.legalNotice}}")
+      li.tableVisibilityMode-form
+        .title {{_ 'automatic-linked-url-schemes'}}
+        .description {{_ 'automatic-linked-url-schemes-hint'}}
+        .form-group
+          textarea#automatic-linked-url-schemes.wekan-form-control(data-editor-submit=".js-visibility-url-save")= currentSetting.automaticLinkedUrlSchemes
+      li
+        button.js-visibility-url-save.primary {{_ 'save'}}
+
+      li.admin-pane-group-separator
+        hr
+      li
+        //- wekan/wekan#3069: autolink bare "<prefix>NNNN" tokens (e.g. "#1234")
+        //- found in card descriptions/comments to an external issue tracker.
+        //- Leaving either field empty keeps this feature off (no-op).
+        h2.admin-pane-group-title {{_ 'external-link-pattern'}}
+        p.description {{_ 'external-link-pattern-description'}}
+      li.tableVisibilityMode-form
+        .title {{_ 'external-link-pattern-prefix'}}
+        .form-group
+          input.wekan-form-control#external-link-pattern-prefix(type="text", placeholder="#" value="{{currentSetting.externalLinkPatternPrefix}}")
+      li.tableVisibilityMode-form
+        .title {{_ 'external-link-pattern-url'}}
+        .form-group
+          input.wekan-form-control#external-link-pattern-url(type="text", placeholder="https://issues.example.com/browse/PROJ-{number}" value="{{currentSetting.externalLinkPatternUrl}}")
+      //- #1463: more rules, with {identifier}, and abbreviations for it.
+      li.tableVisibilityMode-form
+        .title {{_ 'external-link-rules'}}
+        p.description {{_ 'external-link-rules-description'}}
+        .form-group
+          textarea.wekan-form-control#external-link-rules(rows="4" placeholder="[{identifier}:{number}] = https://spirateam.example.com/SpiraTeam/{identifier}/{number}.aspx")= currentSetting.externalLinkRules
+      li.tableVisibilityMode-form
+        .title {{_ 'external-link-identifier-aliases'}}
+        .form-group
+          input.wekan-form-control#external-link-identifier-aliases(type="text", placeholder="TK=Task, IN=Incident" value="{{currentSetting.externalLinkIdentifierAliases}}")
+      li
+        button.js-visibility-external-link-pattern-save.primary {{_ 'save'}}
+
+      li.admin-pane-group-separator
+        hr
+      li
+        //- The group title IS the field's label here: the group holds one field, so a
+        //- title above a label that says the same thing said it twice. The group title
+        //- keeps its size and takes the field's existing translation.
+        h2.admin-pane-group-title {{_ 'custom-product-name'}}
+      li.tableVisibilityMode-form
+        .form-group
+          textarea.wekan-form-control#product-name(data-editor-submit=".js-visibility-product-name-save" rows="2" placeholder="")= currentSetting.productName
+      li
+        button.js-visibility-product-name-save.primary {{_ 'save'}}
+
+    //- The site theme. Same picker as the per-user "Change color", one layer
+    //- below it: whoever has not chosen a theme of their own sees this one
+    //- (docs/Theme/Theme.md). It applies immediately - the picker has no Save
+    //- button, like the per-user one.
+    if isSiteAdmin
+      li.admin-pane-group-separator
+        hr
+    li
+      h2.admin-pane-group-title {{_ 'change-color'}}
+      //- The site admin's colour is the one every Organization that has not set
+      //- its own inherits, so their pane says so; an Organization's own admin is
+      //- setting only their own and needs no such line.
+      if isSiteAdmin
+        h3.admin-pane-subgroup-title {{_ 'theme-override-all-tenants'}}
     li.tableVisibilityMode-form
-      .title {{_ 'tableVisibilityMode-allowPrivateOnly'}}
-      .form-group.flex
-        input.wekan-form-control#accounts-allowPrivateOnly(type="radio" name="allowPrivateOnly" value="true" checked="{{#if allowPrivateOnly}}checked{{/if}}")
-        label {{_ 'yes'}}
-        input.wekan-form-control#accounts-allowPrivateOnly(type="radio" name="allowPrivateOnly" value="false" checked="{{#unless allowPrivateOnly}}checked{{/unless}}")
-        label {{_ 'no'}}
-      button.js-tableVisibilityMode-save.primary {{_ 'save'}}
+      +themeColorPicker(scope="admin")
 
-template(name='accountSettings')
-  ul#account-setting.setting-detail
-    li.accounts-form
-      .title {{_ 'accounts-allowEmailChange'}}
-      .form-group.flex
-        input.wekan-form-control#accounts-allowEmailChange(type="radio" name="allowEmailChange" value="true" checked="{{#if allowEmailChange}}checked{{/if}}")
-        label {{_ 'yes'}}
-        input.wekan-form-control#accounts-allowEmailChange(type="radio" name="allowEmailChange" value="false" checked="{{#unless allowEmailChange}}checked{{/unless}}")
-        label {{_ 'no'}}
-      .title {{_ 'accounts-allowUserNameChange'}}
-      .form-group.flex
-        input.wekan-form-control#accounts-allowUserNameChange(type="radio" name="allowUserNameChange" value="true" checked="{{#if allowUserNameChange}}checked{{/if}}")
-        label {{_ 'yes'}}
-        input.wekan-form-control#accounts-allowUserNameChange(type="radio" name="allowUserNameChange" value="false" checked="{{#unless allowUserNameChange}}checked{{/unless}}")
-        label {{_ 'no'}}
-      .title {{_ 'accounts-allowUserDelete'}}
-      .form-group.flex
-        input.wekan-form-control#accounts-allowUserDelete(type="radio" name="allowUserDelete" value="true" checked="{{#if allowUserDelete}}checked{{/if}}")
-        label {{_ 'yes'}}
-        input.wekan-form-control#accounts-allowUserDelete(type="radio" name="allowUserDelete" value="false" checked="{{#unless allowUserDelete}}checked{{/unless}}")
-        label {{_ 'no'}}
-      button.js-accounts-save.primary {{_ 'save'}}
-
-    // Brute force lockout settings moved to People/Locked Users section
+    if isSiteAdmin
+      li.admin-pane-group-separator
+        hr
+      li
+        h2.admin-pane-group-title {{_ 'settings-group-logo'}}
+      li.tableVisibilityMode-form
+        //- One checkbox, like the All Boards group above and like Announcement's
+        //- "Active System-Wide Announcement": ticked = the logo is hidden. The
+        //- group's Save below writes it, as it wrote the Yes/No pair.
+        a.flex.js-toggle-hide-logo
+          .materialCheckBox#hide-logo(class="{{#if currentSetting.hideLogo}}is-checked{{/if}}")
+          span {{_ 'hide-logo'}}
+      li.tableVisibilityMode-form
+        .title {{_ 'custom-login-logo-image-url'}}
+        .form-group
+          input.wekan-form-control#custom-login-logo-image-url(type="text", placeholder="" value="{{currentSetting.customLoginLogoImageUrl}}")
+          input.js-site-logo-upload(type="file" data-kind="login" accept="image/png,image/jpeg,image/gif,image/webp" aria-label="{{_ 'upload'}} {{_ 'custom-login-logo-image-url'}}")
+      li.tableVisibilityMode-form
+        .title {{_ 'custom-login-logo-link-url'}}
+        .form-group
+          input.wekan-form-control#custom-login-logo-link-url(type="text", placeholder="" value="{{currentSetting.customLoginLogoLinkUrl}}")
+      li.tableVisibilityMode-form
+        .title {{_ 'text-below-custom-login-logo'}}
+        .form-group
+          textarea#text-below-custom-login-logo.wekan-form-control(data-editor-submit=".js-visibility-logo-save")= currentSetting.textBelowCustomLoginLogo
+      li.tableVisibilityMode-form
+        .title {{_ 'login-background-color'}}
+        .form-group
+          input.wekan-form-control#login-background-color(type="text", placeholder="#1b365d" value="{{currentSetting.loginBackgroundColor}}")
+      li.tableVisibilityMode-form
+        .title {{_ 'custom-top-left-corner-logo-image-url'}}
+        .form-group
+          input.wekan-form-control#custom-top-left-corner-logo-image-url(type="text", placeholder="" value="{{currentSetting.customTopLeftCornerLogoImageUrl}}")
+          input.js-site-logo-upload(type="file" data-kind="header" accept="image/png,image/jpeg,image/gif,image/webp" aria-label="{{_ 'upload'}} {{_ 'custom-top-left-corner-logo-image-url'}}")
+      li.tableVisibilityMode-form
+        span.js-site-logo-upload-status(role="status" aria-live="polite")
+      li.tableVisibilityMode-form
+        .title {{_ 'custom-top-left-corner-logo-link-url'}}
+        .form-group
+          input.wekan-form-control#custom-top-left-corner-logo-link-url(type="text", placeholder="" value="{{currentSetting.customTopLeftCornerLogoLinkUrl}}")
+      li.tableVisibilityMode-form
+        .title {{_ 'custom-top-left-corner-logo-height'}}
+        .form-group
+          input.wekan-form-control#custom-top-left-corner-logo-height(type="text", placeholder="" value="{{currentSetting.customTopLeftCornerLogoHeight}}")
+      li
+        button.js-visibility-logo-save.primary {{_ 'save'}}
 
 template(name='announcementSettings')
   ul#announcement-setting.setting-detail
@@ -263,7 +664,7 @@ template(name='announcementSettings')
         ul
           li
             .title {{_ 'admin-announcement-title'}}
-            textarea#admin-announcement.wekan-form-control= currentAnnouncements.body
+            textarea#admin-announcement.wekan-form-control(data-editor-submit=".js-announcement-save")= currentAnnouncements.body
           li
             button.js-announcement-save.primary {{_ 'save'}}
 
@@ -281,40 +682,15 @@ template(name='accessibilitySettings')
         ul
           li
             .title {{_ 'accessibility-title'}}
-            textarea#admin-accessibility-title.wekan-form-control= currentAccessibility.title
+            textarea#admin-accessibility-title.wekan-form-control(data-editor-submit=".js-accessibility-save")= currentAccessibility.title
           li
             .title {{_ 'accessibility-content'}}
-            textarea#admin-accessibility-content.wekan-form-control= currentAccessibility.body
+            textarea#admin-accessibility-content.wekan-form-control(data-editor-submit=".js-accessibility-save")= currentAccessibility.body
           li
             button.js-accessibility-save.primary {{_ 'save'}}
 
-template(name='layoutSettings')
+template(name='pwaSettings')
   ul#layout-setting.setting-detail
-    li
-      button.js-all-boards-hide-activities.primary {{_ 'hide-activities-of-all-boards'}}
-    li
-      a(href="/support" style="text-decoration: underline; color: blue;") {{_ 'support'}}
-    li
-      a.flex.js-toggle-support
-        .materialCheckBox(class="{{#if currentSetting.supportPageEnabled}}is-checked{{/if}}")
-
-        span {{_ 'support-page-enabled'}}
-    li
-      .support-content(class="{{#if currentSetting.supportPageEnabled}}{{else}}hide{{/if}}")
-        ul
-          li
-            a.flex.js-toggle-support-public
-              .materialCheckBox(class="{{#if currentSetting.supportPagePublic}}is-checked{{/if}}")
-
-              span {{_ 'public'}}
-          li
-            .title {{_ 'support-title'}}
-            textarea#support-title.wekan-form-control= currentSetting.supportTitle
-          li
-            .title {{_ 'support-content'}}
-            textarea#support-page-text.wekan-form-control= currentSetting.supportPageText
-          li
-            button.js-support-save.primary {{_ 'save'}}
     li
       a.flex.js-toggle-custom-head
         .materialCheckBox(class="{{#if currentSetting.customHeadEnabled}}is-checked{{/if}}")
@@ -324,10 +700,10 @@ template(name='layoutSettings')
         ul
           li
             .title {{_ 'custom-head-meta-tags'}}
-            textarea#custom-head-meta.wekan-form-control= customHeadMetaTagsValue
+            textarea#custom-head-meta.wekan-form-control(data-editor-submit=".js-custom-head-save")= customHeadMetaTagsValue
           li
             .title {{_ 'custom-head-link-tags'}}
-            textarea#custom-head-links.wekan-form-control= customHeadLinkTagsValue
+            textarea#custom-head-links.wekan-form-control(data-editor-submit=".js-custom-head-save")= customHeadLinkTagsValue
           li
             a.flex.js-toggle-custom-manifest
               .materialCheckBox(class="{{#if currentSetting.customManifestEnabled}}is-checked{{/if}}")
@@ -335,7 +711,7 @@ template(name='layoutSettings')
           li
             .custom-manifest-settings(class="{{#if currentSetting.customManifestEnabled}}{{else}}hide{{/if}}")
               .title {{_ 'custom-head-manifest-content'}}
-              textarea#custom-manifest-content.wekan-form-control= customManifestContentValue
+              textarea#custom-manifest-content.wekan-form-control(data-editor-submit=".js-custom-head-save")= customManifestContentValue
           li
             button.js-custom-head-save.primary {{_ 'save'}}
     li
@@ -347,106 +723,22 @@ template(name='layoutSettings')
         ul
           li
             .title {{_ 'custom-assetlinks-content'}}
-            textarea#custom-assetlinks-content.wekan-form-control= customAssetLinksContentValue
+            textarea#custom-assetlinks-content.wekan-form-control(data-editor-submit=".js-custom-assetlinks-save")= customAssetLinksContentValue
           li
             button.js-custom-assetlinks-save.primary {{_ 'save'}}
-    li.layout-form
-      .title {{_ 'oidc-button-text'}}
-      .form-group
-        input.wekan-form-control#oidcBtnTextvalue(type="text", placeholder="" value="{{currentSetting.oidcBtnText}}")
-    li.layout-form
-      .title {{_ 'can-invite-if-same-mailDomainName'}}
-      .form-group
-        input.wekan-form-control#mailDomainNamevalue(type="text", placeholder="" value="{{currentSetting.mailDomainName}}")
-    li.layout-form
-      .title {{_ 'custom-legal-notice-link-url'}}
-      .form-group
-        input.wekan-form-control#legalNoticevalue(type="text", placeholder="" value="{{currentSetting.legalNotice}}")
-    li.layout-form
-      .title {{_ 'display-authentication-method'}}
-      .form-group.flex
-        input.wekan-form-control#display-authentication-method(type="radio" name="displayAuthenticationMethod" value="true" checked="{{#if currentSetting.displayAuthenticationMethod}}checked{{/if}}")
-        label {{_ 'yes'}}
-        input.wekan-form-control#display-authentication-method(type="radio" name="displayAuthenticationMethod" value="false" checked="{{#unless currentSetting.displayAuthenticationMethod}}checked{{/unless}}")
-        label {{_ 'no'}}
-    li.layout-form
-      .title {{_ 'default-authentication-method'}}
-      +selectAuthenticationMethod(authenticationMethod=currentSetting.defaultAuthenticationMethod)
-    li.layout-form
-      .title {{_ 'wait-spinner'}}
-      +selectSpinnerName(spinnerName=currentSetting.spinnerName)
-    li.layout-form
-      .title {{_ 'custom-product-name'}}
-      .form-group
-        input.wekan-form-control#product-name(type="text", placeholder="" value="{{currentSetting.productName}}")
-    li.layout-form
-      .title {{_ 'hide-logo'}}
-      .form-group.flex
-        input.wekan-form-control#hide-logo(type="radio" name="hideLogo" value="true" checked="{{#if currentSetting.hideLogo}}checked{{/if}}")
-        label {{_ 'yes'}}
-        input.wekan-form-control#hide-logo(type="radio" name="hideLogo" value="false" checked="{{#unless currentSetting.hideLogo}}checked{{/unless}}")
-        label {{_ 'no'}}
-    li.layout-form
-      .title {{_ 'custom-login-logo-image-url'}}
-      .form-group
-        input.wekan-form-control#custom-login-logo-image-url(type="text", placeholder="" value="{{currentSetting.customLoginLogoImageUrl}}")
-    li.layout-form
-      .title {{_ 'custom-login-logo-link-url'}}
-      .form-group
-        input.wekan-form-control#custom-login-logo-link-url(type="text", placeholder="" value="{{currentSetting.customLoginLogoLinkUrl}}")
-    li.layout-form
-      .title {{_ 'custom-help-link-url'}}
-      .form-group
-        input.wekan-form-control#custom-help-link-url(type="text", placeholder="" value="{{currentSetting.customHelpLinkUrl}}")
-    li.layout-form
-      .title {{_ 'text-below-custom-login-logo'}}
-      .form-group
-        textarea#text-below-custom-login-logo.wekan-form-control= currentSetting.textBelowCustomLoginLogo
-    li.layout-form
-      .title {{_ 'custom-top-left-corner-logo-image-url'}}
-      .form-group
-        input.wekan-form-control#custom-top-left-corner-logo-image-url(type="text", placeholder="" value="{{currentSetting.customTopLeftCornerLogoImageUrl}}")
-    li.layout-form
-      .title {{_ 'custom-top-left-corner-logo-link-url'}}
-      .form-group
-        input.wekan-form-control#custom-top-left-corner-logo-link-url(type="text", placeholder="" value="{{currentSetting.customTopLeftCornerLogoLinkUrl}}")
-    li.layout-form
-      .title {{_ 'custom-top-left-corner-logo-height'}}
-      .form-group
-        input.wekan-form-control#custom-top-left-corner-logo-height(type="text", placeholder="" value="{{currentSetting.customTopLeftCornerLogoHeight}}")
-    li.layout-form
-      .title {{_ 'automatic-linked-url-schemes'}}
-      .form-group
-        textarea#automatic-linked-url-schemes.wekan-form-control= currentSetting.automaticLinkedUrlSchemes
-    li.layout-form
-      .title {{_ 'hide-card-counter-list'}}
-      .form-group.flex
-        input.wekan-form-control#hide-card-counter-list(type="radio" name="hideCardCounterList" value="true" checked="{{#if currentSetting.hideCardCounterList}}checked{{/if}}")
-        label {{_ 'yes'}}
-        input.wekan-form-control#hide-card-counter-list(type="radio" name="hideCardCounterList" value="false" checked="{{#unless currentSetting.hideCardCounterList}}checked{{/unless}}")
-        label {{_ 'no'}}
-    li.layout-form
-      .title {{_ 'hide-board-member-list'}}
-      .form-group.flex
-        input.wekan-form-control#hide-board-member-list(type="radio" name="hideBoardMemberList" value="true" checked="{{#if currentSetting.hideBoardMemberList}}checked{{/if}}")
-        label {{_ 'yes'}}
-        input.wekan-form-control#hide-board-member-list(type="radio" name="hideBoardMemberList" value="false" checked="{{#unless currentSetting.hideBoardMemberList}}checked{{/unless}}")
-        label {{_ 'no'}}
-    li
-      button.js-save-layout.primary {{_ 'save'}}
-
-template(name='selectAuthenticationMethod')
-  select#defaultAuthenticationMethod
-    each authentications
-      if isSelected value
-        option(value="{{value}}" selected) {{_ value}}
-      else
-        option(value="{{value}}") {{_ value}}
-
 template(name='selectSpinnerName')
-  select#spinnerName
-    each spinner in spinners
-      if isSelected spinner
-        option(value="{{spinner}}" selected) {{_ spinner}}
-      else
-        option(value="{{spinner}}") {{_ spinner}}
+  //- The dropdown and a live preview of the spinner it names, side by side. When
+  //- there is not enough room for both, the preview wraps BELOW the dropdown -
+  //- which is what flex-wrap does on its own, so no width is guessed here or in a
+  //- media query (settingBody.css .spinner-select-row).
+  .spinner-select-row
+    select#spinnerName
+      each spinner in spinners
+        if isSelected spinner
+          option(value="{{spinner}}" selected) {{_ spinner}}
+        else
+          option(value="{{spinner}}") {{_ spinner}}
+    .spinner-preview(title="{{_ 'preview'}}" aria-label="{{_ 'preview'}}")
+      //- Follows the DROPDOWN, not the saved setting: an admin sees what they are
+      //- about to save before pressing Save.
+      +Template.dynamic(template=previewTemplate)

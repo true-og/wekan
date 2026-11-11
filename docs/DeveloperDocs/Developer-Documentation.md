@@ -22,7 +22,7 @@ Please read the meteor style guide before making any significant contribution.
 
 ## Building code and submitting pull request
 
-- [Building code and submitting pull request](emoji#how-you-could-add-another-plugin)
+- [Building code and submitting pull request](../Features/General/Editor/Emoji.md#how-you-could-add-another-plugin)
 - When you start `meteor` command, it watches for changes to files in wekan directory and subdirectories, and if it detects changed code, it starts rebuilding bundle and then reloads webbrowser after that automatically
 - Also look at meteor changelog mentioned new feature `hot reload` how that could make reloading faster
 
@@ -43,16 +43,16 @@ When you run this, you see .jade template files where is search input box, and .
 
 ## Getting Started
 
-- Currently Wekan development is done mainly at Ubuntu 20.10 64bit, but building Wekan does work on any Debian, Ubuntu, WSL Ubuntu 20.04, [Mac](Mac). Sametime maybe on [Windows](Windows) with `choco install -y meteor` and installing packages it then asks for with `meteor add ...` or `meteor npm install --save ...` and then running meteor again.
+- Currently Wekan development is done mainly at Ubuntu 20.10 64bit, but building Wekan does work on any Debian, Ubuntu, WSL Ubuntu 20.04, [Mac](../Platforms/Propietary/OS/Mac). Sametime maybe on [Windows](../Platforms/Propietary/OS/Windows) with `choco install -y meteor` and installing packages it then asks for with `meteor add ...` or `meteor npm install --save ...` and then running meteor again.
   - Look through old [pull requests](https://github.com/wekan/wekan/pulls)
   - Read Wekan source code, you can use some git history viewer GUI like gitk
-  - Read [Meteor documentation](https://docs.meteor.com/) for [Meteor version](https://github.com/wekan/wekan/blob/main/.meteor/release) in use, other versions mentioned at [Dockerfile](https://github.com/wekan/wekan/blob/main/Dockerfile)
+  - Read [Meteor documentation](https://docs.meteor.com/) for [Meteor version](../../.meteor/release) in use, other versions mentioned at [Dockerfile](../../Dockerfile)
 - Docker up-to-date way: You can  clone wekan/wekan repo and update docker-compose.yml file ROOT_URL etc as documented at https://github.com/wekan/wekan commented `docker-compose.yml` file, install docker, and build from source with docker with `docker compose up -d --build`
 - Docker not up-to-date way: [Docker environment for Wekan development](https://github.com/wekan/wekan-dev). 
 
 ## Pull Request Workflow (Please read before submitting PR's)
 
-- If package is available on meteor https://atmospherejs.com `meteor add packagename` or https://www.npmjs.com `meteor npm install packagename` then it's enough to add package that way, and there is no need to clone repo in [rebuild-wekan.sh](https://github.com/wekan/wekan-maintainer/tree/master/releases) script.
+- If package is available on meteor https://atmospherejs.com `meteor add packagename` or https://www.npmjs.com `meteor npm install packagename` then it's enough to add package that way, and there is no need to clone repo in [build.sh](https://github.com/wekan/wekan-maintainer/tree/master/releases) script.
 - When doing pull requests, only add additions and changes to English at wekan/i18n/en.i18n.json . Other translations are done at [https://app.transifex.com/wekan/](https://app.transifex.com/wekan/).
 - If you have fix to some existing pull request, add your fix as comment. Do not post new pull request.
 - For new features add new pull request, if there is none already.
@@ -95,7 +95,7 @@ It's possible to import your existing boards from Trello. Instructions [[here|mi
 
 # Directory Structure Details
 
-[Directory Structure](Directory-Structure)
+[Directory Structure](Directory-Structure.md)
 
 # Chat
 

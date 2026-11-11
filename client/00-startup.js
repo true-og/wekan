@@ -1,7 +1,13 @@
 // Fix dynamic-import chunk loading when Wekan runs under a sub-path (ROOT_URL includes a pathname,
-// e.g. https://example.com/wekan). Rspack uses __webpack_public_path__ to prefix chunk URLs; by
-// default it is set to /build-chunks/ (no context path). We update it here, at module evaluation
-// time, before any import() expression runs (those are deferred to Meteor.startup callbacks).
+// e.g. https://example.com/wekan). Rspack's runtime builds every chunk URL as
+// __webpack_public_path__ + chunkName, and the chunk name ALREADY includes the "build-chunks/"
+// prefix (its runtime does `u = e => "build-chunks/" + e + "." + hash + ".js"`). The default
+// public path is "/", so at the site root chunks correctly resolve to "/build-chunks/<chunk>".
+// Under a sub-path we must prefix that sub-path — but must NOT re-add "build-chunks/" ourselves,
+// or the URL becomes "/wekan/build-chunks/build-chunks/<chunk>" and 404s (issue #6445, which broke
+// the lazy-loaded language chunks). So set the public path to "<sub-path>/" and let rspack append
+// "build-chunks/" itself. Done here at module evaluation time, before any import() expression runs
+// (those are deferred to Meteor.startup callbacks).
 /* global __webpack_public_path__:writable */
 try {
   const _cfg = typeof window !== 'undefined' && window.__meteor_runtime_config__;
@@ -9,9 +15,30 @@ try {
   if (_rootUrl) {
     const _rootPath = new URL(_rootUrl).pathname.replace(/\/+$/, '');
     if (_rootPath && _rootPath !== '/') {
-      __webpack_public_path__ = _rootPath + '/build-chunks/';
+      __webpack_public_path__ = _rootPath + '/';
     }
   }
+} catch (_) {}
+
+// Expose Meteor on window. Under the Meteor 3.5 + rspack build, bare `Meteor`
+// references in app code are rewritten by rspack's ProvidePlugin into per-module
+// imports, so `Meteor` is NOT placed on the browser `window` the way the classic
+// Meteor linker did. Re-expose it so the browser console and the Playwright e2e
+// tests (which call Meteor.loginWithToken / Meteor.userId / Meteor.subscribe etc.
+// via page.evaluate in window scope) can reach it. This matches the long-standing
+// classic-Meteor behaviour where `Meteor` is a global.
+if (typeof window !== 'undefined') {
+  window.Meteor = Meteor;
+}
+
+// #6752: a ROOT_URL left at the snap's 127.0.0.1 default made every
+// copied link point at 127.0.0.1. When the browser reached WeKan through
+// another address, build absolute links from that address instead
+// (models/lib/browserRootUrl.js says when, and why only then).
+try {
+  const { browserRootUrl } = require('/models/lib/browserRootUrl');
+  const rootUrl = browserRootUrl(Meteor.absoluteUrl.defaultOptions.rootUrl, window.location.href);
+  if (rootUrl) Meteor.absoluteUrl.defaultOptions.rootUrl = rootUrl;
 } catch (_) {}
 
 // Fix bug in jam:offline 0.4.1: s?.message.includes() crashes when s.message is
@@ -35,7 +62,10 @@ try {
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', function() {
     const swPath = new URL('pwa-service-worker.js', Meteor.absoluteUrl()).pathname;
-    navigator.serviceWorker.register(swPath);
+    navigator.serviceWorker.register(swPath).catch(error => {
+      // No service worker (a private window, an old browser): the app works without the offline cache.
+      if (process.env.DEBUG === 'true') console.warn('service worker registration failed:', error);
+    });
   });
 }
 
@@ -51,112 +81,59 @@ import { Utils } from '/client/lib/utils';
 // import '/client/lib/attachmentMigrationManager';
 // import '/client/components/settings/migrationProgress';
 
-// Import cron settings - COMMENTED OUT
-// import '/client/components/settings/cronSettings';
 // Custom head tags
 
-// Mirror Meteor login token into a cookie for server-side file route auth
-// This enables cookie-based auth for /cdn/storage/* without leaking ROOT_URL
-// Token already lives in localStorage; cookie adds same-origin send-on-request semantics
-Meteor.startup(() => {
-  const COOKIE_NAME = 'meteor_login_token';
-  const USER_ID_COOKIE = 'meteor_user_id';
-  const TOKEN_EXPIRES_COOKIE = 'meteor_login_token_expires';
+// Accounts may already have resumed a legacy localStorage session before the
+// application module loads. Move its credentials to memory without a second
+// login: that login rebuilds subscriptions and can discard the current profile
+// (#6677). Keep the poller's token in sync and let the native endpoint validate
+// the token when creating the HttpOnly cookie. An in-flight initial login still
+// finishes through Accounts' normal callback.
+const { installAccountsCookiePaths } = require('/imports/lib/accountsCookiePaths');
+installAccountsCookiePaths(Accounts, Meteor.absoluteUrl(), (...args) => fetch(...args));
 
-  const getCookie = (name) => {
-    try {
-      const parts = document.cookie ? document.cookie.split(';') : [];
-      for (const part of parts) {
-        const [k, ...rest] = part.trim().split('=');
-        if (decodeURIComponent(k) === name) {
-          return decodeURIComponent(rest.join('='));
-        }
-      }
-    } catch (_) {}
-    return '';
-  };
-
-  const cookieAttrs = () => {
-    const attrs = ['Path=/', 'SameSite=Lax'];
-    try {
-      if (window.location && window.location.protocol === 'https:') {
-        attrs.push('Secure');
-      }
-    } catch (_) {}
-    return attrs.join('; ');
-  };
-
-  const setCookie = (name, value) => {
-    if (!value) return;
-    document.cookie = `${encodeURIComponent(name)}=${encodeURIComponent(value)}; ${cookieAttrs()}`;
-  };
-  const clearCookie = (name) => {
-    document.cookie = `${encodeURIComponent(name)}=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; ${cookieAttrs()}`;
-  };
-
-  const syncCookie = () => {
-    try {
-      const token = Accounts && typeof Accounts._storedLoginToken === 'function' ? Accounts._storedLoginToken() : null;
-      if (token) setCookie(COOKIE_NAME, token); else clearCookie(COOKIE_NAME);
-    } catch (e) {
-      // ignore
-    }
-  };
-
-  const bootstrapTokenFromCookie = () => {
-    try {
-      const currentToken = Accounts && typeof Accounts._storedLoginToken === 'function'
-        ? Accounts._storedLoginToken()
-        : null;
-      if (currentToken) {
-        return;
-      }
-
-      const token = getCookie(COOKIE_NAME);
-      const userId = getCookie(USER_ID_COOKIE);
-      const tokenExpiresRaw = getCookie(TOKEN_EXPIRES_COOKIE);
-      const tokenExpires = tokenExpiresRaw ? new Date(tokenExpiresRaw) : null;
-
-      if (!token || !userId || !tokenExpires || Number.isNaN(tokenExpires.getTime())) {
-        return;
-      }
-
-      if (Accounts && typeof Accounts._storeLoginToken === 'function') {
-        Accounts._storeLoginToken(userId, token, tokenExpires);
-        if (Meteor.status && !Meteor.status().connected && typeof Meteor.reconnect === 'function') {
-          Meteor.reconnect();
-        }
-      }
-    } catch (_) {
-      // ignore
-    }
-  };
-
-  bootstrapTokenFromCookie();
-
-  // Initial sync on startup
-  syncCookie();
-
-  // Keep cookie in sync on login/logout
-  if (Accounts && typeof Accounts.onLogin === 'function') Accounts.onLogin(syncCookie);
-  if (Accounts && typeof Accounts.onLogout === 'function') Accounts.onLogout(syncCookie);
-
-  // Sync across tabs/windows when localStorage changes
-  window.addEventListener('storage', (ev) => {
-    if (ev && typeof ev.key === 'string' && ev.key.indexOf('Meteor.loginToken') !== -1) {
-      syncCookie();
-    }
-  });
-
-});
+const legacyResumeToken = Accounts._storedLoginToken();
+const legacyUserId = Accounts._storedUserId();
+const legacyTokenExpires = Accounts._storedLoginTokenExpires();
+// Remove the old persistent copy; subsequent Accounts writes go to memory.
+if (legacyResumeToken) Accounts._unstoreLoginToken();
+Accounts.config({ clientStorage: 'none', useHttpOnlyCookies: true });
+if (legacyResumeToken) {
+  Accounts._storeLoginToken(legacyUserId, legacyResumeToken, legacyTokenExpires);
+  Accounts._setHttpOnlyCookie(legacyResumeToken, legacyTokenExpires);
+} else {
+  Accounts.loginWithCookie();
+}
 
 // Subscribe to per-user small publications
 Meteor.startup(() => {
   Tracker.autorun(() => {
     if (Meteor.userId()) {
-      Meteor.subscribe('userGreyIcons');
       Meteor.subscribe('userDesktopDragHandles');
+      Meteor.subscribe('userBoardView');
     }
+  });
+
+  // LOGOUT_IDLE_MINUTES: report the user's activity while signed in, if the
+  // limit is set (models/lib/idleLogout.js).
+  const { createIdleActivityReporter } = require('/client/lib/idleActivity');
+  const idleReporter = createIdleActivityReporter({
+    target: document,
+    touch: () => Meteor.call('touchActivity', () => {}),
+  });
+  let idleCheckedFor = null;
+  Tracker.autorun(() => {
+    const userId = Meteor.userId();
+    if (!userId) {
+      idleCheckedFor = null;
+      idleReporter.stop();
+      return;
+    }
+    if (idleCheckedFor === userId) return;
+    idleCheckedFor = userId;
+    Meteor.call('getIdleLogout', (error, result) => {
+      if (!error && result && result.enabled && Meteor.userId() === userId) idleReporter.start();
+    });
   });
 
   // Initialize mobile mode on startup for iOS devices

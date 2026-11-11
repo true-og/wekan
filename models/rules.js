@@ -1,5 +1,9 @@
 import { ReactiveCache } from '/imports/reactiveCache';
 import { Mongo } from 'meteor/mongo';
+import { Meteor } from 'meteor/meteor';
+import Triggers from './triggers';
+import Actions from './actions';
+import { generateDefaultRuleTitle } from './lib/generateDefaultRuleTitle';
 const { SimpleSchema } = require('/imports/simpleSchema');
 
 const Rules = new Mongo.Collection('rules');
@@ -9,6 +13,36 @@ Rules.attachSchema(
     title: {
       type: String,
       optional: false,
+      // #4294: a rule created with no title used to store an empty string
+      // (the client-side "Add Rule" gate is the primary defence against
+      // that, but every creation path goes through this schema, including
+      // the rules.createRule server method and the rules-workflow canvas).
+      // Once trigger+action are known, generate a sensible default instead
+      // of leaving the rule unnamed; an existing/explicit title always wins.
+      // eslint-disable-next-line consistent-return
+      autoValue() {
+        const value = this.value;
+        if (value !== undefined && value !== null && `${value}`.trim() !== '') {
+          return value;
+        }
+        if (this.isInsert) {
+          const triggerId = this.field('triggerId').value;
+          const actionId = this.field('actionId').value;
+          try {
+            const trigger = triggerId && Triggers.findOne(triggerId);
+            const action = actionId && Actions.findOne(actionId);
+            return generateDefaultRuleTitle(
+              trigger && trigger.desc,
+              action && action.desc,
+            );
+          } catch (e) {
+            return 'Rule';
+          }
+        }
+        // An update that sent no title (e.g. a partial $set from elsewhere)
+        // must not blank out an existing one.
+        this.unset();
+      },
     },
     triggerId: {
       type: String,
@@ -18,9 +52,56 @@ Rules.attachSchema(
       type: String,
       optional: false,
     },
+    // #4294 / #2953: further triggers (the rule fires when ANY fires) and
+    // further actions (run in order after actionId). See models/lib/ruleParts.js.
+    extraTriggerIds: {
+      type: Array,
+      optional: true,
+      maxCount: 10,
+    },
+    'extraTriggerIds.$': { type: String },
+    extraActionIds: {
+      type: Array,
+      optional: true,
+      maxCount: 10,
+    },
+    'extraActionIds.$': { type: String },
     boardId: {
       type: String,
       optional: false,
+    },
+    // Denormalised manual-button metadata (only present on button rules). The
+    // board view renders board/card buttons from the rule alone — see
+    // server/rulesButton.js (rules.createRule) for why the trigger document is
+    // not relied upon on the client.
+    buttonType: {
+      type: String,
+      optional: true,
+      allowedValues: ['card', 'board'],
+    },
+    buttonLabel: {
+      type: String,
+      optional: true,
+    },
+    // #2322: temporarily disable a rule without deleting it. Defaults to
+    // `true` so every rule that existed before this field was added (and any
+    // rule created without explicitly setting it) keeps firing exactly as
+    // before - only an explicit flip to `false` (rules.setEnabled) stops a
+    // rule's trigger/action from being evaluated; its Trigger/Action
+    // documents and the rule's own configuration are untouched either way.
+    description: {
+      /**
+       * What the rule is for, in Markdown. An imported GitHub Actions
+       * workflow keeps its YAML here (models/lib/githubActionsRules.js).
+       */
+      type: String,
+      optional: true,
+      max: 200000,
+    },
+    enabled: {
+      type: Boolean,
+      optional: true,
+      defaultValue: true,
     },
     createdAt: {
       type: Date,
@@ -70,5 +151,15 @@ Rules.helpers({
     return ReactiveCache.getAction(this.actionId);
   },
 });
+
+if (Meteor.isServer) {
+  // Admin Panel / Problems / Rules pages every rule sorted by board, and counts
+  // them with the same selector (server/publications/rules.js). Without an index
+  // that is a full-collection scan plus an in-memory sort for every page of ten.
+  const { ensureIndex } = require('/server/lib/mongoStartup');
+  Meteor.startup(async () => {
+    await ensureIndex(Rules, { boardId: 1 });
+  });
+}
 
 export default Rules;

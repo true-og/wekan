@@ -3,12 +3,52 @@
  */
 
 /**
+ * Normalize non-Latin (Unicode) digits in a string to ASCII 0-9 so that
+ * date/time strings produced or displayed in locales that use their own
+ * number systems (e.g. Persian/Farsi ۰۱۲۳۴۵۶۷۸۹ or Arabic-Indic ٠١٢٣٤٥٦٧٨٩)
+ * can be parsed by the native `Date` constructor, which only understands
+ * ASCII digits. See issue #5752.
+ *
+ * Covered ranges:
+ *   - Extended Arabic-Indic / Persian digits: U+06F0–U+06F9
+ *   - Arabic-Indic digits:                    U+0660–U+0669
+ *
+ * Non-string values are returned unchanged, and strings without non-Latin
+ * digits are returned unmodified, so the normal ASCII path is untouched.
+ *
+ * @param {*} value - Value that may contain non-Latin digits
+ * @returns {*} The value with any Persian/Arabic-Indic digits replaced by ASCII
+ */
+export function normalizeDigits(value) {
+  if (typeof value !== 'string') return value;
+
+  return value.replace(/[۰-۹٠-٩]/g, ch => {
+    const code = ch.charCodeAt(0);
+    // Persian / Extended Arabic-Indic (U+06F0 = 0)
+    if (code >= 0x06f0 && code <= 0x06f9) return String(code - 0x06f0);
+    // Arabic-Indic (U+0660 = 0)
+    return String(code - 0x0660);
+  });
+}
+
+/**
+ * Construct a Date from a value, first normalizing any non-Latin digits when
+ * the value is a string. Mirrors `new Date(value)` for every other input type.
+ *
+ * @param {Date|string|number} value - Value to convert to a Date
+ * @returns {Date} The resulting Date (possibly invalid, like `new Date`)
+ */
+function toDate(value) {
+  return new Date(normalizeDigits(value));
+}
+
+/**
  * Format a date to YYYY-MM-DD HH:mm format
  * @param {Date|string} date - Date to format
  * @returns {string} Formatted date string
  */
 export function formatDateTime(date) {
-  const d = new Date(date);
+  const d = toDate(date);
   if (isNaN(d.getTime())) return '';
 
   const year = d.getFullYear();
@@ -26,7 +66,7 @@ export function formatDateTime(date) {
  * @returns {string} Formatted date string
  */
 export function formatDate(date) {
-  const d = new Date(date);
+  const d = toDate(date);
   if (isNaN(d.getTime())) return '';
 
   const year = d.getFullYear();
@@ -37,25 +77,73 @@ export function formatDate(date) {
 }
 
 /**
+ * The calendar parts of a date IN A GIVEN TIME ZONE.
+ *
+ * #6586: a date is stored in UTC, and `getFullYear()` / `getHours()` answer in
+ * whatever zone the process runs in. In a browser that is the reader's own zone
+ * and is right; on the SERVER, where the exports are built, it is the server's -
+ * so a due date set for 14:00 in Berlin was printed as 12:00 ("-2h wrong for
+ * Europe/Berlin"), and a server started with a different TZ would have printed
+ * a third time. An explicit IANA zone removes the guess.
+ *
+ * @param {Date} d - the date
+ * @param {string} timeZone - IANA name, e.g. 'Europe/Berlin'
+ * @returns {object|null} {year, month, day, hours, minutes} as padded strings,
+ *   or null when the runtime does not know the zone
+ */
+function dateParcelsIn(d, timeZone) {
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hour12: false,
+    }).formatToParts(d).reduce((acc, part) => {
+      acc[part.type] = part.value;
+      return acc;
+    }, {});
+    if (!parts.year) return null;
+    return {
+      year: parts.year,
+      month: parts.month,
+      day: parts.day,
+      // 'en-CA' with hour12:false gives 24 for midnight in some runtimes.
+      hours: parts.hour === '24' ? '00' : parts.hour,
+      minutes: parts.minute,
+    };
+  } catch (error) {
+    return null;
+  }
+}
+
+/**
  * Format a date according to user's preferred format
  * @param {Date|string} date - Date to format
- * @param {string} format - Format string (YYYY-MM-DD, DD-MM-YYYY, MM-DD-YYYY)
+ * @param {string} format - YYYY-MM-DD, DD-MM-YYYY, or MM-DD-YYYY;
+ *   append -date-only to suppress time regardless of includeTime.
  * @param {boolean} includeTime - Whether to include time (HH:MM)
+ * @param {string} [timeZone] - IANA zone to render in; the process's own zone
+ *   when omitted, which is what every client-side caller wants (#6586)
  * @returns {string} Formatted date string
  */
 export function formatDateByUserPreference(
   date,
   format = 'YYYY-MM-DD',
   includeTime = true,
+  timeZone = '',
 ) {
-  const d = new Date(date);
+  if (typeof format === 'string' && format.endsWith('-date-only')) {
+    format = format.slice(0, -10);
+    includeTime = false;
+  }
+  const d = toDate(date);
   if (isNaN(d.getTime())) return '';
 
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  const hours = String(d.getHours()).padStart(2, '0');
-  const minutes = String(d.getMinutes()).padStart(2, '0');
+  const inZone = timeZone ? dateParcelsIn(d, timeZone) : null;
+  const year = inZone ? inZone.year : d.getFullYear();
+  const month = inZone ? inZone.month : String(d.getMonth() + 1).padStart(2, '0');
+  const day = inZone ? inZone.day : String(d.getDate()).padStart(2, '0');
+  const hours = inZone ? inZone.hours : String(d.getHours()).padStart(2, '0');
+  const minutes = inZone ? inZone.minutes : String(d.getMinutes()).padStart(2, '0');
 
   let dateString;
   switch (format) {
@@ -84,7 +172,7 @@ export function formatDateByUserPreference(
  * @returns {string} Formatted time string
  */
 export function formatTime(date) {
-  const d = new Date(date);
+  const d = toDate(date);
   if (isNaN(d.getTime())) return '';
 
   const hours = String(d.getHours()).padStart(2, '0');
@@ -99,7 +187,7 @@ export function formatTime(date) {
  * @returns {number} ISO week number
  */
 export function getISOWeek(date) {
-  const d = new Date(date);
+  const d = toDate(date);
   if (isNaN(d.getTime())) return 0;
 
   // Set to nearest Thursday: current date + 4 - current day number
@@ -124,7 +212,7 @@ export function getISOWeek(date) {
  * @returns {boolean} True if date is valid
  */
 export function isValidDate(date) {
-  const d = new Date(date);
+  const d = toDate(date);
   return !isNaN(d.getTime());
 }
 
@@ -136,8 +224,8 @@ export function isValidDate(date) {
  * @returns {boolean} True if date1 is before date2
  */
 export function isBefore(date1, date2, unit = 'millisecond') {
-  const d1 = new Date(date1);
-  const d2 = new Date(date2);
+  const d1 = toDate(date1);
+  const d2 = toDate(date2);
 
   if (isNaN(d1.getTime()) || isNaN(d2.getTime())) return false;
 
@@ -194,8 +282,8 @@ export function isAfter(date1, date2, unit = 'millisecond') {
  * @returns {boolean} True if dates are the same
  */
 export function isSame(date1, date2, unit = 'millisecond') {
-  const d1 = new Date(date1);
-  const d2 = new Date(date2);
+  const d1 = toDate(date1);
+  const d2 = toDate(date2);
 
   if (isNaN(d1.getTime()) || isNaN(d2.getTime())) return false;
 
@@ -235,7 +323,7 @@ export function isSame(date1, date2, unit = 'millisecond') {
  * @returns {Date} New date
  */
 export function add(date, amount, unit) {
-  const d = new Date(date);
+  const d = toDate(date);
   if (isNaN(d.getTime())) return new Date();
 
   switch (unit) {
@@ -282,7 +370,7 @@ export function subtract(date, amount, unit) {
  * @returns {Date} Start of unit
  */
 export function startOf(date, unit) {
-  const d = new Date(date);
+  const d = toDate(date);
   if (isNaN(d.getTime())) return new Date();
 
   switch (unit) {
@@ -318,7 +406,7 @@ export function startOf(date, unit) {
  * @returns {Date} End of unit
  */
 export function endOf(date, unit) {
-  const d = new Date(date);
+  const d = toDate(date);
   if (isNaN(d.getTime())) return new Date();
 
   switch (unit) {
@@ -354,7 +442,7 @@ export function endOf(date, unit) {
  * @returns {string} Formatted date string
  */
 export function format(date, format = 'L') {
-  const d = new Date(date);
+  const d = toDate(date);
   if (isNaN(d.getTime())) return '';
 
   const year = d.getFullYear();
@@ -401,7 +489,7 @@ export function parseDate(dateString, formats = [], strict = true) {
   if (!dateString) return null;
 
   // Try native Date parsing first
-  const nativeDate = new Date(dateString);
+  const nativeDate = toDate(dateString);
   if (!isNaN(nativeDate.getTime())) {
     return nativeDate;
   }
@@ -529,8 +617,8 @@ export function createDate(year, month, day, hour = 0, minute = 0, second = 0) {
  * @returns {string} Relative time string
  */
 export function fromNow(date, now = new Date()) {
-  const d = new Date(date);
-  const n = new Date(now);
+  const d = toDate(date);
+  const n = toDate(now);
 
   if (isNaN(d.getTime()) || isNaN(n.getTime())) return '';
 
@@ -563,8 +651,8 @@ export function fromNow(date, now = new Date()) {
  * @returns {string} Calendar format string
  */
 export function calendar(date, now = new Date()) {
-  const d = new Date(date);
-  const n = new Date(now);
+  const d = toDate(date);
+  const n = toDate(now);
 
   if (isNaN(d.getTime()) || isNaN(n.getTime())) return format(d);
 
@@ -588,8 +676,8 @@ export function calendar(date, now = new Date()) {
  * @returns {number} Difference in the specified unit
  */
 export function diff(date1, date2, unit = 'millisecond') {
-  const d1 = new Date(date1);
-  const d2 = new Date(date2);
+  const d1 = toDate(date1);
+  const d2 = toDate(date2);
 
   if (isNaN(d1.getTime()) || isNaN(d2.getTime())) return 0;
 

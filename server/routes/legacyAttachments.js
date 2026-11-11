@@ -1,7 +1,12 @@
 import { Meteor } from 'meteor/meteor';
 import { WebApp } from 'meteor/webapp';
+import { getUserIdFromRequest } from '/server/lib/requestUser';
+import { mayReadBoardAttachment } from '/server/lib/assignedOnlyAttachments';
 import { ReactiveCache } from '/imports/reactiveCache';
 import { getAttachmentWithBackwardCompatibility, getOldAttachmentStream } from '/models/lib/attachmentBackwardCompatibility';
+import { canReadBoard } from '/models/lib/boardVisibility';
+const { sanitizeDownloadFileName } = require('/imports/lib/fileNameDisplay');
+const { fileResponsePolicy, fileNameIsBrowserExecutable } = require('/models/lib/fileResponseSafety');
 
 // Ensure this file is loaded
 if (process.env.DEBUG === 'true') {
@@ -19,9 +24,10 @@ function sanitizeFilenameForHeader(filename) {
     return 'download';
   }
 
-  // First, remove any control characters (0x00-0x1F, 0x7F) that would break HTTP headers
-  // This includes newlines, carriage returns, tabs, and other control chars
-  let sanitized = filename.replace(/[\x00-\x1F\x7F]/g, '');
+  // Decode a URL-encoded name and REMOVE all invisible/format characters (incl.
+  // control chars, zero-width, bidi, BOM) so the downloaded file gets a clean,
+  // unambiguous name — matching how filenames are shown in the UI.
+  let sanitized = sanitizeDownloadFileName(filename);
 
   // If the filename is all ASCII printable characters (0x20-0x7E), use it directly
   if (/^[\x20-\x7E]*$/.test(sanitized)) {
@@ -59,6 +65,9 @@ function buildContentDispositionHeader(disposition, sanitizedFilename) {
 if (Meteor.isServer) {
   // Handle legacy attachment downloads
   WebApp.handlers.use('/cfs/files/attachments', async (req, res, next) => {
+    // Downloads only: other methods reached this duplicate route after the
+    // universal file server passed them on (CacheBleed sibling, 2026-10-02).
+    if (req.method !== 'GET' && req.method !== 'HEAD') return next();
     const attachmentId = req.url.split('/').pop();
 
     if (!attachmentId) {
@@ -86,31 +95,45 @@ if (Meteor.isServer) {
       }
 
       // Check if user has permission to download
-      const userId = Meteor.userId();
-      if (!board.isPublic() && (!userId || !board.hasMember(userId))) {
+      // From the REQUEST, not Meteor.userId(): this is a WebApp handler, where
+      // that throws rather than returning null (see server/lib/requestUser.js).
+      const userId = await getUserIdFromRequest(req);
+      // Membership is not enough: an assigned-only member reads only their
+      // own cards' files (AssignedBleed, GHSA-3cgr-47wm-9cc9).
+      if (!canReadBoard(userId, board) ||
+          !(await mayReadBoardAttachment(board, userId, attachment, 'legacy-attachments:download'))) {
         res.writeHead(403);
         res.end('Access denied');
         return;
       }
 
       // Set appropriate headers
-      res.setHeader('Content-Type', attachment.type || 'application/octet-stream');
       res.setHeader('Content-Length', attachment.size || 0);
+      // CacheBleed: served after an access check, so never shared-cacheable.
+      require('/models/lib/fileCacheHeaders').setPrivateFileCacheHeaders(res);
 
-      // Force attachment disposition for SVG files to prevent XSS attacks
-      const isSvgFile = attachment.name && attachment.name.toLowerCase().endsWith('.svg');
-      const disposition = isSvgFile ? 'attachment' : 'attachment'; // Always use attachment for legacy files
-      res.setHeader('Content-Disposition', buildContentDispositionHeader(disposition, sanitizeFilenameForHeader(attachment.name)));
-
-      // Add security headers for SVG files
-      if (isSvgFile) {
-        res.setHeader('Content-Security-Policy', "default-src 'none'; script-src 'none'; object-src 'none';");
-        res.setHeader('X-Content-Type-Options', 'nosniff');
-        res.setHeader('X-Frame-Options', 'DENY');
+      // Treat every browser-executable MIME type like SVG: serve it as an
+      // opaque download under a sandbox, regardless of untrusted stored type.
+      // LegacyAttachBleed (GHSA-xcxp-hx9w-q5q9): by NAME too, for every
+      // browser-executable extension - not only .svg - as models/lib/httpStream.js does.
+      const policy = fileResponsePolicy(attachment.type, fileNameIsBrowserExecutable(attachment.name));
+      res.setHeader('Content-Type', policy.contentType);
+      res.setHeader('Content-Disposition', buildContentDispositionHeader('attachment', sanitizeFilenameForHeader(attachment.name)));
+      for (const [name, value] of Object.entries(policy.headers)) {
+        res.setHeader(name, value);
       }
 
       // Get GridFS stream for legacy attachment
       const fileStream = await getOldAttachmentStream(attachmentId);
+      // An SVG is sent whole and sanitized - this route always serves a
+      // download, and a saved file opened from the disk must run nothing either.
+      if (fileStream && require('/server/lib/svgResponse').isSvg(attachment.type, attachment.name)) {
+        await require('/server/lib/svgResponse').sendInlineSvg(res, fileStream, {
+          download: true, fileName: attachment.name,
+          downloadHeaders: () => {},
+        });
+        return;
+      }
       if (fileStream) {
         res.writeHead(200);
         fileStream.pipe(res);

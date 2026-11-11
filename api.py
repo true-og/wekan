@@ -8,13 +8,6 @@
 # TODO:
 #   addcustomfieldtoboard: There is error: Settings must be object. So adding does not work yet.
 
-try:
-    # python 3
-    from urllib.parse import urlencode
-except ImportError:
-    # python 2
-    from urllib import urlencode
-
 import json
 import requests
 import sys
@@ -37,6 +30,8 @@ If *nix:  chmod +x api.py => ./api.py users
     python3 api.py lists BOARDID        # Lists of BOARDID
     python3 api.py list BOARDID LISTID  # Info of LISTID
     python3 api.py createlist BOARDID LISTTITLE # Create list
+    python3 api.py editlist BOARDID LISTID NEWLISTTITLE # Edit list title
+    python3 api.py editlistcolor BOARDID LISTID COLOR (Color available: `white`, `green`, `yellow`, `orange`, `red`, `purple`, `blue`, `sky`, `lime`, `pink`, `black`, `silver`, `peachpuff`, `crimson`, `plum`, `darkgreen`, `slateblue`, `magenta`, `gold`, `navy`, `gray`, `saddlebrown`, `paleturquoise`, `mistyrose`, `indigo`) # Edit list color
     python3 api.py addcard AUTHORID BOARDID SWIMLANEID LISTID CARDTITLE CARDDESCRIPTION
     python3 api.py editcard BOARDID LISTID CARDID NEWCARDTITLE NEWCARDDESCRIPTION
         python3 api.py getcard BOARDID LISTID CARDID # Get card info
@@ -70,11 +65,26 @@ If *nix:  chmod +x api.py => ./api.py users
     python3 api.py listcardattachments BOARDID SWIMLANEID LISTID CARDID # List attachments for specific card
     python3 api.py copymoveattachment ATTACHMENTID TARGETBOARDID TARGETSWIMLANEID TARGETLISTID TARGETCARDID [copy|move] # Copy or move attachment
     python3 api.py deleteattachment ATTACHMENTID # Delete attachment
+    python3 api.py uploadbackground BOARDID FILEPATH # Upload a board background image (uses Admin Panel default storage)
+    python3 api.py downloadbackground BOARDID OUTPUTPATH # Download the board's current background image
+    python3 api.py importboard EXPORT.json # Import a whole board (with rules/workflows) from a WeKan export
+    python3 api.py migratefromwekan REMOTE_URL REMOTE_USER REMOTE_PASS # Import ALL boards+workflows+rules from another WeKan
+    python3 api.py exportboardpdf BOARDID OUTPUT.pdf # Export a whole board to PDF
+    python3 api.py importboardfrom SOURCE FILE [--csv-mapping MAPPING.json] # Import a tool's export file (csv and excel: --csv-mapping says which column is which field); SOURCE is a key of the import page (trello, jira, csv, excel, planner, wrike, notion, ...), see docs/Features/Board-Sidebar/Board-Settings/Import-Export
+    python3 api.py exportboardformat BOARDID FORMAT OUTPUTFILE # Export to a tool's format; FORMAT is a key of the export menu (kanboard, trello, planner, wrike, wrikeworkflow, ...)
+    python3 api.py importboardsfrom SOURCE [--split] FILE_OR_DIR ... # Import many boards: each file (or each file of a directory or .zip) becomes a board; --split makes one board per project
+    python3 api.py exportallboards FORMAT OUTPUTFILE [--boards ID1,ID2] # Export all boards: Excel as one workbook with a sheet per board, other formats as a .zip with a file per board
+    python3 api.py importics BOARDID SWIMLANEID LISTID CALENDAR.ics # Import an iCalendar (.ics) file into a board as cards (one card per VEVENT)
 
         Board Member API (Issue #5998):
     python3 api.py addboardmember BOARDID USERID ROLE # Add/activate board member. ROLE: admin, normal, comment, readonly, worker, normalassignedonly, commentassignedonly, readassignedonly, nocomments
     python3 api.py removeboardmember BOARDID USERID # Remove (deactivate) board member
     python3 api.py setboardmemberrole BOARDID USERID ROLE # Change permission/role of existing board member
+
+        Board Domain Sharing API (Issue #5850):
+    python3 api.py boarddomains BOARDID # List the email domains a board is shared with
+    python3 api.py addboarddomain BOARDID DOMAIN # Share board with an email domain, e.g. example.com
+    python3 api.py removeboarddomain BOARDID DOMAIN # Stop sharing board with an email domain
 
         Card Member / Assignee API (board member -> card member/assignee):
     python3 api.py setcardmembers BOARDID LISTID CARDID MEMBERIDS # Set card members. MEMBERIDS = comma-separated userIds, or '' to clear
@@ -114,16 +124,39 @@ If *nix:  chmod +x api.py => ./api.py users
     python3 api.py mycards [due] [FROM] [TO] # Current user's cards. 'due' = only cards with a due date; FROM/TO = ISO 8601 due-date range
 
         Card Settings API (Issue #3062):
-    python3 api.py getcardsettings BOARDID # Get board-level card settings (allows* toggles)
-    python3 api.py setcardsetting BOARDID KEY VALUE # Set one board card setting, e.g. allowsDueDate true
+    python3 api.py getcardsettings BOARDID # Get board-level card settings (allows* toggles, cardAging, cardAgingDays1/2/3)
+    python3 api.py setcardsetting BOARDID KEY VALUE # Set one board card setting, e.g. allowsDueDate true, cardAging true, cardAgingDays1 5
+
+        Board Automation Rules API (IFTTT, Issue #2674):
+    python3 api.py listrules BOARDID # List automation rules of a board
+    python3 api.py getrule BOARDID RULEID # Get one rule with its trigger and action
+    python3 api.py addrule BOARDID TITLE TRIGGER_JSON ACTION_JSON # Add rule. Missing trigger matching fields default to the '*' wildcard
+    python3 api.py editrule BOARDID RULEID PATCH_JSON # Edit rule: {"title":..,"trigger":{..},"action":{..}}
+    python3 api.py removerule BOARDID RULEID # Remove rule (and its trigger + action)
+    # Example (Issue #2674) - add member when card moved TO list, remove member when moved AWAY FROM list:
+    #   python3 api.py addrule BOARDID 'Add on move to Doing' '{"activityType":"moveCard","listName":"Doing"}' '{"actionType":"addMember","username":"someuser"}'
+    #   python3 api.py addrule BOARDID 'Remove on move from Doing' '{"activityType":"moveCard","oldListName":"Doing"}' '{"actionType":"removeMember","username":"someuser"}'
 
   Admin API:
     python3 api.py newuser USERNAME EMAIL PASSWORD
+
+        GlobalAdmin REST API (admin token required):
+    python3 api.py getsettings # Get the global Admin Panel settings
+    python3 api.py editsettings FIELD VALUE # Set one global settings field, e.g. productName "My WeKan", disableRegistration true
+    python3 api.py admindomains # List email domains with user counts (#5850)
+    python3 api.py attachmentsettings # Get attachment storage / upload-block settings (secrets masked)
+    python3 api.py editattachmentsetting DOTTED.FIELD VALUE # Set one attachment setting, e.g. limitSettings.avatarsUploadBlocked true (#4740)
+    python3 api.py adminorgs # List organizations with feature toggles (#4737)
+    python3 api.py editorgfeature ORGID FIELD true|false # Set one org feature: orgSharedTemplates, orgPropagateMembersToBoards, orgSyncMembersFromAuth
+    python3 api.py editallorgfeature FIELD true|false # Set one org feature on ALL orgs
+    python3 api.py adminteams # List teams with feature toggles (#4737)
+    python3 api.py editteamfeature TEAMID FIELD true|false # Set one team feature: teamSharedTemplates, teamPropagateMembersToBoards, teamSyncMembersFromAuth
+    python3 api.py editallteamfeature FIELD true|false # Set one team feature on ALL teams
 """
 
 if arguments == 0:
     print(syntax)
-    exit
+    sys.exit()
 
 # TODO:
 #   print("  python3 api.py attachmentjson BOARDID ATTACHMENTID # One attachment as JSON base64")
@@ -218,6 +251,7 @@ ats = 'attachments'
 users = wekanurl + apiusers
 user = wekanurl + apiuser
 allusers = wekanurl + apiallusers
+settings = wekanurl + 'api/settings'
 
 # ------- API URL GENERATION END -----------
 
@@ -238,10 +272,9 @@ if arguments == 10:
         boardid = sys.argv[3]
         name = sys.argv[4]
         type1 = sys.argv[5]
-        settings = str(json.loads(sys.argv[6]))
-        #  There is error: Settings must be object. So this does not work yet.
-        #settings = {'currencyCode': 'EUR'}
-        print(type(settings))
+        settings_arg = sys.argv[6]
+        # settings is optional; an empty arg -> {} (avoids json.loads('') crashing).
+        settings = json.loads(settings_arg) if settings_arg.strip() else {}
         showoncard = sys.argv[7]
         automaticallyoncard = sys.argv[8]
         showlabelonminicard = sys.argv[9]
@@ -249,7 +282,7 @@ if arguments == 10:
         customfieldtoboard = wekanurl + apiboards + boardid + s + cf
         # Add Custom Field to Board
         headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey)}
-        post_data = {'authorId': '{}'.format(authorid), 'name': '{}'.format(name), 'type': '{}'.format(type1), 'settings': '{}'.format(settings), 'showoncard': '{}'.format(showoncard), 'automaticallyoncard': '{}'.format(automaticallyoncard), 'showlabelonminicard': '{}'.format(showlabelonminicard), 'showsumattopoflist': '{}'.format(showsumattopoflist)}
+        post_data = {'authorId': '{}'.format(authorid), 'name': '{}'.format(name), 'type': '{}'.format(type1), 'settings': json.dumps(settings), 'showoncard': '{}'.format(showoncard), 'automaticallyoncard': '{}'.format(automaticallyoncard), 'showlabelonminicard': '{}'.format(showlabelonminicard), 'showsumattopoflist': '{}'.format(showsumattopoflist)}
         body = requests.post(customfieldtoboard, data=post_data, headers=headers)
         print(body.text)
         # ------- ADD CUSTOM FIELD TO BOARD END -----------
@@ -289,7 +322,7 @@ if arguments == 8:
             if new_card_id:
                 edcard = wekanurl + apiboards + boardid + s + l + s + listid + s + cs + s + new_card_id
                 put_data = {'labelIds': labelIds}
-                body = requests.put(edcard, data=put_data, headers=headers)
+                requests.put(edcard, data=put_data, headers=headers)
                 print("=== EDIT CARD ===\n")
                 body = requests.get(edcard, headers=headers)
                 data2 = body.text.replace('}', "}\n")
@@ -332,7 +365,7 @@ if arguments == 6:
         print(edcard)
         headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey)}
         put_data = {'title': '{}'.format(newcardtitle), 'description': '{}'.format(newcarddescription)}
-        body = requests.put(edcard, data=put_data, headers=headers)
+        requests.put(edcard, data=put_data, headers=headers)
         print("=== EDIT CARD ===\n")
         body = requests.get(edcard, headers=headers)
         data2 = body.text.replace('}',"}\n")
@@ -371,7 +404,7 @@ if arguments == 5:
         print(edcard)
         headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey)}
         put_data = {'labelIds': labelIds}
-        body = requests.put(edcard, data=put_data, headers=headers)
+        requests.put(edcard, data=put_data, headers=headers)
         print("=== ADD LABEL ===\n")
         body = requests.get(edcard, headers=headers)
         data2 = body.text.replace('}',"}\n")
@@ -397,7 +430,7 @@ if arguments == 5:
         print(edcard)
         headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey)}
         put_data = {'color': '{}'.format(newcolor)}  
-        body = requests.put(edcard, data=put_data, headers=headers)
+        requests.put(edcard, data=put_data, headers=headers)
         print("=== EDIT CARD COLOR ===\n")
         body = requests.get(edcard, headers=headers)
         data2 = body.text.replace('}', "}\n")
@@ -405,6 +438,49 @@ if arguments == 5:
         # ------- EDIT CARD COLOR END -----------
 
 if arguments >= 4:
+
+    if sys.argv[1] == 'editlist':
+
+        # ------- EDIT LIST START -----------
+        boardid = sys.argv[2]
+        listid = sys.argv[3]
+        newlisttitle = sys.argv[4]
+        edlist = wekanurl + apiboards + boardid + s + l + s + listid
+        print(edlist)
+        headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey)}
+        put_data = {'title': '{}'.format(newlisttitle)}
+        requests.put(edlist, data=put_data, headers=headers)
+        print("=== EDIT LIST ===\n")
+        body = requests.get(edlist, headers=headers)
+        data2 = body.text.replace('}', "}\n")
+        print(data2)
+        # ------- EDIT LIST END -----------
+
+    if sys.argv[1] == 'editlistcolor':
+
+        # ------- EDIT LIST COLOR START -----------
+        boardid = sys.argv[2]
+        listid = sys.argv[3]
+        newcolor = sys.argv[4]
+
+        valid_colors = ['white', 'green', 'yellow', 'orange', 'red', 'purple', 'blue', 'sky', 'lime', 'pink', 'black',
+                    'silver', 'peachpuff', 'crimson', 'plum', 'darkgreen', 'slateblue', 'magenta', 'gold', 'navy',
+                    'gray', 'saddlebrown', 'paleturquoise', 'mistyrose', 'indigo']
+
+        if newcolor not in valid_colors:
+            print("Invalid color. Choose a color from the list.")
+            sys.exit(1)
+
+        edlist = wekanurl + apiboards + boardid + s + l + s + listid
+        print(edlist)
+        headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey)}
+        put_data = {'color': '{}'.format(newcolor)}
+        requests.put(edlist, data=put_data, headers=headers)
+        print("=== EDIT LIST COLOR ===\n")
+        body = requests.get(edlist, headers=headers)
+        data2 = body.text.replace('}', "}\n")
+        print(data2)
+        # ------- EDIT LIST COLOR END -----------
 
     if sys.argv[1] == 'newuser':
 
@@ -790,6 +866,155 @@ if arguments >= 1:
         print(data2)
         # ------- LIST OF USERS END -----------
 
+    if arguments == 1 and sys.argv[1] == 'getsettings':
+        # ------- GET GLOBAL ADMIN SETTINGS START -----------
+        # GlobalAdmin REST API: read the Admin Panel global settings.
+        # Requires an admin API token. Mail-server credentials are never returned.
+        headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey)}
+        print(settings)
+        print("=== GLOBAL ADMIN SETTINGS ===\n")
+        body = requests.get(settings, headers=headers)
+        print(body.text)
+        # ------- GET GLOBAL ADMIN SETTINGS END -----------
+
+    if arguments >= 3 and sys.argv[1] == 'editsettings':
+        # ------- EDIT GLOBAL ADMIN SETTINGS START -----------
+        # GlobalAdmin REST API: set one Admin Panel global settings field.
+        # Usage: python3 api.py editsettings <field> <value>
+        #   e.g. python3 api.py editsettings productName "My WeKan"
+        #        python3 api.py editsettings disableRegistration true
+        headers = {'Accept': 'application/json', 'Content-type': 'application/json', 'Authorization': 'Bearer {}'.format(apikey)}
+        field = sys.argv[2]
+        raw = sys.argv[3]
+        # Convert true/false to booleans; leave everything else as a string.
+        if raw in ('true', 'false'):
+            value = (raw == 'true')
+        else:
+            value = raw
+        body = requests.put(settings, json={field: value}, headers=headers)
+        print(body.text)
+        # ------- EDIT GLOBAL ADMIN SETTINGS END -----------
+
+    if arguments == 1 and sys.argv[1] == 'admindomains':
+        # ------- LIST ADMIN DOMAINS START -----------
+        # GlobalAdmin REST API: email domains with user counts (#5850).
+        admindomainsurl = wekanurl + 'api/admin/domains'
+        headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey)}
+        print("=== ADMIN DOMAINS ===\n")
+        body = requests.get(admindomainsurl, headers=headers)
+        print(body.text)
+        # ------- LIST ADMIN DOMAINS END -----------
+
+    if arguments == 1 and sys.argv[1] == 'attachmentsettings':
+        # ------- GET ATTACHMENT SETTINGS START -----------
+        # GlobalAdmin REST API: attachment storage / upload-block settings.
+        # Secrets (S3/Azure/GCS) are masked; a <field>Set marker shows existence.
+        attachmentsettingsurl = wekanurl + 'api/admin/attachment-settings'
+        headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey)}
+        print("=== ATTACHMENT SETTINGS ===\n")
+        body = requests.get(attachmentsettingsurl, headers=headers)
+        print(body.text)
+        # ------- GET ATTACHMENT SETTINGS END -----------
+
+    if arguments >= 3 and sys.argv[1] == 'editattachmentsetting':
+        # ------- EDIT ATTACHMENT SETTING START -----------
+        # GlobalAdmin REST API: set one attachment setting by dotted path.
+        # Usage: python3 api.py editattachmentsetting <dotted.field> <value>
+        #   e.g. python3 api.py editattachmentsetting limitSettings.avatarsUploadBlocked true
+        attachmentsettingsurl = wekanurl + 'api/admin/attachment-settings'
+        headers = {'Accept': 'application/json', 'Content-type': 'application/json', 'Authorization': 'Bearer {}'.format(apikey)}
+        field = sys.argv[2]
+        raw = sys.argv[3]
+        # Convert true/false to booleans; leave everything else as a string.
+        if raw in ('true', 'false'):
+            value = (raw == 'true')
+        else:
+            value = raw
+        # Expand a dotted path (e.g. limitSettings.avatarsUploadBlocked) into
+        # the nested object the partial-update endpoint expects.
+        body_obj = {}
+        cursor = body_obj
+        parts = field.split('.')
+        for part in parts[:-1]:
+            cursor[part] = {}
+            cursor = cursor[part]
+        cursor[parts[-1]] = value
+        body = requests.put(attachmentsettingsurl, json=body_obj, headers=headers)
+        print(body.text)
+        # ------- EDIT ATTACHMENT SETTING END -----------
+
+    if arguments == 1 and sys.argv[1] == 'adminorgs':
+        # ------- LIST ADMIN ORGS START -----------
+        # GlobalAdmin REST API: orgs with feature toggles (#4737).
+        adminorgsurl = wekanurl + 'api/admin/orgs'
+        headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey)}
+        print("=== ADMIN ORGS ===\n")
+        body = requests.get(adminorgsurl, headers=headers)
+        print(body.text)
+        # ------- LIST ADMIN ORGS END -----------
+
+    if arguments >= 3 and sys.argv[1] == 'editorgfeature':
+        # ------- EDIT ORG FEATURE START -----------
+        # Usage: python3 api.py editorgfeature <orgId> <field> <true|false>
+        #   field: orgSharedTemplates, orgPropagateMembersToBoards, orgSyncMembersFromAuth
+        orgid = sys.argv[2]
+        field = sys.argv[3]
+        raw = sys.argv[4]
+        value = (raw == 'true')
+        editorgfeatureurl = wekanurl + 'api/admin/orgs/' + orgid + '/features'
+        headers = {'Accept': 'application/json', 'Content-type': 'application/json', 'Authorization': 'Bearer {}'.format(apikey)}
+        body = requests.put(editorgfeatureurl, json={field: value}, headers=headers)
+        print(body.text)
+        # ------- EDIT ORG FEATURE END -----------
+
+    if arguments >= 2 and sys.argv[1] == 'editallorgfeature':
+        # ------- EDIT ALL ORG FEATURE START -----------
+        # Usage: python3 api.py editallorgfeature <field> <true|false>
+        field = sys.argv[2]
+        raw = sys.argv[3]
+        value = (raw == 'true')
+        editallorgfeatureurl = wekanurl + 'api/admin/orgs/features'
+        headers = {'Accept': 'application/json', 'Content-type': 'application/json', 'Authorization': 'Bearer {}'.format(apikey)}
+        body = requests.put(editallorgfeatureurl, json={'field': field, 'value': value}, headers=headers)
+        print(body.text)
+        # ------- EDIT ALL ORG FEATURE END -----------
+
+    if arguments == 1 and sys.argv[1] == 'adminteams':
+        # ------- LIST ADMIN TEAMS START -----------
+        # GlobalAdmin REST API: teams with feature toggles (#4737).
+        adminteamsurl = wekanurl + 'api/admin/teams'
+        headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey)}
+        print("=== ADMIN TEAMS ===\n")
+        body = requests.get(adminteamsurl, headers=headers)
+        print(body.text)
+        # ------- LIST ADMIN TEAMS END -----------
+
+    if arguments >= 3 and sys.argv[1] == 'editteamfeature':
+        # ------- EDIT TEAM FEATURE START -----------
+        # Usage: python3 api.py editteamfeature <teamId> <field> <true|false>
+        #   field: teamSharedTemplates, teamPropagateMembersToBoards, teamSyncMembersFromAuth
+        teamid = sys.argv[2]
+        field = sys.argv[3]
+        raw = sys.argv[4]
+        value = (raw == 'true')
+        editteamfeatureurl = wekanurl + 'api/admin/teams/' + teamid + '/features'
+        headers = {'Accept': 'application/json', 'Content-type': 'application/json', 'Authorization': 'Bearer {}'.format(apikey)}
+        body = requests.put(editteamfeatureurl, json={field: value}, headers=headers)
+        print(body.text)
+        # ------- EDIT TEAM FEATURE END -----------
+
+    if arguments >= 2 and sys.argv[1] == 'editallteamfeature':
+        # ------- EDIT ALL TEAM FEATURE START -----------
+        # Usage: python3 api.py editallteamfeature <field> <true|false>
+        field = sys.argv[2]
+        raw = sys.argv[3]
+        value = (raw == 'true')
+        editallteamfeatureurl = wekanurl + 'api/admin/teams/features'
+        headers = {'Accept': 'application/json', 'Content-type': 'application/json', 'Authorization': 'Bearer {}'.format(apikey)}
+        body = requests.put(editallteamfeatureurl, json={'field': field, 'value': value}, headers=headers)
+        print(body.text)
+        # ------- EDIT ALL TEAM FEATURE END -----------
+
     if arguments == 1 and sys.argv[1] == 'user':
         # ------- LIST OF ALL USERS START -----------
         headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey)}
@@ -818,7 +1043,7 @@ if arguments >= 1:
         if arguments < 6:
             print("Usage: python3 api.py uploadattachment BOARDID SWIMLANEID LISTID CARDID FILEPATH [STORAGE_BACKEND]")
             print("Storage backends: fs, gridfs, s3")
-            exit(1)
+            sys.exit(1)
         
         boardid = sys.argv[2]
         swimlaneid = sys.argv[3]
@@ -827,45 +1052,22 @@ if arguments >= 1:
         filepath = sys.argv[6]
         storage_backend = sys.argv[7] if arguments > 6 else None
         
-        # Read file and convert to base64
+        # The file is streamed as the request body (the raw upload of
+        # /api/attachment/upload), never read whole or turned into base64.
+        import os, mimetypes
+        if not os.path.isfile(filepath):
+            print(f"Error: File '{filepath}' not found")
+            sys.exit(1)
+        filename = os.path.basename(filepath)
+        file_type = mimetypes.guess_type(filepath)[0] or 'application/octet-stream'
+        params = {'boardId': boardid, 'swimlaneId': swimlaneid, 'listId': listid, 'cardId': cardid,
+                  'fileName': filename, 'fileType': file_type}
+        headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey),
+                   'Content-Type': 'application/octet-stream'}
+        upload_url = wekanurl + 'api/attachment/upload'
         try:
             with open(filepath, 'rb') as f:
-                file_data = f.read()
-                import base64
-                base64_data = base64.b64encode(file_data).decode('utf-8')
-        except FileNotFoundError:
-            print(f"Error: File '{filepath}' not found")
-            exit(1)
-        except Exception as e:
-            print(f"Error reading file: {e}")
-            exit(1)
-        
-        # Get file info
-        import os
-        filename = os.path.basename(filepath)
-        import mimetypes
-        file_type = mimetypes.guess_type(filepath)[0] or 'application/octet-stream'
-        
-        # Prepare request data
-        upload_data = {
-            'boardId': boardid,
-            'swimlaneId': swimlaneid,
-            'listId': listid,
-            'cardId': cardid,
-            'fileData': base64_data,
-            'fileName': filename,
-            'fileType': file_type
-        }
-        
-        if storage_backend:
-            upload_data['storageBackend'] = storage_backend
-        
-        # Make API call
-        headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey), 'Content-Type': 'application/json'}
-        upload_url = wekanurl + 'api/attachment/upload'
-        
-        try:
-            response = requests.post(upload_url, headers=headers, json=upload_data)
+                response = requests.post(upload_url, headers=headers, params=params, data=f)
             response.raise_for_status()
             result = response.json()
             print(f"Upload successful!")
@@ -883,35 +1085,25 @@ if arguments >= 1:
         # ------- DOWNLOAD ATTACHMENT START -----------
         if arguments < 3:
             print("Usage: python3 api.py downloadattachment ATTACHMENTID OUTPUTPATH")
-            exit(1)
+            sys.exit(1)
         
         attachmentid = sys.argv[2]
         outputpath = sys.argv[3]
         
-        # Make API call
-        headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey)}
+        # The file itself (?raw=1), written to disk as it arrives.
+        headers = {'Authorization': 'Bearer {}'.format(apikey)}
         download_url = wekanurl + f'api/attachment/download/{attachmentid}'
-        
         try:
-            response = requests.get(download_url, headers=headers)
-            response.raise_for_status()
-            result = response.json()
-            
-            if result.get('success'):
-                # Decode base64 data and save to file
-                import base64
-                file_data = base64.b64decode(result.get('base64Data'))
-                
+            with requests.get(download_url, headers=headers, params={'raw': '1'}, stream=True) as response:
+                response.raise_for_status()
+                size = 0
                 with open(outputpath, 'wb') as f:
-                    f.write(file_data)
-                
-                print(f"Download successful!")
-                print(f"File saved to: {outputpath}")
-                print(f"Original filename: {result.get('fileName')}")
-                print(f"Size: {result.get('fileSize')} bytes")
-                print(f"Storage: {result.get('storageBackend')}")
-            else:
-                print(f"Download failed: {result.get('message', 'Unknown error')}")
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        f.write(chunk)
+                        size += len(chunk)
+            print(f"Download successful!")
+            print(f"File saved to: {outputpath}")
+            print(f"Size: {size} bytes")
         except requests.exceptions.RequestException as e:
             print(f"Download failed: {e}")
             if hasattr(e, 'response') and e.response is not None:
@@ -922,7 +1114,7 @@ if arguments >= 1:
         # ------- ATTACHMENT INFO START -----------
         if arguments < 2:
             print("Usage: python3 api.py attachmentinfo ATTACHMENTID")
-            exit(1)
+            sys.exit(1)
         
         attachmentid = sys.argv[2]
         
@@ -961,7 +1153,7 @@ if arguments >= 1:
         # ------- LIST CARD ATTACHMENTS START -----------
         if arguments < 5:
             print("Usage: python3 api.py listcardattachments BOARDID SWIMLANEID LISTID CARDID")
-            exit(1)
+            sys.exit(1)
         
         boardid = sys.argv[2]
         swimlaneid = sys.argv[3]
@@ -1000,7 +1192,7 @@ if arguments >= 1:
         # ------- COPY/MOVE ATTACHMENT START -----------
         if arguments < 6:
             print("Usage: python3 api.py copymoveattachment ATTACHMENTID TARGETBOARDID TARGETSWIMLANEID TARGETLISTID TARGETCARDID [copy|move]")
-            exit(1)
+            sys.exit(1)
         
         attachmentid = sys.argv[2]
         targetboardid = sys.argv[3]
@@ -1011,7 +1203,7 @@ if arguments >= 1:
         
         if operation not in ['copy', 'move']:
             print("Operation must be 'copy' or 'move'")
-            exit(1)
+            sys.exit(1)
         
         # Prepare request data
         request_data = {
@@ -1054,7 +1246,7 @@ if arguments >= 1:
         # ------- DELETE ATTACHMENT START -----------
         if arguments < 2:
             print("Usage: python3 api.py deleteattachment ATTACHMENTID")
-            exit(1)
+            sys.exit(1)
         
         attachmentid = sys.argv[2]
         
@@ -1083,7 +1275,7 @@ if arguments >= 1:
 
 # ------- BOARD MEMBER / CARD FIELD API ENDPOINTS START -----------
 # These commands wrap REST endpoints that already exist in Wekan.
-# See CHANGELOG.md "Upcoming" section for related issues and design notes.
+# See CHANGELOG-big.md "Upcoming" section for related issues and design notes.
 
     # Map a human readable ROLE to the board member permission boolean flags
     # used by /api/boards/:boardId/members/:userId/add and .../members/:memberId
@@ -1123,7 +1315,7 @@ if arguments >= 1:
         # ------- ADD BOARD MEMBER START -----------
         if arguments < 3:
             print("Usage: python3 api.py addboardmember BOARDID USERID ROLE")
-            exit(1)
+            sys.exit(1)
         boardid = sys.argv[2]
         userid = sys.argv[3]
         role = sys.argv[4] if arguments > 3 else 'normal'
@@ -1140,7 +1332,7 @@ if arguments >= 1:
         # ------- REMOVE BOARD MEMBER START -----------
         if arguments < 3:
             print("Usage: python3 api.py removeboardmember BOARDID USERID")
-            exit(1)
+            sys.exit(1)
         boardid = sys.argv[2]
         userid = sys.argv[3]
         remove_member_url = wekanurl + apiboards + boardid + s + 'members' + s + userid + s + 'remove'
@@ -1155,7 +1347,7 @@ if arguments >= 1:
         # ------- SET BOARD MEMBER ROLE START -----------
         if arguments < 4:
             print("Usage: python3 api.py setboardmemberrole BOARDID USERID ROLE")
-            exit(1)
+            sys.exit(1)
         boardid = sys.argv[2]
         userid = sys.argv[3]
         role = sys.argv[4]
@@ -1167,12 +1359,54 @@ if arguments >= 1:
         print(body.text)
         # ------- SET BOARD MEMBER ROLE END -----------
 
+    if sys.argv[1] == 'boarddomains':
+        # ------- LIST BOARD DOMAINS START -----------
+        if arguments < 2:
+            print("Usage: python3 api.py boarddomains BOARDID")
+            sys.exit(1)
+        boardid = sys.argv[2]
+        domains_url = wekanurl + apiboards + boardid + s + 'domains'
+        headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey)}
+        body = requests.get(domains_url, headers=headers)
+        print("=== BOARD DOMAINS ===\n")
+        print(body.text)
+        # ------- LIST BOARD DOMAINS END -----------
+
+    if sys.argv[1] == 'addboarddomain':
+        # ------- ADD BOARD DOMAIN START -----------
+        if arguments < 3:
+            print("Usage: python3 api.py addboarddomain BOARDID DOMAIN")
+            sys.exit(1)
+        boardid = sys.argv[2]
+        domain = sys.argv[3]
+        add_domain_url = wekanurl + apiboards + boardid + s + 'domains'
+        headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey)}
+        post_data = {'domain': '{}'.format(domain)}
+        body = requests.post(add_domain_url, data=post_data, headers=headers)
+        print("=== ADD BOARD DOMAIN ===\n")
+        print(body.text)
+        # ------- ADD BOARD DOMAIN END -----------
+
+    if sys.argv[1] == 'removeboarddomain':
+        # ------- REMOVE BOARD DOMAIN START -----------
+        if arguments < 3:
+            print("Usage: python3 api.py removeboarddomain BOARDID DOMAIN")
+            sys.exit(1)
+        boardid = sys.argv[2]
+        domain = sys.argv[3]
+        remove_domain_url = wekanurl + apiboards + boardid + s + 'domains' + s + domain
+        headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey)}
+        body = requests.delete(remove_domain_url, headers=headers)
+        print("=== REMOVE BOARD DOMAIN ===\n")
+        print(body.text)
+        # ------- REMOVE BOARD DOMAIN END -----------
+
     if sys.argv[1] in ('setcardmembers', 'setcardassignees'):
         # ------- SET CARD MEMBERS / ASSIGNEES START -----------
         if arguments < 4:
             print("Usage: python3 api.py {} BOARDID LISTID CARDID IDS".format(sys.argv[1]))
             print("IDS = comma-separated userIds, or '' to clear")
-            exit(1)
+            sys.exit(1)
         boardid = sys.argv[2]
         listid = sys.argv[3]
         cardid = sys.argv[4]
@@ -1194,7 +1428,7 @@ if arguments >= 1:
             print("Usage: python3 api.py setcarddate BOARDID LISTID CARDID DATETYPE DATEVALUE")
             print("DATETYPE: received, start, due, end")
             print("DATEVALUE: ISO 8601, e.g. 2026-06-07T12:00:00.000Z")
-            exit(1)
+            sys.exit(1)
         boardid = sys.argv[2]
         listid = sys.argv[3]
         cardid = sys.argv[4]
@@ -1212,7 +1446,7 @@ if arguments >= 1:
         edcard = wekanurl + apiboards + boardid + s + l + s + listid + s + cs + s + cardid
         headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey)}
         put_data = {datemap[datetype]: datevalue}
-        body = requests.put(edcard, data=put_data, headers=headers)
+        requests.put(edcard, data=put_data, headers=headers)
         print("=== SET CARD DATE {} ===\n".format(datetype.upper()))
         print(body.text)
         # ------- SET CARD DATE END -----------
@@ -1222,7 +1456,7 @@ if arguments >= 1:
         if arguments < 4:
             print("Usage: python3 api.py setcardlabels BOARDID LISTID CARDID LABELIDS")
             print("LABELIDS = comma-separated labelIds, or '' to clear")
-            exit(1)
+            sys.exit(1)
         boardid = sys.argv[2]
         listid = sys.argv[3]
         cardid = sys.argv[4]
@@ -1231,7 +1465,7 @@ if arguments >= 1:
         edcard = wekanurl + apiboards + boardid + s + l + s + listid + s + cs + s + cardid
         headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey), 'Content-Type': 'application/json'}
         # NOTE: this REPLACES the card's labels. Bulk add/remove (merge) is not yet
-        # implemented server-side, see Issue #5819 in CHANGELOG.md "Upcoming".
+        # implemented server-side, see Issue #5819 in CHANGELOG-big.md "Upcoming".
         put_data = {'labelIds': labelids if labelids else []}
         body = requests.put(edcard, json=put_data, headers=headers)
         print("=== SET CARD LABELS ===\n")
@@ -1242,7 +1476,7 @@ if arguments >= 1:
         # ------- MOVE CARD START -----------
         if arguments < 7:
             print("Usage: python3 api.py movecard BOARDID LISTID CARDID NEWBOARDID NEWSWIMLANEID NEWLISTID")
-            exit(1)
+            sys.exit(1)
         boardid = sys.argv[2]
         listid = sys.argv[3]
         cardid = sys.argv[4]
@@ -1256,7 +1490,7 @@ if arguments >= 1:
             'newSwimlaneId': newswimlaneid,
             'newListId': newlistid,
         }
-        body = requests.put(edcard, data=put_data, headers=headers)
+        requests.put(edcard, data=put_data, headers=headers)
         print("=== MOVE CARD ===\n")
         print(body.text)
         # ------- MOVE CARD END -----------
@@ -1267,7 +1501,7 @@ if arguments >= 1:
             print("Usage: python3 api.py bulkaddcards BOARDID LISTID AUTHORID SWIMLANEID CARDSJSONFILE")
             print("CARDSJSONFILE = JSON file with a list of titles, e.g. [\"Card A\", \"Card B\"],")
             print("                or a list of card objects [{\"title\": \"Card A\", \"description\": \"...\"}, ...]")
-            exit(1)
+            sys.exit(1)
         boardid = sys.argv[2]
         listid = sys.argv[3]
         authorid = sys.argv[4]
@@ -1275,16 +1509,16 @@ if arguments >= 1:
         cardsjsonfile = sys.argv[6] if arguments > 5 else None
         if not cardsjsonfile:
             print("CARDSJSONFILE is required")
-            exit(1)
+            sys.exit(1)
         try:
             with open(cardsjsonfile, 'r') as f:
                 raw_cards = json.load(f)
         except Exception as e:
             print("Error reading CARDSJSONFILE: {}".format(e))
-            exit(1)
+            sys.exit(1)
         if not isinstance(raw_cards, list) or len(raw_cards) == 0:
             print("CARDSJSONFILE must contain a non-empty JSON list")
-            exit(1)
+            sys.exit(1)
         cards = []
         for item in raw_cards:
             if isinstance(item, str):
@@ -1293,7 +1527,7 @@ if arguments >= 1:
                 cards.append(item)
             else:
                 print("Each card must be a string (title) or an object")
-                exit(1)
+                sys.exit(1)
         bulk_url = wekanurl + apiboards + boardid + s + l + s + listid + s + cs + s + 'bulk'
         headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey), 'Content-Type': 'application/json'}
         post_data = {'authorId': authorid, 'swimlaneId': swimlaneid, 'cards': cards}
@@ -1307,7 +1541,7 @@ if arguments >= 1:
         if arguments < 3:
             print("Usage: python3 api.py bulkdeletecards BOARDID CARDIDS")
             print("CARDIDS = comma-separated cardIds")
-            exit(1)
+            sys.exit(1)
         boardid = sys.argv[2]
         cardids_raw = sys.argv[3]
         cardids = [x for x in cardids_raw.split(',') if x]
@@ -1324,7 +1558,7 @@ if arguments >= 1:
         if arguments < 5:
             print("Usage: python3 api.py bulkcardlabels BOARDID CARDIDS ADDLABELIDS REMOVELABELIDS")
             print("CARDIDS / ADDLABELIDS / REMOVELABELIDS = comma-separated, or '' for none")
-            exit(1)
+            sys.exit(1)
         boardid = sys.argv[2]
         cardids = [x for x in sys.argv[3].split(',') if x]
         add_labelids = [x for x in sys.argv[4].split(',') if x]
@@ -1341,7 +1575,7 @@ if arguments >= 1:
         # ------- CREATE LINKED CARD START -----------
         if arguments < 6:
             print("Usage: python3 api.py linkcard BOARDID LISTID SWIMLANEID AUTHORID LINKEDCARDID")
-            exit(1)
+            sys.exit(1)
         boardid = sys.argv[2]
         listid = sys.argv[3]
         swimlaneid = sys.argv[4]
@@ -1359,7 +1593,7 @@ if arguments >= 1:
         # ------- ADD/REMOVE CARD MEMBER / ASSIGNEE START -----------
         if arguments < 5:
             print("Usage: python3 api.py {} BOARDID LISTID CARDID USERID".format(sys.argv[1]))
-            exit(1)
+            sys.exit(1)
         boardid = sys.argv[2]
         listid = sys.argv[3]
         cardid = sys.argv[4]
@@ -1379,14 +1613,14 @@ if arguments >= 1:
         # ------- COPY CARD START -----------
         if arguments < 4:
             print("Usage: python3 api.py copycard BOARDID LISTID CARDID TOSWIMLANEID [TOBOARDID] [TOLISTID] [POSITION]")
-            exit(1)
+            sys.exit(1)
         boardid = sys.argv[2]
         listid = sys.argv[3]
         cardid = sys.argv[4]
         toswimlaneid = sys.argv[5] if arguments > 4 else None
         if not toswimlaneid:
             print("TOSWIMLANEID is required")
-            exit(1)
+            sys.exit(1)
         toboardid = sys.argv[6] if arguments > 5 else boardid
         tolistid = sys.argv[7] if arguments > 6 else listid
         url = wekanurl + apiboards + boardid + s + l + s + listid + s + cs + s + cardid + s + 'copy'
@@ -1403,7 +1637,7 @@ if arguments >= 1:
         # ------- COPY/MOVE SWIMLANE START -----------
         if arguments < 3:
             print("Usage: python3 api.py {} BOARDID SWIMLANEID [TOBOARDID] [POSITION]".format(sys.argv[1]))
-            exit(1)
+            sys.exit(1)
         boardid = sys.argv[2]
         swimlaneid = sys.argv[3]
         toboardid = sys.argv[4] if arguments > 3 else boardid
@@ -1422,7 +1656,7 @@ if arguments >= 1:
         # ------- COPY/MOVE LIST START -----------
         if arguments < 3:
             print("Usage: python3 api.py {} BOARDID LISTID [TOSWIMLANEID] [TOBOARDID] [POSITION]".format(sys.argv[1]))
-            exit(1)
+            sys.exit(1)
         boardid = sys.argv[2]
         listid = sys.argv[3]
         toswimlaneid = sys.argv[4] if arguments > 3 else None
@@ -1461,7 +1695,7 @@ if arguments >= 1:
         # ------- GET CARD SETTINGS START -----------
         if arguments < 2:
             print("Usage: python3 api.py getcardsettings BOARDID")
-            exit(1)
+            sys.exit(1)
         boardid = sys.argv[2]
         url = wekanurl + apiboards + boardid + s + 'cardSettings'
         headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey)}
@@ -1476,7 +1710,7 @@ if arguments >= 1:
         if arguments < 4:
             print("Usage: python3 api.py setcardsetting BOARDID KEY VALUE")
             print("e.g. python3 api.py setcardsetting BOARDID allowsDueDate true")
-            exit(1)
+            sys.exit(1)
         boardid = sys.argv[2]
         key = sys.argv[3]
         value = sys.argv[4]
@@ -1488,3 +1722,478 @@ if arguments >= 1:
         # ------- SET CARD SETTING END -----------
 
 # ------- BOARD MEMBER / CARD FIELD API ENDPOINTS END -----------
+
+# ------- RULES API ENDPOINTS START -----------
+#
+# Board automation Rules: add / edit / remove / list via REST.
+# A rule links a trigger (event or schedule) to an action. The API embeds the
+# full trigger and action inline so a rule is self-contained.
+#
+#   python3 api.py listrules BOARDID
+#   python3 api.py getrule BOARDID RULEID
+#   python3 api.py addrule BOARDID 'TITLE' 'TRIGGER_JSON' 'ACTION_JSON'
+#   python3 api.py editrule BOARDID RULEID 'PATCH_JSON'   # {"title":..,"trigger":{..},"action":{..}}
+#   python3 api.py removerule BOARDID RULEID
+#
+# Example (move a card to the top of its list whenever it is created):
+#   python3 api.py addrule BOARDID 'On create -> top' \
+#     '{"activityType":"createCard","listName":"*","swimlaneName":"*","cardTitle":"*","userId":"*"}' \
+#     '{"actionType":"moveCardToTop","listName":"*","swimlaneName":"*"}'
+#
+# Example (archive cards that have sat in "Completed" for 90 days; the scheduled
+# scan runs this daily):
+#   python3 api.py addrule BOARDID 'Archive after 90 days' \
+#     '{"activityType":"scheduledTrigger","scheduleKind":"aging","listName":"Completed","days":90,"atTime":"03:00"}' \
+#     '{"actionType":"archive"}'
+#
+# Example (Issue #2674 - add a user to the card when it is moved TO a list, and
+# remove the user again when the card is moved AWAY FROM that list). Trigger
+# matching fields that are omitted (userId, swimlaneName, cardTitle, and the
+# unused one of listName/oldListName) are stored as the '*' wildcard by the
+# server, so the rules fire for any user/swimlane/card title:
+#   python3 api.py addrule BOARDID 'Add member on move to Doing' \
+#     '{"activityType":"moveCard","listName":"Doing"}' \
+#     '{"actionType":"addMember","username":"someuser"}'
+#   python3 api.py addrule BOARDID 'Remove member on move from Doing' \
+#     '{"activityType":"moveCard","oldListName":"Doing"}' \
+#     '{"actionType":"removeMember","username":"someuser"}'
+
+if arguments >= 2 and sys.argv[1] == 'listrules':
+    boardid = sys.argv[2]
+    url = wekanurl + apiboards + boardid + s + 'rules'
+    headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey)}
+    body = requests.get(url, headers=headers)
+    print(body.text)
+
+if arguments >= 3 and sys.argv[1] == 'getrule':
+    boardid = sys.argv[2]
+    ruleid = sys.argv[3]
+    url = wekanurl + apiboards + boardid + s + 'rules' + s + ruleid
+    headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey)}
+    body = requests.get(url, headers=headers)
+    print(body.text)
+
+if arguments >= 3 and sys.argv[1] == 'removerule':
+    boardid = sys.argv[2]
+    ruleid = sys.argv[3]
+    url = wekanurl + apiboards + boardid + s + 'rules' + s + ruleid
+    headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey)}
+    body = requests.delete(url, headers=headers)
+    print(body.text)
+
+if arguments >= 5 and sys.argv[1] == 'addrule':
+    boardid = sys.argv[2]
+    title = sys.argv[3]
+    trigger = json.loads(sys.argv[4])
+    action = json.loads(sys.argv[5])
+    url = wekanurl + apiboards + boardid + s + 'rules'
+    headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey), 'Content-Type': 'application/json'}
+    body = requests.post(url, json={'title': title, 'trigger': trigger, 'action': action}, headers=headers)
+    print(body.text)
+
+if arguments >= 4 and sys.argv[1] == 'editrule':
+    boardid = sys.argv[2]
+    ruleid = sys.argv[3]
+    patch = json.loads(sys.argv[4])
+    url = wekanurl + apiboards + boardid + s + 'rules' + s + ruleid
+    headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey), 'Content-Type': 'application/json'}
+    body = requests.put(url, json=patch, headers=headers)
+    print(body.text)
+
+# ------- RULES API ENDPOINTS END -----------
+
+# ------- CARD DEPENDENCIES ("RED STRINGS") API START -----------
+#
+# Typed card-to-card dependencies, visualized on the board as colored connection
+# lines (SAFe PI-planning "Red Strings"). Each line has:
+#   type  : related-to | blocks | is-blocked-by | fixes | is-fixed-by | duplicates | is-duplicated-by
+#   color : any CSS color, e.g. "#eb144c"
+#   icon  : a FontAwesome 4.7 icon name without the "fa-" prefix, e.g. "link"
+#
+#   python3 api.py listdependencies BOARDID
+#   python3 api.py listcarddependencies BOARDID CARDID
+#   python3 api.py adddependency BOARDID CARDID TARGETCARDID [TYPE] [COLOR] [ICON]
+#   python3 api.py editdependency BOARDID CARDID TARGETCARDID 'PATCH_JSON'  # {"type":..,"color":..,"icon":..}
+#   python3 api.py removedependency BOARDID CARDID TARGETCARDID
+#
+# Example (card A "blocks" card B, drawn as a thick blue arrow):
+#   python3 api.py adddependency BOARDID CARDA CARDB blocks '#2196f3' lock
+
+if arguments >= 2 and sys.argv[1] == 'listdependencies':
+    boardid = sys.argv[2]
+    url = wekanurl + apiboards + boardid + s + 'dependencies'
+    headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey)}
+    body = requests.get(url, headers=headers)
+    print(body.text)
+
+if arguments >= 3 and sys.argv[1] == 'listcarddependencies':
+    boardid = sys.argv[2]
+    cardid = sys.argv[3]
+    url = wekanurl + apiboards + boardid + s + 'cards' + s + cardid + s + 'dependencies'
+    headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey)}
+    body = requests.get(url, headers=headers)
+    print(body.text)
+
+if arguments >= 4 and sys.argv[1] == 'adddependency':
+    boardid = sys.argv[2]
+    cardid = sys.argv[3]
+    targetcardid = sys.argv[4]
+    payload = {'cardId': targetcardid}
+    if arguments >= 5:
+        payload['type'] = sys.argv[5]
+    if arguments >= 6:
+        payload['color'] = sys.argv[6]
+    if arguments >= 7:
+        payload['icon'] = sys.argv[7]
+    url = wekanurl + apiboards + boardid + s + 'cards' + s + cardid + s + 'dependencies'
+    headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey), 'Content-Type': 'application/json'}
+    body = requests.post(url, json=payload, headers=headers)
+    print(body.text)
+
+if arguments >= 5 and sys.argv[1] == 'editdependency':
+    boardid = sys.argv[2]
+    cardid = sys.argv[3]
+    targetcardid = sys.argv[4]
+    patch = json.loads(sys.argv[5])
+    url = wekanurl + apiboards + boardid + s + 'cards' + s + cardid + s + 'dependencies' + s + targetcardid
+    headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey), 'Content-Type': 'application/json'}
+    body = requests.put(url, json=patch, headers=headers)
+    print(body.text)
+
+if arguments >= 4 and sys.argv[1] == 'removedependency':
+    boardid = sys.argv[2]
+    cardid = sys.argv[3]
+    targetcardid = sys.argv[4]
+    url = wekanurl + apiboards + boardid + s + 'cards' + s + cardid + s + 'dependencies' + s + targetcardid
+    headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey)}
+    body = requests.delete(url, headers=headers)
+    print(body.text)
+
+# ------- CARD DEPENDENCIES ("RED STRINGS") API END -----------
+
+# ------- CARD STICKERS / LOCATIONS / COMPLETE START -----------
+#
+# These card fields are set through the card edit endpoint
+# (PUT /api/boards/:boardId/lists/:listId/cards/:cardId):
+#
+#   python3 api.py setcardcomplete BOARDID LISTID CARDID true
+#   python3 api.py setcardstickers BOARDID LISTID CARDID '[{"icon":"taco-cool"}]'
+#   python3 api.py setcardlocations BOARDID LISTID CARDID \
+#     '[{"name":"HQ","address":"Helsinki","latitude":60.17,"longitude":24.94}]'
+
+if arguments >= 5 and sys.argv[1] == 'setcardcomplete':
+    boardid = sys.argv[2]
+    listid = sys.argv[3]
+    cardid = sys.argv[4]
+    dueComplete = sys.argv[5]
+    url = wekanurl + apiboards + boardid + s + l + s + listid + s + cs + s + cardid
+    headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey), 'Content-Type': 'application/json'}
+    body = requests.put(url, json={'dueComplete': dueComplete}, headers=headers)
+    print(body.text)
+
+if arguments >= 5 and sys.argv[1] == 'setcardstickers':
+    boardid = sys.argv[2]
+    listid = sys.argv[3]
+    cardid = sys.argv[4]
+    stickers = json.loads(sys.argv[5])
+    url = wekanurl + apiboards + boardid + s + l + s + listid + s + cs + s + cardid
+    headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey), 'Content-Type': 'application/json'}
+    body = requests.put(url, json={'stickers': stickers}, headers=headers)
+    print(body.text)
+
+if arguments >= 5 and sys.argv[1] == 'setcardlocations':
+    boardid = sys.argv[2]
+    listid = sys.argv[3]
+    cardid = sys.argv[4]
+    locations = json.loads(sys.argv[5])
+    url = wekanurl + apiboards + boardid + s + l + s + listid + s + cs + s + cardid
+    headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey), 'Content-Type': 'application/json'}
+    body = requests.put(url, json={'locations': locations}, headers=headers)
+    print(body.text)
+
+# ------- CARD STICKERS / LOCATIONS / COMPLETE END -----------
+
+# ------- BOARD BACKGROUND IMAGE UPLOAD / DOWNLOAD START -----------
+#
+# Upload/download a board background image. This is the background counterpart
+# of the "upload attachment to board" API; the upload stores a board-level
+# attachment using the current Admin Panel / Attachments / Default Storage and
+# sets it as the board's active background (board admin required).
+#
+#   python3 api.py uploadbackground BOARDID FILEPATH
+#   python3 api.py downloadbackground BOARDID OUTPUTPATH
+
+if arguments >= 3 and sys.argv[1] == 'uploadbackground':
+    boardid = sys.argv[2]
+    filepath = sys.argv[3]
+    import os, mimetypes
+    # Streamed as the request body (the raw upload), never read whole.
+    params = {'boardId': boardid, 'fileName': os.path.basename(filepath),
+              'fileType': mimetypes.guess_type(filepath)[0] or 'image/png'}
+    headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey),
+               'Content-Type': 'application/octet-stream'}
+    url = wekanurl + 'api/attachment/upload-background'
+    try:
+        with open(filepath, 'rb') as f:
+            response = requests.post(url, headers=headers, params=params, data=f)
+    except Exception as e:
+        print(f"Error reading file: {e}")
+        sys.exit(1)
+    print(response.text)
+
+if arguments >= 3 and sys.argv[1] == 'downloadbackground':
+    boardid = sys.argv[2]
+    outputpath = sys.argv[3]
+    # The image itself (?raw=1), written to disk as it arrives.
+    headers = {'Authorization': 'Bearer {}'.format(apikey)}
+    url = wekanurl + f'api/attachment/download-background/{boardid}'
+    with requests.get(url, headers=headers, params={'raw': '1'}, stream=True) as response:
+        if response.status_code == 200:
+            with open(outputpath, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    f.write(chunk)
+            print(f"Background saved to: {outputpath}")
+        else:
+            print(f"Download failed: {response.text}")
+
+# ------- BOARD BACKGROUND IMAGE UPLOAD / DOWNLOAD END -----------
+
+# ------- IMPORT BOARD / MIGRATE FROM ANOTHER WEKAN START -----------
+#
+# Import a whole board WITH its workflows (rules/triggers/actions) and other data
+# from a WeKan board export, or migrate ALL boards from another WeKan instance
+# over the REST API.
+#
+#   python3 api.py importboard EXPORT.json        # import one exported board (with rules)
+#   python3 api.py migratefromwekan REMOTE_URL REMOTE_USER REMOTE_PASS  # import all boards+workflows+rules
+
+if arguments >= 2 and sys.argv[1] == 'importboard':
+    filepath = sys.argv[2]
+    with open(filepath) as f:
+        board = json.load(f)
+    headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey), 'Content-Type': 'application/json'}
+    response = requests.post(wekanurl + 'api/boards/import', headers=headers, json={'board': board})
+    print(response.text)
+
+if arguments >= 4 and sys.argv[1] == 'migratefromwekan':
+    remote = sys.argv[2].rstrip('/') + '/'
+    remote_user = sys.argv[3]
+    remote_pass = sys.argv[4]
+    # 1) Log in to the remote WeKan to get its token + user id.
+    rlogin = requests.post(remote + 'users/login', json={'username': remote_user, 'password': remote_pass}).json()
+    rtoken = rlogin['token']
+    ruid = rlogin['id']
+    rheaders = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(rtoken)}
+    lheaders = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey), 'Content-Type': 'application/json'}
+    # 2) List the remote user's boards.
+    boards = requests.get(remote + 'api/users/{}/boards'.format(ruid), headers=rheaders).json()
+    print('Found {} board(s) on remote WeKan.'.format(len(boards)))
+    # 3) Export each remote board (full JSON incl. rules/workflows) and import locally.
+    for b in boards:
+        bid = b.get('_id') or b.get('id')
+        if not bid:
+            continue
+        export = requests.get(remote + 'api/boards/{}/export'.format(bid), headers=rheaders).json()
+        resp = requests.post(wekanurl + 'api/boards/import', headers=lheaders, json={'board': export})
+        print('{}: HTTP {} {}'.format(b.get('title', bid), resp.status_code, resp.text[:160]))
+
+# ------- IMPORT BOARD / MIGRATE FROM ANOTHER WEKAN END -----------
+
+# ------- EXPORT BOARD TO PDF START -----------
+#
+#   python3 api.py exportboardpdf BOARDID OUTPUT.pdf
+
+if arguments >= 3 and sys.argv[1] == 'exportboardpdf':
+    boardid = sys.argv[2]
+    outputpath = sys.argv[3]
+    headers = {'Authorization': 'Bearer {}'.format(apikey)}
+    url = wekanurl + apiboards + boardid + s + 'exportPDF'
+    response = requests.get(url, headers=headers)
+    with open(outputpath, 'wb') as f:
+        f.write(response.content)
+    print('Board PDF saved to: {}'.format(outputpath))
+
+# ------- EXPORT BOARD TO PDF END -----------
+
+# ------- IMPORT/EXPORT TO OTHER TOOLS START -----------
+#
+# Generalized import from another tool's export, and export to another tool's
+# JSON shape. Sources/formats: trello, wekan, csv, jira, kanboard, excel, deck,
+# openproject, github, gitlab, gitea, forgejo.
+#
+#   python3 api.py importboardfrom SOURCE FILE   # e.g. github issues.json, wrike board.xlsx, notion export.zip
+#   python3 api.py exportboardformat BOARDID FORMAT OUTPUTFILE  # e.g. BOARDID wrike board.xlsx
+
+# The document importBoard expects for SOURCE, built from the file as the
+# import page builds it (models/lib/importSourceShape.js): an Excel workbook as
+# { excelBase64 } (Plane's as { xlsxBase64 }), an export .zip as { zipBase64 },
+# a CSV/TSV file as rows, a text format as its text, and the rest as JSON.
+EXCEL_IMPORT_SOURCES = {'excel', 'planner', 'monday', 'wrike', 'teamwork', 'businessmap'}
+ZIP_IMPORT_SOURCES = {'vikunja', 'notion', 'plane'}
+TEXT_IMPORT_SOURCES = {'markdown', 'todotxt', 'taskwarrior', 'focalboard', 'todoist', 'meistertask', 'obsidian',
+                       'linear', 'ticktick', 'clickup', 'nullboard', 'pivotal', 'redmine', 'superproductivity',
+                       'quire', 'orgmode', 'leo', 'opml', 'vikunja', 'notion', 'plane'}
+
+def import_document(source, filepath):
+    import base64, csv, io, os
+    ext = os.path.splitext(filepath)[1].lower()
+    if source in EXCEL_IMPORT_SOURCES or (source == 'plane' and ext == '.xlsx'):
+        with open(filepath, 'rb') as f:
+            data = base64.b64encode(f.read()).decode('ascii')
+        return {'xlsxBase64': data} if source == 'plane' else {'excelBase64': data}
+    if source in ZIP_IMPORT_SOURCES and ext == '.zip':
+        with open(filepath, 'rb') as f:
+            return {'zipBase64': base64.b64encode(f.read()).decode('ascii')}
+    with open(filepath, encoding='utf-8-sig') as f:
+        text = f.read()
+    if source == 'csv':
+        # As the import page: a file whose first line has a tab is read with
+        # tabs, so a value with a comma in it stays one value; otherwise the
+        # separator with more of it on the first line, a semicolon or a comma.
+        first = text.split('\n', 1)[0]
+        if '\t' in first:
+            delimiter = '\t'
+        else:
+            delimiter = ';' if first.count(';') > first.count(',') else ','
+        return [row for row in csv.reader(io.StringIO(text), delimiter=delimiter)]
+    if source in TEXT_IMPORT_SOURCES:
+        return text
+    return json.loads(text)
+
+# A WeKan .zip export (the document and its attachment files) is imported as
+# a new board by /api/import/zip?newBoard=1, which unpacks it on the server.
+def post_wekan_zip(filepath):
+    with open(filepath, 'rb') as f:
+        data = f.read()
+    headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey), 'Content-Type': 'application/zip'}
+    return requests.post(wekanurl + 'api/import/zip', headers=headers, params={'newBoard': '1'}, data=data)
+
+if arguments >= 3 and sys.argv[1] == 'importboardfrom' and sys.argv[2] == 'wekan' and sys.argv[3].lower().endswith('.zip'):
+    print(post_wekan_zip(sys.argv[3]).text)
+elif arguments >= 3 and sys.argv[1] == 'importboardfrom':
+    source = sys.argv[2]
+    filepath = sys.argv[3]
+    board = import_document(source, filepath)
+    headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey), 'Content-Type': 'application/json'}
+    url = wekanurl + apiboards + 'import/' + source
+    body = {'board': board}
+    # CSV/TSV and Excel: --csv-mapping MAPPING.json says which column holds
+    # which card field, as the import page's mapping step does, e.g.
+    # {"columns": {"title": 0, "list": 2}} or {"columns": {"title": 0}, "listName": "To do"}.
+    if '--csv-mapping' in sys.argv:
+        with open(sys.argv[sys.argv.index('--csv-mapping') + 1], encoding='utf-8') as f:
+            body['csvMapping'] = json.load(f)
+    response = requests.post(url, headers=headers, json=body)
+    print(response.text)
+
+# Import many boards: every FILE (a directory gives its files, a .zip that is
+# not itself one export of SOURCE gives the files inside it), each as its own
+# board - what the import page's "Import many boards" does. --split makes one
+# board per project (per swimlane) of each file, for the generalized importer.
+#   python3 api.py importboardsfrom SOURCE [--split] FILE_OR_DIR ...
+def many_import_files(source, paths):
+    import os, zipfile
+    files = []
+    for path in paths:
+        if os.path.isdir(path):
+            for root, _, names in os.walk(path):
+                files.extend(os.path.join(root, name) for name in sorted(names) if not name.startswith('.'))
+        elif path.lower().endswith('.zip') and source not in ZIP_IMPORT_SOURCES and source != 'wekan':
+            import tempfile
+            target = tempfile.mkdtemp(prefix='wekan-import-')
+            with zipfile.ZipFile(path) as archive:
+                for info in archive.infolist():
+                    name = info.filename
+                    if info.is_dir() or name.startswith('__MACOSX/') or os.path.basename(name).startswith('.'):
+                        continue
+                    if os.path.isabs(name) or '..' in name.split('/'):
+                        continue
+                    archive.extract(info, target)
+                    files.append(os.path.join(target, name))
+        else:
+            files.append(path)
+    return files
+
+if arguments >= 3 and sys.argv[1] == 'importboardsfrom':
+    source = sys.argv[2]
+    rest = sys.argv[3:]
+    split = '--split' in rest
+    paths = [path for path in rest if path != '--split']
+    headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey), 'Content-Type': 'application/json'}
+    url = wekanurl + apiboards + 'import/' + source
+    for filepath in many_import_files(source, paths):
+        try:
+            if source == 'wekan' and filepath.lower().endswith('.zip'):
+                print('{}: {}'.format(filepath, post_wekan_zip(filepath).text))
+                continue
+            body = {'board': import_document(source, filepath)}
+            if split:
+                body['splitBy'] = 'swimlane'
+            response = requests.post(url, headers=headers, json=body)
+            print('{}: {}'.format(filepath, response.text))
+        except Exception as error:
+            print('{}: not imported: {}'.format(filepath, error))
+
+# Export all boards: every board the user can export, in FORMAT, in one
+# download - Excel as one workbook with a sheet per board, every other format
+# as a .zip with one file per board. --boards ID1,ID2 exports only those.
+#   python3 api.py exportallboards FORMAT OUTPUTFILE [--boards ID1,ID2]
+if arguments >= 3 and sys.argv[1] == 'exportallboards':
+    fmt = sys.argv[2]
+    outputpath = sys.argv[3]
+    params = {}
+    if '--boards' in sys.argv:
+        params['boardIds'] = sys.argv[sys.argv.index('--boards') + 1]
+    headers = {'Authorization': 'Bearer {}'.format(apikey)}
+    response = requests.get(wekanurl + 'api/export-all-boards/' + fmt, headers=headers, params=params)
+    if response.status_code != 200:
+        print('Export failed ({}): {}'.format(response.status_code, response.text))
+    else:
+        with open(outputpath, 'wb') as f:
+            f.write(response.content)
+        print('All boards exported ({}) to: {}'.format(fmt, outputpath))
+
+if arguments >= 4 and sys.argv[1] == 'exportboardformat':
+    boardid = sys.argv[2]
+    fmt = sys.argv[3]
+    outputpath = sys.argv[4]
+    headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey)}
+    # The formats with routes of their own; every tool format is export/FORMAT.
+    params = {}
+    if fmt in ('wekan', 'json'):
+        url = wekanurl + apiboards + boardid + s + 'export'
+    elif fmt == 'zip':
+        url = wekanurl + apiboards + boardid + s + 'exportZip'
+    elif fmt == 'excel':
+        url = wekanurl + apiboards + boardid + s + 'exportExcel'
+    elif fmt == 'pdf':
+        url = wekanurl + apiboards + boardid + s + 'exportPDF'
+    elif fmt in ('csv', 'scsv', 'tsv'):
+        url = wekanurl + apiboards + boardid + s + 'export' + s + 'csv'
+        params = {'delimiter': {'csv': ',', 'scsv': ';', 'tsv': '\t'}[fmt]}
+    else:
+        url = wekanurl + apiboards + boardid + s + 'export' + s + fmt
+    response = requests.get(url, headers=headers, params=params)
+    # Bytes, so an .xlsx or .zip export is written as it was sent.
+    with open(outputpath, 'wb') as f:
+        f.write(response.content)
+    print('Board exported ({}) to: {}'.format(fmt, outputpath))
+
+if arguments >= 5 and sys.argv[1] == 'importics':
+    # Usage: python3 api.py importics BOARDID SWIMLANEID LISTID CALENDAR.ics
+    # Imports an iCalendar (.ics) file into the board: one card is created per
+    # VEVENT, with startAt (DTSTART) and dueAt (DTEND, or DTSTART when there is
+    # no DTEND), so the events appear on the Calendar / Gantt views (issue #6323).
+    boardid = sys.argv[2]
+    swimlaneid = sys.argv[3]
+    listid = sys.argv[4]
+    icspath = sys.argv[5]
+    with open(icspath) as f:
+        ics_text = f.read()
+    headers = {'Accept': 'application/json', 'Authorization': 'Bearer {}'.format(apikey), 'Content-Type': 'application/json'}
+    url = wekanurl + apiboards + boardid + s + 'swimlanes' + s + swimlaneid + s + l + s + listid + s + 'ics'
+    response = requests.post(url, headers=headers, json={'ics': ics_text})
+    # Response: { "created": <n>, "cardIds": [ ... ] }
+    print(response.text)
+
+# ------- IMPORT/EXPORT TO OTHER TOOLS END -----------

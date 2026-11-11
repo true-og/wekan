@@ -1,15 +1,35 @@
+import { markBoardVisited } from '/client/lib/boardVisits';
 import { ReactiveCache } from '/imports/reactiveCache';
+import { setSortableOptions } from '/client/lib/sortableOptions';
 import { FlowRouter } from 'meteor/ostrio:flow-router-extra';
 import { TAPi18n } from '/imports/i18n';
-import dragscroll from '@wekanteam/dragscroll';
+import {
+  suspendBoardDragscroll,
+  resumeBoardDragscroll,
+  resetBoardDragscroll,
+} from '/client/lib/boardDragscroll';
 import '/client/lib/dragscrollTouch';
+import '/client/lib/dragDropTouch';
 import { boardConverter } from '/client/lib/boardConverter';
+// Bring the swimlane or list a link named into view, once it has rendered.
+import { watchBoardItemReveals } from '/client/lib/revealBoardItem';
 import { formatDateByUserPreference } from '/imports/lib/dateUtils';
+import { calendarDateDisplayOptions } from '/client/lib/dateDisplay';
+import { toFullCalendarFirstDay } from '/client/lib/calendarFirstDay';
+import { weekNumberByFirstDay } from '/models/lib/weekStart';
+import { calendarBaseOptions } from '/models/lib/calendarBaseOptions';
 import Swimlanes from '/models/swimlanes';
 import Lists from '/models/lists';
 import TableVisibilityModeSettings from '/models/tableVisibilityModeSettings';
 import { EscapeActions } from '/client/lib/escapeActions';
 import { Utils } from '/client/lib/utils';
+import { Filter } from '/client/lib/filter';
+import {
+  parseBoardFilterQueryParams,
+  buildBoardFilterQueryParams,
+} from '/client/lib/filterQueryParams';
+import { migrationProgressManager } from '/client/components/settings/migrationProgress';
+import { focusFirstControl } from '/client/lib/accessibility';
 
 // SubsManager removed for Meteor 3 migration
 const { calculateIndex } = Utils;
@@ -20,9 +40,149 @@ let BoardBody = null;
 
 Template.board.onCreated(function () {
   this.isBoardReady = new ReactiveVar(false);
+  // The board publication stopped with an error: say so instead of spinning
+  // forever (a board restored from an old WeKan whose data the publication
+  // could not read showed only the loading animation).
+  this.boardLoadError = new ReactiveVar(false);
   // Kept for the template/jade which still references it; conversion is a no-op.
   this.isConverting = new ReactiveVar(false);
   this._swimlaneCreated = new Set(); // boards where a default swimlane was ensured
+  this._listRepairChecked = new Set(); // boards whose data-repair was checked
+  this._queryFiltersApplied = new Set(); // boards whose URL filter params were applied
+
+  // #4540: let a board's filter state be driven by URL query params, e.g.
+  // `?assignee=johndoe` or `?member=johndoe,janedoe&label=urgent`, so a link
+  // (for instance embedded in an iframe) opens the board already filtered.
+  // Reuses the existing `Filter` sidebar state/API - this only translates the
+  // query params into the same `Filter.assignees` / `Filter.members` /
+  // `Filter.labelIds` calls the sidebar UI would make. Applied once per board
+  // load (guarded by `_queryFiltersApplied`), reading the query params once
+  // rather than reactively - this is a one-time "open pre-filtered" bridge,
+  // not two-way URL sync.
+  this.applyQueryParamFilters = (boardId) => {
+    if (!boardId || this._queryFiltersApplied.has(boardId)) {
+      return;
+    }
+    this._queryFiltersApplied.add(boardId);
+
+    const assigneeParam = FlowRouter.getQueryParam('assignee');
+    const memberParam = FlowRouter.getQueryParam('member');
+    const labelParam = FlowRouter.getQueryParam('label');
+    if (!assigneeParam && !memberParam && !labelParam) {
+      return;
+    }
+
+    const board = ReactiveCache.getBoard(boardId);
+    if (!board) {
+      return;
+    }
+
+    // Collect candidate usernames from both params to look up in one query.
+    const usernames = new Set();
+    (assigneeParam || '')
+      .split(',')
+      .concat((memberParam || '').split(','))
+      .map(u => u.trim())
+      .filter(Boolean)
+      .forEach(u => usernames.add(u));
+
+    const users = ReactiveCache.getUsers(
+      { username: { $in: Array.from(usernames) } },
+      { fields: { _id: 1, username: 1 } },
+    ) || [];
+
+    const { assigneeIds, memberIds, labelIds } = parseBoardFilterQueryParams(
+      { assignee: assigneeParam, member: memberParam, label: labelParam },
+      users,
+      board.labels,
+    );
+
+    assigneeIds.forEach(id => Filter.assignees.add(id));
+    memberIds.forEach(id => Filter.members.add(id));
+    labelIds.forEach(id => Filter.labelIds.add(id));
+  };
+
+  // #319: the write direction of the two-way URL sync #4540 started. Mirrors
+  // the `Filter` sidebar's current assignee/member/label selection into the
+  // `?assignee=`/`?member=`/`?label=` query params (reusing
+  // `buildBoardFilterQueryParams`'s token format, the exact inverse of
+  // `parseBoardFilterQueryParams` above) so a manually filtered board is a
+  // bookmarkable/shareable URL without the user having to hand-type it.
+  // Reactive by design (unlike the one-time `applyQueryParamFilters`
+  // read): every `Filter.assignees`/`members`/`labelIds` change re-runs this
+  // and updates the URL. Uses `FlowRouter.withReplaceState` so toggling a
+  // filter replaces the current history entry instead of piling up a new one
+  // per click.
+  this.syncFilterQueryParams = (boardId) => {
+    if (!boardId) {
+      return;
+    }
+    const assigneeIds = Filter.assignees.list();
+    const memberIds = Filter.members.list();
+    const labelIds = Filter.labelIds.list();
+
+    const board = ReactiveCache.getBoard(boardId);
+    if (!board) {
+      return;
+    }
+
+    const userIds = new Set([...assigneeIds, ...memberIds]);
+    const users = ReactiveCache.getUsers(
+      { _id: { $in: Array.from(userIds) } },
+      { fields: { _id: 1, username: 1 } },
+    ) || [];
+
+    const queryParams = buildBoardFilterQueryParams(
+      { assigneeIds, memberIds, labelIds },
+      users,
+      board.labels,
+    );
+
+    FlowRouter.withReplaceState(() => {
+      FlowRouter.setQueryParams(queryParams);
+    });
+  };
+
+  // When a board opens, detect whether it needs the shared data-repairs (the same
+  // set run during the MongoDB <-> SQLite migration): #6484 lists wrongly bound to
+  // a swimlane (a list DISAPPEARS from the other swimlanes), cards with no
+  // swimlane, and orphaned cards whose swimlane was deleted (invisible cards). If
+  // anything needs fixing and the viewer is a board admin, repair it — showing the
+  // shared blue, Product-name-branded migration-progress dashboard. Checked once
+  // per board, fire-and-forget so it never blocks rendering.
+  this.maybeRepairBoard = (boardId) => {
+    if (!boardId || this._listRepairChecked.has(boardId)) {
+      return;
+    }
+    this._listRepairChecked.add(boardId);
+    Meteor.call('boardRepairNeeded', boardId, (err, res) => {
+      if (err || !res || !res.total || !res.canRepair) {
+        return; // nothing to fix, or the viewer is not a board admin
+      }
+      migrationProgressManager.startMigration();
+      migrationProgressManager.updateProgress({
+        overallProgress: 20,
+        currentStep: 1,
+        totalSteps: 1,
+        stepName: 'repair_board_data',
+        stepProgress: 20,
+        stepStatus: 'running',
+        stepDetails: {
+          lists: res.listsUnbound,
+          cards: res.cardsAssigned + res.cardsRescued,
+        },
+        boardId,
+      });
+      Meteor.call('repairBoardData', boardId, (err2) => {
+        if (err2) {
+          this._listRepairChecked.delete(boardId); // allow a retry
+          migrationProgressManager.failMigration(err2);
+          return;
+        }
+        migrationProgressManager.completeMigration();
+      });
+    });
+  };
 
   // Ensure a board has at least one swimlane. Guarded to run once per board and
   // fire-and-forget so it never blocks rendering. The board is marked
@@ -64,21 +224,68 @@ Template.board.onCreated(function () {
   // Pattern: https://kadira.io/academy/meteor-routing-guide/content/subscriptions-and-data-management/using-subs-manager
   this.autorun(() => {
     const currentBoardId = Session.get('currentBoard');
-    if (!currentBoardId) {
+    // Creating a linked card changes the set of source cards, boards and field
+    // definitions that the composite publication must expose. Reading this
+    // generation lets the link dialog restart the subscription immediately;
+    // otherwise those child cursors are only recalculated after a page reload.
+    const subscriptionGeneration =
+      Session.get('boardSubscriptionGeneration') || 0;
+    // A same-board refresh must not tear down boardBody and its open card
+    // windows. Date saves refresh this publication to pick up stored values;
+    // toggling readiness off recreates each window at its default dock before
+    // anchoring it again. A different board still starts behind the spinner.
+    if (this.subscriptionBoardId !== currentBoardId) {
+      this.subscriptionBoardId = currentBoardId;
       this.isBoardReady.set(false);
-      return;
+      this.boardLoadError.set(false);
     }
+    if (!currentBoardId) return;
 
-    const handle = Meteor.subscribe('board', currentBoardId, false);
+    const handle = Meteor.subscribe(
+      'board',
+      currentBoardId,
+      false,
+      subscriptionGeneration,
+      {
+        onStop: (error) => {
+          if (error && this.subscriptionBoardId === currentBoardId) {
+            console.error('[board] the board publication stopped:', error.reason || error.message || error.error);
+            this.boardLoadError.set(true);
+          }
+        },
+      },
+    );
+    // Learn this board's card-loading mode (lazy vs eager) so 'auto' can decide
+    // per board by size; the flag drives isLazyCards(boardId). #6480.
+    Meteor.subscribe('boardCardsLoadingMode', currentBoardId);
     const ready = handle.ready();
-    this.isBoardReady.set(ready);
+    if (ready) this.isBoardReady.set(true);
 
     if (ready) {
       // Run outside the computation so this autorun depends only on the board
       // id and the subscription's ready state — not on the swimlane data that
       // ensureDefaultSwimlane reads — which would otherwise cause extra re-runs.
       Tracker.nonreactive(() => this.ensureDefaultSwimlane(currentBoardId));
+      // Also detect + run the shared board data-repairs once the board is ready.
+      Tracker.nonreactive(() => this.maybeRepairBoard(currentBoardId));
+      // #4540: apply any ?assignee=/?member=/?label= URL filter params now
+      // that the board and its members/labels are loaded.
+      Tracker.nonreactive(() => this.applyQueryParamFilters(currentBoardId));
     }
+  });
+
+  // #319: keep the URL's ?assignee=/?member=/?label= in sync with the
+  // sidebar's Filter state as the user changes it, so a manually filtered
+  // board is bookmarkable/shareable - the write direction of #4540's
+  // read-on-load support. A separate autorun (rather than folding this into
+  // the subscription one above) so it reruns on every filter change without
+  // resubscribing to the board.
+  this.autorun(() => {
+    const currentBoardId = Session.get('currentBoard');
+    if (!currentBoardId || !this.isBoardReady.get()) {
+      return;
+    }
+    this.syncFilterQueryParams(currentBoardId);
   });
 });
 
@@ -109,6 +316,9 @@ Template.board.helpers({
     return Template.instance().isConverting.get();
   },
 
+  boardLoadError() {
+    return Template.instance().boardLoadError.get();
+  },
   isBoardReady() {
     return Template.instance().isBoardReady.get();
   },
@@ -130,6 +340,12 @@ Template.boardBody.onCreated(function () {
 
   // Store global reference for external access (swimlanes, cardDetails, etc.)
   BoardBody = this;
+
+  // Remember this visit, once per board per page load, for Board menu ->
+  // Since your last visit (client/lib/boardVisits.js).
+  this.autorun(() => {
+    markBoardVisited(Session.get('currentBoard'));
+  });
 
   // Methods on the template instance for programmatic access
   this.setIsDragging = (bool) => {
@@ -153,34 +369,11 @@ Template.boardBody.onCreated(function () {
   };
 
   this.isViewSwimlanes = () => {
-    const currentUser = ReactiveCache.getCurrentUser();
-    let boardView;
-
-    if (currentUser) {
-      boardView = (currentUser.profile || {}).boardView;
-    } else {
-      boardView = window.localStorage.getItem('boardView');
-    }
-
-    // If no board view is set, default to swimlanes
-    if (!boardView) {
-      boardView = 'board-view-swimlanes';
-    }
-
-    return boardView === 'board-view-swimlanes';
+    return Utils.boardView() === 'board-view-swimlanes';
   };
 
   this.isViewLists = () => {
-    const currentUser = ReactiveCache.getCurrentUser();
-    let boardView;
-
-    if (currentUser) {
-      boardView = (currentUser.profile || {}).boardView;
-    } else {
-      boardView = window.localStorage.getItem('boardView');
-    }
-
-    return boardView === 'board-view-lists';
+    return Utils.boardView() === 'board-view-lists';
   };
 
   // fix swimlanes sort field if there are null values
@@ -233,49 +426,38 @@ Template.boardBody.onRendered(function () {
   // Initialize user settings (zoom and mobile mode)
   Utils.initializeUserSettings();
 
+  // A link to a swimlane or a list has to end with that thing on screen. The
+  // route can only NAME it - it runs before this has rendered - so the reveal
+  // waits here for the element to exist. client/lib/revealBoardItem.js
+  this.boardItemReveals = watchBoardItemReveals();
+
   // Detect iPhone devices and add class for better CSS targeting
   const isIPhone = /iPhone|iPod/.test(navigator.userAgent);
   if (isIPhone) {
     document.body.classList.add('iphone-device');
   }
 
-  // Accessibility: Focus management for popups and menus
-  function focusFirstInteractive(container) {
-    if (!container) return;
-    // Find first focusable element
-    const focusable = container.querySelectorAll(
-      'button, [role="button"], a[href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
-    );
-    for (let i = 0; i < focusable.length; i++) {
-      if (!focusable[i].disabled && focusable[i].offsetParent !== null) {
-        focusable[i].focus();
-        break;
-      }
-    }
-  }
-
-  // Observe for new popups/menus and set focus (but exclude swimlane content)
-  const popupObserver = new MutationObserver(function (mutations) {
+  // Popups and modals use their shared focus lifecycle. Board-only menus that
+  // are inserted outside that lifecycle still need their first control focused.
+  this._accessibilityMenuObserver = new MutationObserver(function (mutations) {
     mutations.forEach(function (mutation) {
       mutation.addedNodes.forEach(function (node) {
         if (
           node.nodeType === 1 &&
-          (node.classList.contains('popup') ||
-            node.classList.contains('modal') ||
-            node.classList.contains('menu')) &&
+          node.classList.contains('menu') &&
           !node.closest('.js-swimlanes') &&
           !node.closest('.swimlane') &&
           !node.closest('.list') &&
           !node.closest('.minicard')
         ) {
           setTimeout(function () {
-            focusFirstInteractive(node);
+            focusFirstControl(node);
           }, 10);
         }
       });
     });
   });
-  popupObserver.observe(document.body, { childList: true, subtree: true });
+  this._accessibilityMenuObserver.observe(document.body, { childList: true, subtree: true });
 
   // Remove tabindex from non-interactive elements (e.g., user abbreviations, labels)
   document
@@ -324,7 +506,7 @@ Template.boardBody.onRendered(function () {
     el.setAttribute('role', 'button');
     // Short, descriptive label for favorite/star toggle
     if (el.classList.contains('js-favorite-toggle')) {
-      el.setAttribute('aria-label', TAPi18n.__('favorite-toggle-label'));
+      el.setAttribute('aria-label', `${TAPi18n.__('star-item')} / ${TAPi18n.__('unstar-item')}`);
     } else {
       el.setAttribute('aria-label', 'Toggle');
     }
@@ -353,8 +535,10 @@ Template.boardBody.onRendered(function () {
     el.setAttribute('tabindex', '0');
     el.setAttribute('role', 'button');
   });
-  // Set the language attribute on the <html> element for accessibility
+  // Set the language and direction attributes on the <html> element for
+  // accessibility and RTL layout.
   document.documentElement.lang = TAPi18n.getLanguage();
+  document.documentElement.dir = TAPi18n.getLanguageDirection();
 
   // Ensure the accessible name for the board view switcher matches the visible label "Swimlanes"
   // This fixes WCAG 2.5.3: Label in Name
@@ -389,8 +573,9 @@ Template.boardBody.onRendered(function () {
       .js-add-card[tabindex] {
         outline: none;
       }
-      /* Sidebar hamburger menu button in header */
-      .js-toggle-sidebar .fa-bars {
+      /* Sidebar hamburger menu button in header. Renamed with the button when
+         it moved to the first top header bar: docs/Features/Header-Bar/Header.md */
+      .js-toggle-page-sidebar .fa-bars {
         color: #fff !important;
       }
       /* Grey icons in card detail header */
@@ -461,6 +646,7 @@ Template.boardBody.onRendered(function () {
       EscapeActions.executeUpTo('popup-close');
       listDom.addClass('moving-swimlane');
       tpl.setIsDragging(true);
+      suspendBoardDragscroll(); // #6558
 
       ui.placeholder.insertAfter(ui.placeholder.next());
       tpl.origPlaceholderIndex = ui.placeholder.index();
@@ -501,6 +687,7 @@ Template.boardBody.onRendered(function () {
       const nextSwimlaneDom = ui.item.nextAll('.js-swimlane').get(0);
       const sortIndex = calculateIndex(prevSwimlaneDom, nextSwimlaneDom, 1);
 
+      resumeBoardDragscroll(); // #6558
       $swimlanesDom.sortable('cancel');
       const swimlaneDomElement = ui.item.get(0);
       const swimlane = Blaze.getData(swimlaneDomElement);
@@ -551,34 +738,72 @@ Template.boardBody.onRendered(function () {
   });
 
   this.autorun(() => {
-    // Always reset dragscroll on view switch
-    dragscroll.reset();
+    // Re-attach mouse dragscroll whenever the set of rendered `.dragscroll`
+    // containers can change. The @wekanteam/dragscroll mouse handler is attached
+    // PER element inside reset(), so it must be re-run after the DOM changes;
+    // only dragscrollTouch (delegated on `document`) covers reactively-added
+    // nodes, and that is touch-only. Previously this autorun's only reactive deps
+    // were the touch/permission reads below, so mouse drag-scrolling stayed dead
+    // when swimlanes/lists rendered AFTER onRendered — adaptive lazy card loading
+    // (#6480), the on-open data-repair adding a default swimlane (#6484), or a
+    // board switch that reuses this template instance without re-firing onRendered
+    // (see the #4978 note below) — leaving lower swimlanes unreachable by drag on
+    // touchpad/mouse. Reading the board view + swimlanes + lists here establishes
+    // those dependencies so reset() re-runs when the containers change. None of
+    // these reads write to the DB, so there is no autorun write loop.
+    const dragscrollBoard = Utils.getCurrentBoard();
+    if (dragscrollBoard) {
+      Utils.boardView();
+      dragscrollBoard.swimlanes();
+      dragscrollBoard.draggableLists();
+    }
+    resetBoardDragscroll();
 
     if ($swimlanesDom.data('uiSortable') || $swimlanesDom.data('sortable')) {
-      if (Utils.isTouchScreenOrShowDesktopDragHandles()) {
-        $swimlanesDom.sortable(
-          'option',
-          'handle',
-          '.js-swimlane-header-handle',
-        );
-      } else {
-        $swimlanesDom.sortable('option', 'handle', '.swimlane-header');
-      }
 
-      // Disable drag-dropping if the current user is not a board member
-      $swimlanesDom.sortable(
-        'option',
-        'disabled',
-        !ReactiveCache.getCurrentUser()?.isBoardAdmin(),
-      );
+      // #6446: enable swimlane drag-drop — which also carries moving cards BETWEEN
+      // swimlanes — for any board member with write access, not only board admins.
+      // The old !isBoardAdmin() check disabled this sortable for every non-admin, so
+      // a normal member could still move a card WITHIN a swimlane but not BETWEEN
+      // swimlanes (a card crossing swimlanes is received across this sortable), and
+      // could not reorder swimlanes. Write access to the BOARD is the test
+      // (board member, not comment-only / worker / read-only), matching the
+      // server's allowIsBoardMemberWithWriteAccess.
+      //
+      // #6745: canModifyBoard(), not canModifyCard() with no argument - that one
+      // reads the OPEN card, so this whole autorun (dragscroll reset and all)
+      // re-ran on every card open and close. And only the options that changed.
+      setSortableOptions($swimlanesDom, {
+        handle: Utils.isTouchScreenOrShowDesktopDragHandles()
+          ? '.js-swimlane-header-handle'
+          : '.swimlane-header',
+        items: Utils.canDragBoardObject('swimlane') ? '.swimlane:not(.placeholder)' : '.no-draggable-swimlanes',
+        disabled: !Utils.canModifyBoard(),
+      });
     }
   });
 
-  dragscroll.reset();
-  Utils.setBackgroundImage();
+  resetBoardDragscroll();
+  // #4978: apply the board background inside a reactive autorun instead of a
+  // one-shot call. Switching directly between boards (e.g. the favorites bar)
+  // reuses this template instance and never re-fires onRendered, so the
+  // background used to stay on the previously shown board. Reading the current
+  // board inside setBackgroundImage() tracks both board switches and background
+  // edits; it performs no DB writes, so there is no autorun write loop.
+  this.autorun(() => {
+    Utils.setBackgroundImage();
+  });
 });
 
 Template.boardBody.onDestroyed(function () {
+  this._accessibilityMenuObserver?.disconnect();
+  this._accessibilityMenuObserver = null;
+  // The reveal watcher owns a Tracker computation and a retry interval, and
+  // neither stops on its own when this template goes.
+  if (this.boardItemReveals) {
+    this.boardItemReveals.stop();
+    this.boardItemReveals = null;
+  }
   if (BoardBody === this) {
     BoardBody = null;
   }
@@ -611,65 +836,152 @@ Template.boardBody.helpers({
       allowPrivateVisibilityOnly !== undefined &&
       allowPrivateVisibilityOnly.booleanValue &&
       currentBoard &&
-      currentBoard.permission == 'public'
+      // #3249: an 'instance' board is not private either.
+      (currentBoard.permission === 'public' || currentBoard.permission === 'instance')
     );
   },
 
   isViewSwimlanes() {
-    const currentUser = ReactiveCache.getCurrentUser();
-    let boardView;
-
-    if (currentUser) {
-      boardView = (currentUser.profile || {}).boardView;
-    } else {
-      boardView = window.localStorage.getItem('boardView');
-    }
-
-    // If no board view is set, default to swimlanes
-    if (!boardView) {
-      boardView = 'board-view-swimlanes';
-    }
-
-    return boardView === 'board-view-swimlanes';
+    return Utils.boardView() === 'board-view-swimlanes';
   },
 
   isViewLists() {
-    const currentUser = ReactiveCache.getCurrentUser();
-    let boardView;
-
-    if (currentUser) {
-      boardView = (currentUser.profile || {}).boardView;
-    } else {
-      boardView = window.localStorage.getItem('boardView');
-    }
-
-    return boardView === 'board-view-lists';
+    return Utils.boardView() === 'board-view-lists';
   },
 
   isViewCalendar() {
-    const currentUser = ReactiveCache.getCurrentUser();
-    let boardView;
+    return Utils.boardView() === 'board-view-cal';
+  },
+  isViewCalendarMode() {
+    return Utils.boardView() === 'board-view-calendar-mode';
+  },
 
-    if (currentUser) {
-      boardView = (currentUser.profile || {}).boardView;
-    } else {
-      boardView = window.localStorage.getItem('boardView');
-    }
-
-    return boardView === 'board-view-cal';
+  isViewMultiboardCalendar() {
+    return Utils.boardView() === 'board-view-multiboard-cal';
   },
 
   isViewGantt() {
-    const currentUser = ReactiveCache.getCurrentUser();
-    let boardView;
+    return Utils.boardView() === 'board-view-gantt';
+  },
 
-    if (currentUser) {
-      boardView = (currentUser.profile || {}).boardView;
-    } else {
-      boardView = window.localStorage.getItem('boardView');
-    }
+  isViewGanttFrappe() {
+    return Utils.boardView() === 'board-view-gantt-frappe';
+  },
 
-    return boardView === 'board-view-gantt';
+  isViewGanttDhtmlx() {
+    return Utils.boardView() === 'board-view-gantt-dhtmlx';
+  },
+
+  isViewTable() {
+    return Utils.boardView() === 'board-view-table';
+  },
+
+  isViewStats() {
+    return Utils.boardView() === 'board-view-stats';
+  },
+
+  isViewTime() {
+    return Utils.boardView() === 'board-view-time';
+  },
+
+  isViewTimeline() {
+    return Utils.boardView() === 'board-view-timeline';
+  },
+
+  isViewGroupByAssignee() {
+    return Utils.boardView() === 'board-view-group-by-assignee';
+  },
+
+  isViewRoadmap() {
+    return Utils.boardView() === 'board-view-roadmap';
+  },
+
+  isViewDashboard() {
+    return Utils.boardView() === 'board-view-dashboard';
+  },
+
+  isViewBigboard() {
+    return Utils.boardView() === 'board-view-bigboard';
+  },
+
+  isViewBurndown() {
+    return Utils.boardView() === 'board-view-burndown';
+  },
+
+  isViewBurnup() {
+    return Utils.boardView() === 'board-view-burnup';
+  },
+
+  isViewCumulativeFlow() {
+    return Utils.boardView() === 'board-view-cumulative-flow';
+  },
+
+  isViewControlChart() {
+    return Utils.boardView() === 'board-view-control-chart';
+  },
+
+  isViewCycleTime() {
+    return Utils.boardView() === 'board-view-cycle-time';
+  },
+
+  isViewFlowEfficiency() {
+    return Utils.boardView() === 'board-view-flow-efficiency';
+  },
+
+  isViewLeadTime() {
+    return Utils.boardView() === 'board-view-lead-time';
+  },
+
+  isViewThroughputHistogram() {
+    return Utils.boardView() === 'board-view-throughput-histogram';
+  },
+
+  isViewWipRun() {
+    return Utils.boardView() === 'board-view-wip-run';
+  },
+
+  isViewScrum() {
+    return ['board-view-product-backlog', 'board-view-sprints', 'board-view-sprint-report', 'board-view-velocity'].includes(Utils.boardView());
+  },
+
+  isViewAgingWip() {
+    return Utils.boardView() === 'board-view-aging-wip';
+  },
+
+  isViewBlockerAnalysis() {
+    return Utils.boardView() === 'board-view-blocker-analysis';
+  },
+
+  isViewMonteCarlo() {
+    return Utils.boardView() === 'board-view-monte-carlo';
+  },
+
+  isViewProcessBehavior() {
+    return Utils.boardView() === 'board-view-process-behavior';
+  },
+
+  isViewSizeCycleTime() {
+    return Utils.boardView() === 'board-view-size-cycle-time';
+  },
+
+  isViewMap() {
+    return Utils.boardView() === 'board-view-map';
+  },
+  isViewEmail() {
+    return Utils.boardView() === 'board-view-email';
+  },
+  isViewChat() {
+    return Utils.boardView() === 'board-view-chat';
+  },
+  isViewColumnSets() {
+    return Utils.boardView() === 'board-view-column-sets';
+  },
+  isViewVersionControl() {
+    return Utils.boardView() === 'board-view-version-control';
+  },
+
+  isViewPulse() {
+    return Utils.boardView() === 'board-view-pulse';
   },
 
   hasSwimlanes() {
@@ -907,10 +1219,17 @@ document.addEventListener('keydown', function (e) {
 });
 
 Template.calendarView.onRendered(function () {
-  // Set the language attribute on the <html> element for accessibility
+  // Set the language and direction attributes on the <html> element for
+  // accessibility and RTL layout.
   document.documentElement.lang = TAPi18n.getLanguage();
+  document.documentElement.dir = TAPi18n.getLanguageDirection();
 
   this.autorun(function () {
+    // #5656: refetch calendar events whenever the active board Filter changes
+    // so the Calendar view stays in sync with the other views. Reading the
+    // Filter's reactive state here establishes the dependency; the events()
+    // callback below applies the actual selector.
+    Filter.isActive();
     const calendarEl = document.getElementById('calendar-view');
     if (calendarEl && calendarEl._wekanCalendar) {
       calendarEl._wekanCalendar.refetchEvents();
@@ -920,59 +1239,42 @@ Template.calendarView.onRendered(function () {
 
 Template.calendarView.helpers({
   calendarOptions() {
-    const t = (key, fallback) => {
-      const translated = TAPi18n.__(key);
-      return translated && translated !== key ? translated : fallback;
-    };
+    // #5521: getStartDayOfWeek() returns a zero-based day index
+    // (0=Sunday..6=Saturday), the convention FullCalendar's firstDay uses;
+    // toFullCalendarFirstDay() validates it and falls back to Monday (1).
+    const currentUser = ReactiveCache.getCurrentUser();
+    const firstDay = toFullCalendarFirstDay(
+      currentUser ? currentUser.getStartDayOfWeek() : 1,
+    );
 
     return {
-      id: 'calendar-view',
-      initialView: 'dayGridMonth',
+      ...calendarBaseOptions({
+        id: 'calendar-view',
+        displayOptions: calendarDateDisplayOptions('calendar-view'),
+        firstDay,
+        weekNumberOf: weekNumberByFirstDay,
+        translate: key => TAPi18n.__(key),
+        locale: TAPi18n.getLanguage(),
+        rtl: TAPi18n.isRTL(),
+      }),
       editable: true,
       selectable: true,
-      weekNumbers: true,
-      // Use non-localized AM/PM time format to avoid confusing notations like 上/下/中
-      // Use full 'am'/'pm' instead of single-letter 'a'/'p' for clarity
-      eventTimeFormat: {
-        hour: 'numeric',
-        minute: '2-digit',
-        meridiem: 'short',
-      },
-      slotLabelFormat: {
-        hour: 'numeric',
-        minute: '2-digit',
-        meridiem: 'short',
-      },
-      headerToolbar: {
-        left: 'title today prev,next',
-        center:
-          'timeGridDay,listDay timeGridWeek,listWeek dayGridMonth,listMonth',
-        right: '',
-      },
-      buttonIcons: false,
-      buttonText: {
-        prev: t('previous', 'Previous'),
-        next: t('next', 'Next'),
-        today: t('today', 'Today'),
-        day: t('day', 'Day'),
-        week: t('week', 'Week'),
-        month: t('month', 'Month'),
-        list: t('list', 'List'),
-      },
-      // height: 'parent', nope, doesn't work as the parent might be small
-      height: 'auto',
       /* TODO: lists as resources: https://fullcalendar.io/docs/vertical-resource-view */
       navLinks: true,
-      nowIndicator: true,
       businessHours: {
         // days of week. an array of zero-based day of week integers (0=Sunday)
         daysOfWeek: [1, 2, 3, 4, 5], // Monday - Friday
         start: '8:00',
         end: '18:00',
       },
-      locale: TAPi18n.getLanguage(),
       events(fetchInfo, callback) {
         const currentBoard = Utils.getCurrentBoard();
+        // #5656: apply the active board Filter (member / assignee / due-date /
+        // label / custom-field) so the Calendar view shows the same scoped set
+        // of cards as the Board / Lists / Swimlanes views.
+        const filterSelector = Filter.isActive()
+          ? Filter._getMongoSelector()
+          : undefined;
         const events = [];
         const pushEvent = function (card, title, start, end, extraCls) {
           start = start || card.startAt;
@@ -997,20 +1299,67 @@ Template.calendarView.helpers({
           });
         };
         currentBoard
-          .cardsInInterval(fetchInfo.start, fetchInfo.end)
+          .cardsInInterval(fetchInfo.start, fetchInfo.end, filterSelector)
           .forEach(function (card) {
             pushEvent(card);
           });
+        // #6712-adjacent: Received, Start, Due and End are all meant to be
+        // visible on the Calendar - the Start/End span above draws as one
+        // bar, but a card whose Start (or End) falls outside the visible
+        // range would otherwise show no marker for Received/End at all, and
+        // Due never had one. Received and End each get their own event the
+        // same way Due already does.
         currentBoard
-          .cardsDueInBetween(fetchInfo.start, fetchInfo.end)
+          .cardsReceivedInBetween(fetchInfo.start, fetchInfo.end, filterSelector)
+          .forEach(function (card) {
+            pushEvent(
+              card,
+              `${card.title} ${TAPi18n.__('card-received')}`,
+              card.receivedAt,
+              new Date(card.receivedAt.getTime() + 36e5),
+              'calendar-event-received',
+            );
+          });
+        currentBoard
+          .cardsDueInBetween(fetchInfo.start, fetchInfo.end, filterSelector)
           .forEach(function (card) {
             pushEvent(
               card,
               `${card.title} ${TAPi18n.__('card-due')}`,
               card.dueAt,
               new Date(card.dueAt.getTime() + 36e5),
+              'calendar-event-due',
             );
           });
+        currentBoard
+          .cardsEndInBetween(fetchInfo.start, fetchInfo.end, filterSelector)
+          .forEach(function (card) {
+            pushEvent(
+              card,
+              `${card.title} ${TAPi18n.__('card-end')}`,
+              card.endAt,
+              new Date(card.endAt.getTime() + 36e5),
+              'calendar-event-end',
+            );
+          });
+        // #1618: dated checklist items, as "card: item", opening their card.
+        // Their `ci:` ids never match a card, so dragging one is reverted.
+        const { datedChecklistItems } = require('/models/lib/checklistItemSchedule');
+        datedChecklistItems(
+          ReactiveCache.getChecklistItems({ boardId: currentBoard._id, dueAt: { $exists: true } }),
+          id => ReactiveCache.getCard(id), { from: fetchInfo.start, to: fetchInfo.end },
+        ).forEach(item => {
+          events.push({
+            id: item.id,
+            title: item.title,
+            start: item.dueAt,
+            end: new Date(item.dueAt.getTime() + 36e5),
+            allDay: false,
+            editable: false,
+            url: FlowRouter.path('card', { boardId: currentBoard._id, slug: currentBoard.slug, cardId: item.cardId }),
+            className: `calendar-event-checklist-item${item.isFinished ? ' is-finished' : ''}`,
+          });
+        });
         events.sort(function (first, second) {
           return first.id > second.id ? 1 : -1;
         });
@@ -1054,7 +1403,7 @@ Template.calendarView.helpers({
         modalElement.setAttribute('role', 'dialog');
         modalElement.innerHTML = `
         <div class="modal-dialog justify-content-center align-items-center" role="document">
-          <div class="modal-content">
+          <div class="modal-content" data-editor-scope>
             <div class="modal-header">
               <h5 class="modal-title">${TAPi18n.__('r-create-card')}</h5>
               <button type="button" class="close calendar-create-close" data-dismiss="modal" aria-label="Close">
@@ -1062,7 +1411,7 @@ Template.calendarView.helpers({
               </button>
             </div>
             <div class="modal-body text-center">
-              <input type="text" class="form-control" id="card-title-input" placeholder="">
+              <textarea rows="2" class="form-control" id="card-title-input" data-editor-submit="#create-card-button"></textarea>
             </div>
             <div class="modal-footer">
               <button type="button" class="primary confirm" id="create-card-button">${TAPi18n.__('add-card')}</button>
@@ -1141,12 +1490,7 @@ Template.calendarView.helpers({
     };
   },
   isViewCalendar() {
-    const currentUser = ReactiveCache.getCurrentUser();
-    if (currentUser) {
-      return (currentUser.profile || {}).boardView === 'board-view-cal';
-    } else {
-      return window.localStorage.getItem('boardView') === 'board-view-cal';
-    }
+    return Utils.boardView() === 'board-view-cal';
   },
 });
 

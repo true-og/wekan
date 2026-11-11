@@ -1,15 +1,15 @@
+import { formatDateForDisplay } from '/client/lib/dateDisplay';
 import { TAPi18n } from '/imports/i18n';
 import {
   setupDatePicker,
   datePickerRendered,
   datePickerHelpers,
-  datePickerEvents,
 } from '/client/lib/datepicker';
 import { ReactiveCache } from '/imports/reactiveCache';
+import { ReactiveVar } from 'meteor/reactive-var';
 import {
   formatDateTime,
   formatDate,
-  formatDateByUserPreference,
   formatTime,
   getISOWeek,
   isValidDate,
@@ -27,12 +27,76 @@ import {
   fromNow,
   calendar
 } from '/imports/lib/dateUtils';
-import { CustomFieldStringTemplate } from '/client/lib/customFields'
+import { CustomFieldStringTemplate, stringTemplateContext } from '/client/lib/customFields'
 import { getCurrentCardFromContext } from '/client/lib/currentCard';
-import { EscapeActions } from '/client/lib/escapeActions';
-import { getSidebarInstance } from '/client/features/sidebar/service';
+import { formatNumberValue } from '/imports/lib/customNumberFormat';
+import { Utils } from '/client/lib/utils';
+import { subscribeDateNowTicker } from '/client/lib/dateNowTicker';
+
+Template.customFieldCopyButton.events({
+  'click .js-copy-custom-field'(event, tpl) {
+    event.preventDefault();
+    event.stopPropagation();
+    const form = event.currentTarget.closest('form');
+    const checkbox = form?.querySelector('input[type="checkbox"]');
+    const select = form?.querySelector('select');
+    const date = form?.querySelector('input[type="date"]');
+    const time = form?.querySelector('input[type="time"]');
+    const stringItems = form?.querySelectorAll(
+      '.js-card-customfield-stringtemplate-item',
+    );
+    const editor = form?.querySelector(
+      'textarea, input[type="text"], input[type="number"]',
+    );
+    let rawValue = Template.currentData()?.value;
+    if (checkbox) {
+      rawValue = checkbox.checked;
+    } else if (select) {
+      rawValue = select.selectedOptions[0]?.textContent?.trim() ?? '';
+    } else if (date) {
+      rawValue = [date.value, time?.value].filter(Boolean).join(' ');
+    } else if (stringItems?.length) {
+      rawValue = Array.from(stringItems)
+        .map(input => input.value)
+        .filter(value => value.trim());
+    } else if (editor) {
+      rawValue = editor.value;
+    }
+    let value;
+    if (rawValue instanceof Date) {
+      value = rawValue.toISOString();
+    } else if (Array.isArray(rawValue)) {
+      value = rawValue.join('\n');
+    } else {
+      value = rawValue == null ? '' : String(rawValue);
+    }
+    const promise = Utils.copyTextToClipboard(value);
+    Utils.showCopied(promise, tpl.$('.copied-tooltip'));
+  },
+});
 
 Template.cardCustomFieldsPopup.helpers({
+  board() {
+    const card = getCurrentCardFromContext();
+    return card?.getRealBoard ? card.getRealBoard() : card?.board?.();
+  },
+  // #3141: the assign/unassign list this popup shows is reachable from the
+  // ordinary card-detail "Custom Fields" hamburger, so it is a card-detail
+  // call site same as the value itself - an "Admin only" field's NAME must
+  // not appear here either for a non-admin board member.
+  customFields() {
+    const card = getCurrentCardFromContext();
+    const realBoard = card?.getRealBoard ? card.getRealBoard() : card?.board?.();
+    if (!realBoard) return [];
+    const fields = realBoard.customFields ? realBoard.customFields() : [];
+    const currentUser = Meteor.user && Meteor.user();
+    const isBoardAdmin =
+      !!currentUser &&
+      typeof currentUser.isBoardAdmin === 'function' &&
+      currentUser.isBoardAdmin(realBoard._id);
+    const { filterAdminOnlyDefinitions } = require('/models/lib/customFieldsWD');
+    return filterAdminOnlyDefinitions(fields, isBoardAdmin);
+  },
   hasCustomField() {
     const card = getCurrentCardFromContext();
     if (!card) return false;
@@ -42,20 +106,139 @@ Template.cardCustomFieldsPopup.helpers({
 });
 
 Template.cardCustomFieldsPopup.events({
-  'click .js-select-field'(event) {
+  async 'click .js-select-field'(event) {
+    event.preventDefault();
     const card = getCurrentCardFromContext();
     if (!card) return;
     const customFieldId = this._id;
-    card.toggleCustomField(customFieldId);
-    event.preventDefault();
-  },
-  'click .js-settings'(event) {
-    EscapeActions.executeUpTo('detailsPane');
-    const sidebar = getSidebarInstance();
-    if (sidebar) {
-      sidebar.setView('customFields');
+    const assigned = card.customFieldIndex(customFieldId) < 0;
+    try {
+      await Meteor.callAsync(
+        'setCardCustomFieldAssigned', card.getRealId(), customFieldId, assigned);
+    } catch (error) {
+      alert(error.reason || error.message || TAPi18n.__('server-error'));
     }
+  },
+  // Editing a field, and making one, open in this same pop-over on top of the
+  // list, so the back arrow returns to it and the card stays open behind. They
+  // are the board's own forms - the same templates the sidebar list opens - so
+  // there is one create form and one edit form, not a second pair for cards.
+  // client/components/sidebar/sidebarCustomFields.jade
+  'click .js-edit-custom-field': Popup.open('editCustomField'),
+  // "Add custom field" sits OUTSIDE the list, so its data context is this
+  // popup's own - which is the CARD. The form reads its context as the field
+  // being edited, and a card has an `_id`, so it was read as an edit of a
+  // custom field that does not exist and the new field was never inserted.
+  // A new field is made from nothing, so it is handed nothing.
+  'click .js-open-create-custom-field'(event) {
+    Popup.open('createCustomField').call({}, event);
+  },
+  // #5681: link this card's custom fields to another card's.
+  'click .js-open-custom-field-links': Popup.open('cardCustomFieldLinks'),
+});
+
+// #5681: linked custom fields. The list comes from the server, which shows a
+// linked card only to a viewer who may read it; linking and unlinking are
+// methods that check edit rights on both cards (server/models/customFieldLinks.js).
+const FIELD_LINK_ERRORS = ['field-link-self', 'field-link-limit', 'field-link-archived', 'field-link-invalid'];
+const escapeFieldLinkQuery = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function fieldLinkCard() {
+  const data = Template.currentData();
+  const card = data && typeof data.getRealId === 'function' ? data : getCurrentCardFromContext();
+  return card || null;
+}
+function loadFieldLinks(templateInstance) {
+  const card = templateInstance.card;
+  if (!card) return;
+  Meteor.call('cardCustomFieldLinksInfo', card.getRealId(), (error, links) => {
+    templateInstance.loading.set(false);
+    templateInstance.links.set(error ? [] : links || []);
+  });
+}
+Template.cardCustomFieldLinksPopup.onCreated(function () {
+  this.card = fieldLinkCard();
+  this.links = new ReactiveVar([]);
+  this.loading = new ReactiveVar(true);
+  this.query = new ReactiveVar('');
+  this.selected = new ReactiveVar(null);
+  this.error = new ReactiveVar('');
+  loadFieldLinks(this);
+});
+Template.cardCustomFieldLinksPopup.helpers({
+  fieldLinks() {
+    return Template.instance().links.get();
+  },
+  fieldLinksLoading() {
+    return Template.instance().loading.get();
+  },
+  fieldLinkError() {
+    return Template.instance().error.get();
+  },
+  canLinkFields() {
+    return Utils.canModifyCard(Template.instance().card);
+  },
+  modeLabel() {
+    if (this.mode === 'send') return 'custom-field-link-sends';
+    if (this.mode === 'receive') return 'custom-field-link-receives';
+    return 'custom-field-link-both';
+  },
+  fieldNames() {
+    return (this.fields || []).join(', ');
+  },
+  fieldLinkMatches() {
+    const tpl = Template.instance();
+    const query = tpl.query.get().trim();
+    const card = tpl.card;
+    if (!query || !card || /^https?:|\//.test(query) || tpl.selected.get()) return [];
+    const linked = (tpl.links.get() || []).map(link => link.cardId);
+    return ReactiveCache.getCards({
+      boardId: card.boardId,
+      archived: false,
+      type: { $ne: 'cardType-linkedCard' },
+      _id: { $nin: [card.getRealId(), ...linked] },
+      title: { $regex: escapeFieldLinkQuery(query), $options: 'i' },
+    }, { limit: 8, sort: { title: 1 } });
+  },
+});
+Template.cardCustomFieldLinksPopup.events({
+  'input .js-custom-field-link-input'(event, tpl) {
+    tpl.query.set(event.currentTarget.value);
+    tpl.selected.set(null);
+    tpl.error.set('');
+  },
+  'click .js-custom-field-link-match'(event, tpl) {
     event.preventDefault();
+    const input = tpl.find('.js-custom-field-link-input');
+    input.value = event.currentTarget.textContent.trim();
+    tpl.selected.set(event.currentTarget.dataset.cardId);
+  },
+  'submit .js-link-custom-fields-form'(event, tpl) {
+    event.preventDefault();
+    const card = tpl.card;
+    if (!card) return;
+    const target = tpl.selected.get() || tpl.find('.js-custom-field-link-input').value;
+    const mode = tpl.find('.js-custom-field-link-mode').value;
+    tpl.error.set('');
+    Meteor.call('linkCardCustomFields', card.getRealId(), String(target || ''), mode, error => {
+      if (error) {
+        tpl.error.set(FIELD_LINK_ERRORS.includes(error.error) ? error.error
+          : error.error === 'not-authorized' ? 'field-link-not-allowed' : 'field-link-not-found');
+        return;
+      }
+      tpl.find('.js-custom-field-link-input').value = '';
+      tpl.query.set('');
+      tpl.selected.set(null);
+      loadFieldLinks(tpl);
+    });
+  },
+  'click .js-unlink-custom-fields'(event, tpl) {
+    event.preventDefault();
+    const card = tpl.card;
+    if (!card) return;
+    Meteor.call('unlinkCardCustomFields', card.getRealId(), event.currentTarget.dataset.cardId, error => {
+      if (error) tpl.error.set('field-link-not-allowed');
+      else loadFieldLinks(tpl);
+    });
   },
 });
 
@@ -71,10 +254,58 @@ Template.cardCustomField.onCreated(function () {
   this.customFieldId = Template.currentData()._id;
 });
 
+function openCustomFieldValueEditor(event, tpl) {
+  // The Checkbox square is the direct on/off control. Only its surrounding row
+  // uses this shared editor route.
+  if (event.target.closest('.check-box-container')) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const trigger = tpl.find('.js-custom-field-edit-trigger');
+  if (trigger) trigger.click();
+}
+
+function openCustomFieldValueEditorFromKeyboard(event) {
+  if (event.currentTarget.matches('a, button')) return;
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  event.preventDefault();
+  event.currentTarget.click();
+}
+
+Template.cardCustomField.events({
+  'click .js-edit-card-custom-field-value': openCustomFieldValueEditor,
+  'keydown .js-edit-card-custom-field-value': openCustomFieldValueEditorFromKeyboard,
+});
+
+function persistedEditValue() {
+  return Template.instance().data?.value;
+}
+
+// Titles belong to Template.cardCustomField, while displayed values belong to
+// these nested type templates. Register on both sides of the Blaze boundary so
+// every title, value and type-specific empty edit area behaves consistently.
+[
+  'text',
+  'number',
+  'checkbox',
+  'currency',
+  'dropdown',
+  'dropdownMultiSelect',
+  'stringtemplate',
+].forEach(type => {
+  Template[`cardCustomField-${type}`].events({
+    'click .js-edit-card-custom-field-value': openCustomFieldValueEditor,
+    'keydown .js-edit-card-custom-field-value': openCustomFieldValueEditorFromKeyboard,
+  });
+});
+
 // cardCustomField-text
 Template['cardCustomField-text'].onCreated(function () {
   this.card = getCurrentCardFromContext();
   this.customFieldId = Template.currentData()._id;
+});
+
+Template['cardCustomField-text'].helpers({
+  editValue: persistedEditValue,
 });
 
 Template['cardCustomField-text'].events({
@@ -91,10 +322,22 @@ Template['cardCustomField-number'].onCreated(function () {
   this.customFieldId = Template.currentData()._id;
 });
 
+Template['cardCustomField-number'].helpers({
+  editValue: persistedEditValue,
+  // Render blank / cleared / non-numeric values as empty instead of "NaN" (#2091).
+  formattedValue() {
+    return formatNumberValue(this.value);
+  },
+});
+
 Template['cardCustomField-number'].events({
   'submit .js-card-customfield-number'(event, tpl) {
     event.preventDefault();
-    const value = parseInt(tpl.find('input').value, 10);
+    const rawValue = tpl.find('input').value;
+    // A cleared/blank input parses to NaN; store '' instead so it renders empty
+    // rather than as "NaN" (#2091).
+    const parsed = parseInt(rawValue, 10);
+    const value = Number.isNaN(parsed) ? '' : parsed;
     tpl.card.setCustomField(tpl.customFieldId, value);
   },
 });
@@ -105,9 +348,45 @@ Template['cardCustomField-checkbox'].onCreated(function () {
   this.customFieldId = Template.currentData()._id;
 });
 
+Template['cardCustomField-checkbox'].helpers({
+  editValue: persistedEditValue,
+});
+
 Template['cardCustomField-checkbox'].events({
-  'click .js-checklist-item .check-box-container'(event, tpl) {
-    tpl.card.setCustomField(tpl.customFieldId, !Template.currentData().value);
+  'change .js-card-customfield-checkbox-input'(event, tpl) {
+    // Editing is staged until Save, but its square must still show the staged
+    // value immediately. The persisted `value` remains unchanged until submit,
+    // so update only the editor's visual checkbox here.
+    tpl.$('.js-card-customfield-checkbox-editor .materialCheckBox')
+      .toggleClass('is-checked', event.currentTarget.checked);
+  },
+  async 'submit .js-card-customfield-checkbox-editor'(event, tpl) {
+    event.preventDefault();
+    const value = Boolean(
+      tpl.find('.js-card-customfield-checkbox-input')?.checked,
+    );
+    try {
+      await Meteor.callAsync(
+        'setCardCustomFieldCheckbox', tpl.card.getRealId(), tpl.customFieldId, value);
+    } catch (error) {
+      alert(error.reason || error.message || TAPi18n.__('server-error'));
+    }
+  },
+  async 'click .js-card-custom-field-checkbox .check-box-container'(event, tpl) {
+    event.preventDefault();
+    event.stopPropagation();
+    // This template context is rebuilt from customFieldsWD whenever the saved
+    // value changes. Using the Card object captured at onCreated kept the old
+    // value after the first click, so a second click tried to save true again.
+    const currentField = Template.currentData();
+    if (!currentField || currentField._id !== tpl.customFieldId) return;
+    const value = !Boolean(currentField.value);
+    try {
+      await Meteor.callAsync(
+        'setCardCustomFieldCheckbox', tpl.card.getRealId(), tpl.customFieldId, value);
+    } catch (error) {
+      alert(error.reason || error.message || TAPi18n.__('server-error'));
+    }
   },
 });
 
@@ -119,6 +398,7 @@ Template['cardCustomField-currency'].onCreated(function () {
 });
 
 Template['cardCustomField-currency'].helpers({
+  editValue: persistedEditValue,
   formattedValue() {
     const locale = TAPi18n.getLanguage();
     const tpl = Template.instance();
@@ -130,11 +410,21 @@ Template['cardCustomField-currency'].helpers({
 });
 
 Template['cardCustomField-currency'].events({
-  'submit .js-card-customfield-currency'(event, tpl) {
+  async 'submit .js-card-customfield-currency'(event, tpl) {
     event.preventDefault();
     // To allow input separated by comma, the comma is replaced by a period.
-    const value = Number(tpl.find('input').value.replace(/,/i, '.'), 10);
-    tpl.card.setCustomField(tpl.customFieldId, value);
+    const value = Number(tpl.find('input').value.trim().replace(/,/g, '.'));
+    if (!Number.isFinite(value)) return;
+    try {
+      await Meteor.callAsync(
+        'setCardCustomFieldCurrency',
+        tpl.card.getRealId(),
+        tpl.customFieldId,
+        value,
+      );
+    } catch (error) {
+      alert(error.reason || error.message || TAPi18n.__('server-error'));
+    }
   },
 });
 
@@ -144,10 +434,9 @@ Template['cardCustomField-date'].onCreated(function () {
   this.customFieldId = Template.currentData()._id;
   const self = this;
   self.date = ReactiveVar();
-  self.now = ReactiveVar(now());
-  window.setInterval(() => {
-    self.now.set(now());
-  }, 60000);
+  const dateNowTicker = subscribeDateNowTicker();
+  self.now = dateNowTicker.now;
+  self.view.onViewDestroyed(dateNowTicker.unsubscribe);
 
   self.autorun(() => {
     self.date.set(new Date(Template.currentData().value));
@@ -166,9 +455,7 @@ Template['cardCustomField-date'].helpers({
     return user.isShowWeekOfYear();
   },
   showDate() {
-    const currentUser = ReactiveCache.getCurrentUser();
-    const dateFormat = currentUser ? currentUser.getDateFormat() : (window.localStorage.getItem('dateFormat') || 'YYYY-MM-DD');
-    return formatDateByUserPreference(Template.instance().date.get(), dateFormat, true);
+    return formatDateForDisplay(Template.instance().date.get(), true);
   },
   showISODate() {
     return Template.instance().date.get().toISOString();
@@ -183,11 +470,19 @@ Template['cardCustomField-date'].helpers({
     }
     return '';
   },
+  // #6737: a date custom field can mean anything - a delivery, a review, an
+  // initial due date - so its tooltip is led by the field's own name, never by
+  // the Start date's "Starts on".
   showTitle() {
-    return `${TAPi18n.__('card-start-on')} ${Template.instance().date.get().toLocaleString()}`;
+    const date = formatDateForDisplay(Template.instance().date.get(), true, value => value.toLocaleString());
+    const name = String(this.definition?.name || '').trim();
+    return name ? `${name}: ${date}` : date;
   },
 });
 
+// Date keeps its original direct popup opener. Clicking the title activates
+// this same visible element through `.js-custom-field-edit-trigger`, while a
+// click on the displayed datetime is handled here without a template hop.
 Template['cardCustomField-date'].events({
   'click .js-edit-date': Popup.open('cardCustomField-date'),
 });
@@ -197,10 +492,11 @@ Template['cardCustomField-datePopup'].onCreated(function () {
   const data = Template.currentData();
   setupDatePicker(this, {
     initialDate: data.value ? data.value : undefined,
+    storeDate: (date, card) => card.setCustomField(data._id, date),
+    deleteDate: card => card.setCustomField(data._id, ''),
   });
-  // Override card and store customFieldId for store/delete callbacks
+  // A custom-field popup's data is the field definition, not the card.
   this.datePicker.card = getCurrentCardFromContext();
-  this.customFieldId = data._id;
 });
 
 Template['cardCustomField-datePopup'].onRendered(function () {
@@ -209,20 +505,12 @@ Template['cardCustomField-datePopup'].onRendered(function () {
 
 Template['cardCustomField-datePopup'].helpers(datePickerHelpers());
 
-Template['cardCustomField-datePopup'].events(datePickerEvents({
-  storeDate(date) {
-    this.datePicker.card.setCustomField(this.customFieldId, date);
-  },
-  deleteDate() {
-    this.datePicker.card.setCustomField(this.customFieldId, '');
-  },
-}));
-
 // cardCustomField-dropdown
 Template['cardCustomField-dropdown'].onCreated(function () {
+  const data = Template.currentData();
   this.card = getCurrentCardFromContext();
-  this.customFieldId = Template.currentData()._id;
-  this._items = Template.currentData().definition.settings.dropdownItems;
+  this.customFieldId = data._id;
+  this._items = data.definition.settings.dropdownItems;
   this.items = this._items.slice(0);
   this.items.unshift({
     _id: '',
@@ -233,6 +521,9 @@ Template['cardCustomField-dropdown'].onCreated(function () {
 Template['cardCustomField-dropdown'].helpers({
   items() {
     return Template.instance().items;
+  },
+  isSelectedItem(itemId) {
+    return (Template.instance().data.value ?? '') === itemId;
   },
   selectedItem() {
     const tpl = Template.instance();
@@ -253,19 +544,75 @@ Template['cardCustomField-dropdown'].events({
   },
 });
 
+// cardCustomField-dropdownMultiSelect
+//
+// Same option list as cardCustomField-dropdown (settings.dropdownItems), but
+// several may be chosen: the stored value is an ARRAY of item ids instead of
+// a single one. The editor reuses the checkbox-list interaction already used
+// elsewhere for choosing several items at once (e.g. labels/members popups)
+// rather than a `<select multiple>`, which is awkward to operate on touch.
+Template['cardCustomField-dropdownMultiSelect'].onCreated(function () {
+  const data = Template.currentData();
+  this.card = getCurrentCardFromContext();
+  this.customFieldId = data._id;
+  this._items = data.definition.settings.dropdownItems || [];
+  this.checked = new ReactiveVar(
+    Array.isArray(data.value) ? data.value.slice(0) : [],
+  );
+});
+
+Template['cardCustomField-dropdownMultiSelect'].helpers({
+  items() {
+    return Template.instance()._items;
+  },
+  isChecked(itemId) {
+    return Template.instance().checked.get().includes(itemId);
+  },
+  selectedNames() {
+    const tpl = Template.instance();
+    const value = Array.isArray(this.value) ? this.value : [];
+    const names = value.map(id => {
+      const item = tpl._items.find(entry => entry._id === id);
+      return item ? item.name : TAPi18n.__('custom-field-dropdown-unknown');
+    });
+    return names.length
+      ? names.join(', ')
+      : TAPi18n.__('custom-field-dropdown-none');
+  },
+});
+
+Template['cardCustomField-dropdownMultiSelect'].events({
+  'click .js-card-customfield-dropdown-multi-item'(event, tpl) {
+    event.preventDefault();
+    const itemId = event.currentTarget.dataset.id;
+    const current = tpl.checked.get();
+    const next = current.includes(itemId)
+      ? current.filter(id => id !== itemId)
+      : [...current, itemId];
+    tpl.checked.set(next);
+  },
+  'submit .js-card-customfield-dropdown-multi-select'(event, tpl) {
+    event.preventDefault();
+    tpl.card.setCustomField(tpl.customFieldId, tpl.checked.get());
+  },
+  'click .js-close-inlined-form'(event, tpl) {
+    const data = Template.currentData();
+    tpl.checked.set(Array.isArray(data.value) ? data.value.slice(0) : []);
+  },
+});
+
 // cardCustomField-stringtemplate
 Template['cardCustomField-stringtemplate'].onCreated(function () {
   this.card = getCurrentCardFromContext();
   this.customFieldId = Template.currentData()._id;
-  this.customField = new CustomFieldStringTemplate(Template.currentData().definition);
   this.stringtemplateItems = new ReactiveVar(Template.currentData().value ?? []);
 });
 
 Template['cardCustomField-stringtemplate'].helpers({
   formattedValue() {
-    const tpl = Template.instance();
-    const ret = tpl.customField.getFormattedValue(this.value);
-    return ret;
+    return new CustomFieldStringTemplate(this.definition).getFormattedValue(
+      this.value, stringTemplateContext(getCurrentCardFromContext()),
+    );
   },
   stringtemplateItems() {
     return Template.instance().stringtemplateItems.get();

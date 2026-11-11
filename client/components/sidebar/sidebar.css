@@ -2,7 +2,7 @@
   position: absolute;
   top: 0;
   bottom: 0;
-  right: 0;
+  inset-inline-end: 0;
   overflow-y: scroll;
 }
 .sidebar {
@@ -11,9 +11,9 @@
 }
 .sidebar-xmark {
   position: absolute;
-  right: 0px;
+  inset-inline-end: 0px;
   top: 0px;
-  font-size: 25px;
+  font-size: calc(25px * var(--wekan-ui-font-scale, 1));
   padding: 10px;
 }
 .sidebar-xmark:hover {
@@ -29,18 +29,40 @@
 .sidebar .sidebar-content {
   padding: 0 12px;
 }
+/* Sidebar text inputs (Filter List by Title, Filter by card title, advanced
+   filter, etc.) fill the padded content width, so there is equal empty space on
+   both sides (the .sidebar-content 12px padding) instead of the browser's
+   default narrow width that left a large gap on the right. box-sizing keeps the
+   border inside the width so it never overflows the panel. */
+.sidebar .sidebar-content input[type="text"],
+.sidebar .sidebar-content input[type="search"] {
+  width: 100%;
+  box-sizing: border-box;
+}
 .sidebar .sidebar-content .hide-btn {
   display: none;
 }
 .sidebar .sidebar-content h3 {
-  color: #808080;
+  color: var(--wekan-quiet-text, #595959);
   font-size: 1em;
   margin-bottom: 10px;
   font-weight: bold;
 }
 .sidebar .sidebar-content h3 i.fa {
-  margin-right: 3px;
+  margin-inline-end: 3px;
 }
+/* A sidebar heading that folds its section - Members, Labels - is a button:
+   the caret in front of it says which way it is, and it looks and behaves like
+   something to click. The same control an opened card's sections have.
+   client/lib/foldState.js */
+.sidebar .sidebar-content h3.js-toggle-fold {
+  display: flex;
+  align-items: center;
+  gap: 0.3em;
+  cursor: pointer;
+  user-select: none;
+}
+
 .sidebar .sidebar-content hr {
   margin: 13px 0;
 }
@@ -49,10 +71,50 @@
   flex-direction: column;
 }
 
+/* A checkbox row in the sidebar is `a.flex > i.fa + span`, and `.flex` is only
+   `display: flex` - no alignment and no gap. So the box glyph touched the first
+   letter of its label, and the two sat on different lines: the glyph is a font
+   character with its own line box, the label is text with another, and nothing
+   lined them up. Reported as "checkboxes and text don't fit well" (#6465).
+   `align-items: center` puts the box on the label's middle, and the gap is the
+   same 6px the material checkbox gives itself. */
+.sidebar a.flex {
+  align-items: center;
+}
+
+.sidebar a.flex > i.fa {
+  margin-inline-end: 6px;
+  /* The glyph is 13-14px of text; a fixed width keeps every row's label starting
+     at the SAME x, whether its box is a square, a tick or a wider icon. */
+  min-width: 14px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+/* The Custom Fields form is a POP-OVER, and a pop-over renders in the global
+   popup container - not inside `.sidebar`. So its checkbox rows never got the
+   `align-items: center` above, and sat exactly as #6465 described before that
+   fix: the box on one line and its label on another, because `.flex` on its own
+   is only `display: flex`. Beside the Admin Panel / Announcement checkbox, which
+   is the same `a.flex > .materialCheckBox + span` markup inside a page that does
+   align it, this is what "not the animated one" looks like - the morph is there,
+   but it plays on a box that is not next to its own label.
+
+   The rows are aligned here, and the box's own states are spelled out below, so
+   the square, the green tick and the `transition: 0.2s` between them are the
+   announcement's - whichever stylesheet a pop-over happens to inherit.
+   client/components/sidebar/sidebarCustomFields.jade */
+.pop-over[data-popup='createCustomFieldPopup'] a.flex,
+.pop-over[data-popup='editCustomFieldPopup'] a.flex {
+  align-items: center;
+}
+
 /* Use checklist-style green checkboxes for all sidebar checkboxes */
 .sidebar .materialCheckBox.is-checked,
 .boardCardSettingsPopup .materialCheckBox.is-checked,
-.boardSubtaskSettingsPopup .materialCheckBox.is-checked {
+.boardSubtaskSettingsPopup .materialCheckBox.is-checked,
+.pop-over[data-popup='createCustomFieldPopup'] .materialCheckBox.is-checked,
+.pop-over[data-popup='editCustomFieldPopup'] .materialCheckBox.is-checked {
   top: -4px !important;
   left: -3px !important;
   width: 7px !important;
@@ -68,46 +130,124 @@
   transform-origin: 100% 100% !important;
 }
 
-/* Grey checkmarks when grey icons setting is enabled */
-body.grey-icons-enabled .sidebar .materialCheckBox.is-checked,
-body.grey-icons-enabled .boardCardSettingsPopup .materialCheckBox.is-checked,
-body.grey-icons-enabled .boardSubtaskSettingsPopup .materialCheckBox.is-checked {
-  border-bottom: 2px solid #7a7a7a !important;
-  border-right: 2px solid #7a7a7a !important;
+/* …and the square it morphs FROM. The checked half above is spelled out for
+   these popups; without the unchecked half the transition would run between a
+   box some other rule sized and the tick, which is the animation looking wrong
+   rather than missing. Same 13px square, same 0.2s, as forms.css draws it. */
+.pop-over[data-popup='createCustomFieldPopup'] .materialCheckBox,
+.pop-over[data-popup='editCustomFieldPopup'] .materialCheckBox {
+  position: relative;
+  width: 13px;
+  height: 13px;
+  border: 2px solid #5a5a5a;
+  border-radius: 1px;
+  transition: 0.2s;
+  margin: 0;
+  flex-shrink: 0;
+  cursor: pointer;
 }
 
-/* Card Settings 3-column grid layout */
-.card-settings-grid {
+/* Card Settings - on the opened card and in Board Settings / Card, one
+   template (sidebar.jade cardSettingsInline; its checklist look is
+   client/components/cards/cardAddFields.css): a row's line, its checkbox and
+   its name. */
+.card-settings-line {
   display: grid;
-  grid-template-columns: 1fr 1fr 2fr;
-  gap: 10px;
-  margin-bottom: 10px;
+  align-items: center;
+  justify-items: start;
+  text-align: start;
+  padding: calc(4px * min(1, var(--wekan-ui-font-scale, 1))) 0;
+  border-bottom: 1px solid #eee;
+}
+/* What a row is dragged by: its handle (drag handles on), its icon or name. */
+.card-field-order-drag-label {
+  cursor: grab;
+}
+.card-settings-line.ui-sortable-helper {
+  background: #fff;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+}
+.card-settings-line-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.card-settings-side {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  justify-self: start;
+  gap: 6px;
+}
+.card-settings-side > a.flex {
+  margin: 0;
+}
+.card-field-order-toggle,
+.card-field-order-move {
+  flex-shrink: 0;
+}
+.card-field-order-move.is-disabled,
+.card-field-order-toggle.is-disabled,
+.card-ask-move-reason.is-disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
 }
 
-.card-settings-row {
+.card-settings-board-option { margin-block-end: 6px; }
+
+/* Board Settings / Board View: the same table as Card Settings above, with
+   FIVE columns (Default/Show on Public, Default/Show on Private, the view's
+   name) - or three when Admin Panel hides public boards and the popup does
+   not render the two public columns (sidebar.jade boardViewSettingsPopup).
+   Its own class rather than .card-settings-row, because that one swaps its
+   first two columns visually with `order` and this table reads left to
+   right as its header says. */
+.board-view-settings-row {
   display: grid;
-  grid-template-columns: 1fr 1fr 2fr;
+  grid-template-columns: 1fr 1fr 1fr 1fr 2fr;
   gap: 10px;
   align-items: center;
   padding: 5px 0;
   border-bottom: 1px solid #eee;
 }
 
-.card-settings-column {
+.board-view-settings.hide-public-columns .board-view-settings-row {
+  grid-template-columns: 1fr 1fr 2fr;
+}
+
+.board-view-settings-column {
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
-.card-settings-column:last-child {
+.board-view-settings-column:last-child {
   justify-content: flex-start;
 }
 
-.card-settings-column h4 {
+.board-view-settings-column h4 {
   margin: 0;
-  font-size: 12px;
+  font-size: calc(12px * var(--wekan-ui-font-scale, 1));
   font-weight: bold;
   text-align: center;
+}
+
+.board-view-settings-column span i.fa {
+  margin-inline-end: 6px;
+}
+
+/* The row's up/down arrows sit in front of its name, in the Description
+   column, so the four checkbox columns stay exactly what their headers say. */
+.board-view-settings-column .js-board-view-order-up,
+.board-view-settings-column .js-board-view-order-down {
+  margin-inline-end: 6px;
+}
+
+.board-view-settings-column .is-disabled {
+  opacity: 0.35;
+  pointer-events: none;
 }
 .sidebar .sidebar-content ul.sidebar-list li > a {
   display: flex;
@@ -124,11 +264,11 @@ body.grey-icons-enabled .boardSubtaskSettingsPopup .materialCheckBox.is-checked 
 }
 .sidebar .sidebar-content ul.sidebar-list li > a .member,
 .sidebar .sidebar-content ul.sidebar-list li > a .card-label {
-  margin-right: 7px;
+  margin-inline-end: 7px;
   margin-top: 5px;
 }
 .sidebar .sidebar-content ul.sidebar-list li > a .minicard-edit-button {
-  float: right;
+  float: inline-end;
   padding: 8px;
   border-radius: 3px;
 }
@@ -140,20 +280,40 @@ body.grey-icons-enabled .boardSubtaskSettingsPopup .materialCheckBox.is-checked 
   margin: 0 4px;
   color: #3cb500;
 }
-/* Grey check icons when grey icons setting is enabled */
-body.grey-icons-enabled .sidebar .sidebar-content ul.sidebar-list li > a .fa.fa-check {
-  color: #7a7a7a;
+/* #2886: a label filter clicked a third time inverts to EXCLUDE that label
+   (rather than clearing the filter) — struck-through text plus a "no
+   entry" icon distinguish it from the plain checked "include" state above. */
+.sidebar .sidebar-content ul.sidebar-list li.excluded > a .sidebar-list-item-description {
+  text-decoration: line-through;
+}
+.sidebar .sidebar-content ul.sidebar-list li > a .fa.fa-ban {
+  margin: 0 4px;
+  color: #e63737;
 }
 .sidebar .sidebar-content ul.sidebar-list li .minicard {
   padding: 6px 8px 4px;
 }
 .sidebar .sidebar-content ul.sidebar-list li .minicard .minicard-edit-button {
-  float: right;
+  float: inline-end;
   padding: 4px;
   border-radius: 3px;
 }
 .sidebar .sidebar-content ul.sidebar-list li .minicard .minicard-edit-button:hover {
   background: #dbdbdb;
+}
+/* #4165: drag handle for reordering the board's custom fields list. */
+.sidebar .sidebar-content ul.js-custom-fields-sidebar-list li .js-custom-field-drag-handle {
+  cursor: move;
+  padding: 0 6px 0 2px;
+  opacity: 0.5;
+}
+.sidebar .sidebar-content ul.js-custom-fields-sidebar-list li .js-custom-field-drag-handle:hover {
+  opacity: 1;
+}
+.sidebar .sidebar-content ul.js-custom-fields-sidebar-list li.custom-field-sidebar-item.placeholder {
+  border: 1px dashed #c2c2c2;
+  background: #f5f5f5;
+  list-style: none;
 }
 .sidebar .sidebar-content .sidebar-btn {
   display: block;
@@ -169,7 +329,7 @@ body.grey-icons-enabled .sidebar .sidebar-content ul.sidebar-list li > a .fa.fa-
   color: #fff;
 }
 .sidebar .sidebar-content .sidebar-btn i.fa {
-  margin-right: 10px;
+  margin-inline-end: 10px;
 }
 .sidebar .sidebar-shortcuts {
   top: 7px;
@@ -178,29 +338,69 @@ body.grey-icons-enabled .sidebar .sidebar-content ul.sidebar-list li > a .fa.fa-
   color: #000;
 }
 .sidebar .sidebar-shortcuts .sidebar-btn {
-  margin-left: 3px;
-  margin-right: 3px;
+  margin-inline-start: 3px;
+  margin-inline-end: 3px;
 }
 .board-sidebar {
   display: none;
-  width: 30vw;
+  /* A fixed sidebar width at every screen size. It was a bare 420px that scaled with
+     the viewport, so on very wide screens it grew to ~double the intended width; a
+     clamp() then kept the mid-width look but still resized with the window, which is
+     the behaviour being removed everywhere. 420px is the width it was designed at.
+     Phones (<800px) are handled by the 100% rule in the media query below. */
+  width: 420px;
   z-index: 100;
   transition: top 0.1s, right 0.1s, width 0.1s;
 }
 .board-sidebar.is-open {
   display: block;
+  /* #6465 follow-up: the card details window docks to the right edge with
+     z-index 2001 — the same place this sidebar opens. When the user opens the
+     sidebar, the sidebar must win, or its content (e.g. the archives
+     Restore/Delete links) sits unreachable UNDER the card window. */
+  z-index: 2002;
+}
+/* Right sidebar resize handle: a thin grab strip on the LEFT edge of the open
+   sidebar; drag left/right to change the sidebar width. Desktop only (hidden on
+   phones by the media query below, where the sidebar is full width). */
+.sidebar-resize-handle {
+  display: none;
+}
+.board-sidebar.is-open .sidebar-resize-handle {
+  display: block;
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  inset-inline-start: -3px;
+  width: 6px;
+  cursor: col-resize;
+  z-index: 2003; /* above the open sidebar (2002) and its content */
+  background: transparent;
+  transition: background-color 0.2s ease;
+}
+.sidebar-resize-handle:hover {
+  background: rgba(0, 123, 255, 0.4);
+  box-shadow: 0 0 4px rgba(0, 123, 255, 0.3);
+}
+.sidebar-resize-handle:active {
+  background: rgba(0, 123, 255, 0.6);
+  box-shadow: 0 0 6px rgba(0, 123, 255, 0.4);
+}
+body.sidebar-resizing-active {
+  user-select: none;
+  cursor: col-resize;
 }
 .board-widget h4 {
   margin: 5px 0;
 }
 .board-widget-activity {
-  margin-right: -4px;
+  margin-inline-end: -4px;
 }
 .sidebar-tongue {
   display: block;
   width: 30px;
   height: 30px;
-  left: -30px;
+  inset-inline-start: -30px;
   position: absolute;
   top: 0px;
   z-index: 15;
@@ -212,7 +412,7 @@ body.grey-icons-enabled .sidebar .sidebar-content ul.sidebar-list li > a .fa.fa-
 }
 .sidebar-tongue i.fa {
   padding: 3px 9px;
-  font-size: 24px;
+  font-size: calc(24px * var(--wekan-ui-font-scale, 1));
   transition: transform 0.5s;
 }
 .sidebar-accessibility {
@@ -223,20 +423,20 @@ body.grey-icons-enabled .sidebar .sidebar-content ul.sidebar-list li > a .fa.fa-
   text-decoration: none;
   border-radius: 3px;
   cursor: pointer;
-  margin-left: auto;
-  margin-right: 30px;
+  margin-inline-start: auto;
+  margin-inline-end: 30px;
 }
 .sidebar-accessibility:hover {
   background-color: #d9d9d9;
 }
 .sidebar-accessibility span {
-  margin-left: 5px;
+  margin-inline-start: 5px;
 }
 .board-sidebar.is-open .sidebar-tongue {
-  left: -28px;
+  inset-inline-start: -28px;
 }
 .board-sidebar.is-open .sidebar-tongue:hover {
-  left: -25px;
+  inset-inline-start: -25px;
 }
 .board-sidebar.is-open .sidebar-tongue i.fa {
   transform: rotate(180deg);
@@ -244,7 +444,24 @@ body.grey-icons-enabled .sidebar .sidebar-content ul.sidebar-list li > a .fa.fa-
 .sidebar-tongue.is-hidden,
 .board-sidebar.is-open .sidebar-tongue.is-hidden {
   z-index: 0;
-  left: 5px;
+  inset-inline-start: 5px;
+}
+/* #3199: In the Archive sidebar's Cards tab each card's Restore/Delete links
+   used to sit BETWEEN two archived cards with near-equal spacing, so users
+   could not tell which card they belonged to. Group each card with its own
+   links: no gap between the card and its links, and a clear separator gap
+   below the whole group before the next card. Spacing-only, so it works in
+   every board color/theme; logical properties keep it RTL-safe. */
+.archived-card-item {
+  margin-block-end: 1.6em;
+}
+.archived-card-item .minicard-wrapper {
+  margin-bottom: 0;
+}
+.archived-card-item p.quiet {
+  margin-block-start: 2px;
+  margin-block-end: 0;
+  padding-inline-start: 4px;
 }
 .archived-lists .archived-lists-item {
   border-top: 1px solid #ccc;
@@ -255,21 +472,66 @@ body.grey-icons-enabled .sidebar .sidebar-content ul.sidebar-list li > a .fa.fa-
   border-top: none;
 }
 .archived-lists .archived-lists-item button {
-  float: right;
+  float: inline-end;
   margin: 0;
   margin: 0 0 5px 5px;
   padding: 0 10px 0 10px;
 }
 @media screen and (max-width: 800px) {
-  .board-sidebar {
-    width: 100%;
-    left: 0;
+  /* On phones (iPhone 12 mini, etc.) the right sidebar should be a full-width
+     panel at the top of the board, in BOTH mobile mode and desktop mode. The
+     sidebar lives inside .board-wrapper, which is wider than the viewport on a
+     phone, so an absolutely-positioned sidebar (inset-inline-end: 0) pins to the
+     far right of the wide board and shows as a narrow strip. Pin it to the
+     VIEWPORT instead (position: fixed + 100vw) so it spans the full screen
+     width. At 100% zoom .board-wrapper has no transform, so fixed resolves to
+     the viewport in desktop mode too. */
+  .board-sidebar.sidebar {
+    position: fixed;
+    /* BELOW the header, not behind it. `top: 0` put the sidebar's own top - its
+       title, its tabs, the members row - underneath the two header bars, so the
+       panel appeared to start in the middle of itself. The header is not one
+       height (the board bar's buttons wrap to one, two or three rows depending on
+       language and window width), so this is the height it MEASURES itself to be:
+       client/lib/utils.js publishes --wekan-header-height and keeps it current
+       with a ResizeObserver. The fallback is 0, i.e. the old behaviour, if the
+       variable is ever missing. */
+    top: var(--wekan-header-height, 0px);
+    bottom: 0;
+    inset-inline-start: 0;
+    inset-inline-end: 0;
+    /* !important so a desktop drag-resize inline width never leaks into mobile,
+       where the sidebar must stay full width. */
+    width: 100vw !important;
+    max-width: 100vw !important;
+    z-index: 1000;
+  }
+  /* No dragging to resize on phones — the sidebar is full width there. */
+  .board-sidebar .sidebar-resize-handle {
+    display: none;
+  }
+  /* Normalise sidebar text on phones so the headings are not oversized and the
+     small text is not tiny — keep them close to the board's text size so board
+     and sidebar read at one consistent size. */
+  .board-sidebar.sidebar .sidebar-content {
+    font-size: calc(14px * var(--wekan-ui-font-scale, 1));
+  }
+  .board-sidebar.sidebar .sidebar-content h2,
+  .board-sidebar.sidebar .sidebar-content h3 {
+    font-size: calc(16px * var(--wekan-ui-font-scale, 1));
+  }
+  .board-sidebar.sidebar .sidebar-content ul.sidebar-list li > a,
+  .board-sidebar.sidebar .sidebar-content .card-label,
+  .board-sidebar.sidebar .sidebar-content .card-label .card-label-name,
+  .board-sidebar.sidebar .sidebar-content p,
+  .board-sidebar.sidebar .sidebar-content span {
+    font-size: calc(14px * var(--wekan-ui-font-scale, 1));
   }
   .board-sidebar .sidebar-content .hide-btn {
     width: 40px;
     height: 40px;
     position: absolute;
-    right: 5px;
+    inset-inline-end: 5px;
     top: 5px;
     display: block;
     z-index: 15;
@@ -283,13 +545,13 @@ body.grey-icons-enabled .sidebar .sidebar-content ul.sidebar-list li > a .fa.fa-
   }
   .board-sidebar .sidebar-content .hide-btn i.fa {
     padding: 8px 16px;
-    font-size: 24px;
+    font-size: calc(24px * var(--wekan-ui-font-scale, 1));
     font-weight: bold;
   }
   .sidebar-tongue {
     width: 40px;
     height: 40px;
-    left: -47px;
+    inset-inline-start: -47px;
     top: 5px;
     display: block;
     border-radius: 50%;
@@ -313,7 +575,7 @@ body.grey-icons-enabled .sidebar .sidebar-content ul.sidebar-list li > a .fa.fa-
   background-color: #008000 !important;
 }
 .cancelLeaveBoardBtn {
-  margin-left: 5% !important;
+  margin-inline-start: 5% !important;
   background-color: #f00 !important;
 }
 .addTeamsLabel,
@@ -340,7 +602,31 @@ body.grey-icons-enabled .sidebar .sidebar-content ul.sidebar-list li > a .fa.fa-
 }
 .divaddfaplusminus {
   padding-top: 5px;
-  margin-left: 40px;
+  margin-inline-start: 40px;
+}
+
+/* Save and Unset, side by side under the Background Image URL - the two things
+   to do with the address above them. Unset used to be five <br>s and a rule
+   below its Save. `.buttonsContainer` is already `display: flex` (peopleBody.css
+   styles it for every popup that uses it); this gives the pair a gap and lets
+   them share the width instead of one of them being `.wide`. */
+.board-background-image-buttons {
+  gap: 8px;
+  align-items: stretch;
+  margin-bottom: 8px;
+}
+
+.board-background-image-buttons input[type="submit"],
+.board-background-image-buttons button {
+  flex: 1 1 0;
+  margin: 0;
+}
+
+/* The upload button under them, full width: it is the same question - what
+   picture goes behind this board - answered from this machine rather than from
+   a URL. client/components/sidebar/sidebar.jade */
+.board-background-upload {
+  margin-top: 8px;
 }
 
 /* Board backgrounds management popup */
@@ -358,6 +644,12 @@ body.grey-icons-enabled .sidebar .sidebar-content ul.sidebar-list li > a .fa.fa-
 .board-bg-item.is-active {
   border-color: #3cb500;
 }
+/* The picture is the button that applies it, so it says so. */
+.board-bg-thumb,
+.board-bg-name {
+  cursor: pointer;
+}
+
 .board-bg-thumb {
   height: 80px;
   background-size: cover;
@@ -368,12 +660,24 @@ body.grey-icons-enabled .sidebar .sidebar-content ul.sidebar-list li > a .fa.fa-
 .board-bg-active-check {
   position: absolute;
   top: 4px;
-  right: 4px;
+  inset-inline-end: 4px;
   color: #3cb500;
   background: rgba(255, 255, 255, 0.85);
   border-radius: 50%;
   padding: 2px;
 }
+/* The picture's name under its thumbnail. A grid of thumbnails with no names
+   cannot be read: two photos of the same holiday look the same at 80px, and
+   after an upload there was nothing that said WHICH of them just arrived. */
+.board-bg-name {
+  padding: 2px 2px 0;
+  font-size: calc(12px * var(--wekan-ui-font-scale, 1));
+  color: #4d4d4d;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .board-bg-actions {
   display: flex;
   justify-content: space-around;
@@ -389,4 +693,95 @@ body.grey-icons-enabled .sidebar .sidebar-content ul.sidebar-list li > a .fa.fa-
 .js-bg-upload-button {
   display: inline-block;
   margin-bottom: 8px;
+}
+
+/* Subheadings inside a pop-over list - "Dependencies", "CSV", "JSON" in the
+   board's Export menu. The list under one of them is a family of the same
+   thing, and naming the family once is what lets the entries be "(,)", "(;)"
+   and "TSV" rather than "Export / CSV (,)" three times over. */
+.pop-over-list-subheading {
+  margin: 10px 0 2px 0;
+  padding: 0 12px;
+  font-size: calc(12px * var(--wekan-ui-font-scale, 1));
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.65;
+}
+.pop-over-list-subheading + .pop-over-list {
+  margin-top: 0;
+}
+/* #6699: this editor uses real, labelled checkboxes. Undo all three parts
+   of forms.css's material-checkbox hiding rule in this popup only. */
+.wip-limit-groups input[type="checkbox"] {
+  /* #6820: no text-field padding, or a ticked box is drawn as a dot. */
+  min-height: 0;
+  padding: 0;
+  display: inline-block;
+  visibility: visible;
+  position: static;
+  inset-inline-start: auto;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  margin-inline-end: 6px;
+  appearance: auto;
+  cursor: pointer;
+}
+
+.wip-limit-groups label.flex {
+  align-items: center;
+  cursor: pointer;
+}
+
+
+/* Keep native filter controls visible despite the application's custom inputs. */
+.filter-native-choice input[type="checkbox"],
+.filter-native-choice input[type="radio"],
+.js-card-date-range input[type="checkbox"] {
+  display: inline-block;
+  visibility: visible;
+  position: static;
+  inset-inline-start: auto;
+  width: 16px;
+  height: 16px;
+  min-height: 0;
+  padding: 0;
+  margin-inline-end: 6px;
+  appearance: auto;
+}
+/* Why a date range was refused, below its buttons (sidebarFilters.js,
+   rangeRefused): the browser's own bubble covered those buttons in Firefox. */
+.filter-date-range-error {
+  color: #c0392b;
+  margin: 6px 0 0;
+}
+.filter-native-group {
+  border: 0;
+  padding: 0;
+  margin: 12px 0;
+  min-width: 0;
+}
+.filter-native-group legend { font-weight: bold; }
+.filter-native-choice {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  margin: 6px 0;
+}
+.filter-native-choice input { flex-shrink: 0; }
+.filter-native-choice:focus-within { outline: 2px solid currentColor; outline-offset: 2px; }
+
+/* Board View reorders by drag and drop: the handle when drag handles are on,
+   else the icon and label themselves. Board Settings / Card has order arrows. */
+.board-view-order-handle,
+.card-field-order-drag-label,
+.board-view-drag-label {
+  cursor: grab;
+}
+.js-board-view-sortable .ui-sortable-helper {
+  cursor: grabbing;
+  background: var(--wekan-popup-background, #fff);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
 }

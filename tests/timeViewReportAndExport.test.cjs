@@ -1,0 +1,86 @@
+'use strict';
+
+// #812 ("Add feature: Timesheet / Time Tracking"): the community discussion
+// (39 comments) repeatedly asked for external integrations (Kimai, Harvest,
+// Titra) that were never resourced (the maintainer's own 2021 comment quoted
+// a ~1000 EUR / 4-month estimate for a Kimai sync and it was shelved). What
+// the thread DID converge on that fits inside WeKan itself, without an
+// external service: "reporting total hours by resource and task type"
+// (the issue's own words) and export "like other chart views" - this file
+// pins exactly those two additions to the Time board view.
+
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const root = path.join(__dirname, '..');
+const read = file => fs.readFileSync(path.join(root, file), 'utf8');
+
+// --- 'time' is a real, exportable chartKey, alongside every other board
+// report chart - not a second, parallel export pipeline just for Time.
+const exportCharts = read('models/exportCharts.js');
+// Match 'time' anywhere inside the Set literal - not necessarily last, since
+// later chart keys (e.g. 'pulse') are appended after it.
+assert.match(exportCharts, /const CHART_KEYS = new Set\(\[[\s\S]*?'time'[\s\S]*?\]\);/);
+
+// --- server/lib/boardChartData.js answers 'time' with an assignee
+// breakdown (hours, not card counts) and a per-card breakdown, scoped to
+// non-archived cards (matching the existing Time summary's own scope).
+const boardChartData = read('server/lib/boardChartData.js');
+assert.match(boardChartData, /chartKey === 'time'/);
+assert.match(boardChartData, /computeTimeByGroup\(activeCards, card =>/);
+assert.match(boardChartData, /computeTimeByCard\(activeCards\)/);
+assert.match(boardChartData, /const activeCards = allCards\.filter\(card => !card\.archived\);/);
+assert.match(boardChartData, /NO_ASSIGNEE_GROUP/, 'the empty-assignee bucket is the real translated sentinel, not a hardcoded "none"');
+
+// --- models/lib/chartExportRows.js turns that into the same
+// {title, headers, rows} table shape the PDF/Excel exporters already share
+// with every other chart, and gives it a real title.
+const chartExportRows = read('models/lib/chartExportRows.js');
+assert.match(chartExportRows, /time: \['board-view-time', 'Time'\]/);
+assert.match(chartExportRows, /chartKey === 'time'/);
+assert.match(chartExportRows, /translateGroupLabel\(group\.label, translate\)/);
+
+// --- the live Time view calls the SAME boardChartData method (chartKey
+// 'time') as every chart view, and offers PDF/Excel export through the SAME
+// /api/boards/:boardId/charts/:chartKey/export* routes - "like other chart
+// views", not a bespoke Time-only export.
+const timeViewJs = read('client/components/boards/timeView.js');
+assert.match(timeViewJs, /Meteor\.call\('boardChartData', boardId, 'time'/);
+// The export URL is built in the one shared place every chart view uses
+// (exportChart.js, chartKey from the view's Export button); the Time view
+// names its chart key there. tests/chartExportPopup.test.cjs covers the popup.
+assert.doesNotMatch(timeViewJs, /timeExportUrl\(format\)/, 'no Time-only export URL builder');
+assert.match(read('client/components/boards/charts/exportChart.js'), /\/api\/boards\/\$\{boardId\}\/charts\/\$\{chartKey\}\/\$\{path\}/);
+
+const timeViewJade = read('client/components/boards/timeView.jade');
+assert.match(timeViewJade, /a\.chart-export-button\.js-export-chart\(href="#" data-chart-key="time"\)/);
+// Negative: the original 3-row summary is kept exactly as it was (this is
+// additive - #812's asks are new sections alongside it, not a replacement).
+assert.match(timeViewJade, /\{\{_ 'board-status-time-spent-total'\}\}/);
+assert.match(timeViewJade, /\{\{_ 'board-status-cards-with-time'\}\}/);
+assert.match(timeViewJade, /\{\{_ 'board-status-overtime-cards'\}\}/);
+
+// Card titles share the sanitized Markdown/emoji viewer used by other board views.
+assert.match(timeViewJade, /\.time-view-card-title\n\s+\+viewer\n\s+= title/);
+assert.doesNotMatch(timeViewJade, /td \{\{title\}\}/);
+// The time-adjustments history table (added in 6d99ad73c) first rendered its
+// card column as a bare `td {{title}}`; it must go through the same viewer, and
+// every `title` the template renders must be one of those viewer blocks.
+const adjustmentsJade = timeViewJade.slice(timeViewJade.indexOf('each timeAdjustmentEntries'));
+assert.match(adjustmentsJade, /\.time-view-card-title\n\s+\+viewer\n\s+= title/,
+  'the adjustments table renders card titles with the viewer too');
+const titleRenders = timeViewJade.match(/(?:\{\{title\}\}|= title\b)/g) || [];
+const viewerTitles = timeViewJade.match(/\+viewer\n\s+= title\b/g) || [];
+assert.strictEqual(titleRenders.length, viewerTitles.length,
+  'no card title in the Time view bypasses the viewer');
+assert.match(timeViewJade, /if isOvertime\n\s+\|.*overtime/,
+  'overtime status stays outside user-authored Markdown');
+
+assert.match(read('client/components/main/editor.jade'), /template\(name="viewer"\)[\s\S]*?\+markdown/);
+assert.match(read('packages/markdown/src/template-integration.js'), /const forceRawSource = Markdown\.alwaysShowCodeAsText\.get\(\)/);
+
+assert.match(read('client/components/main/editor.js'), /const stripLinks = !!\(setting && setting\.renderLinksAsPlainText\)/);
+// #3218 added the custom URL-scheme allowlist beside stripLinks.
+assert.match(read('client/components/main/editor.js'), /sanitizeHTML\(content, \{ stripLinks, urlSchemes \}\)/);
+
+console.log('timeViewReportAndExport: Time view now reports hours by assignee/card and exports like every other chart view');

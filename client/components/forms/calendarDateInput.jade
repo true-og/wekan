@@ -1,0 +1,50 @@
+template(name="calendarDateInput")
+  .calendar-date-input
+    if useNativeInput
+      input(type=inputType id=inputId name=inputName class=fieldClass value=value autofocus=autofocus)
+    else
+      input.js-calendar-native-value(type="hidden" id=inputId name=inputName class=fieldClass value=value)
+      unless inline
+        button.js-calendar-toggle(type="button" aria-label="{{_ 'date'}}" aria-expanded=expanded)
+          if selectedDateText
+            | {{selectedDateText}}
+          else
+            | {{_ 'date'}}
+        button.js-calendar-clear(type="button" aria-label="{{_ 'delete'}}") ×
+      if withTime
+        +calendarTimeInput(fieldClass="js-calendar-time" value=timeValue)
+      if expanded
+        .selected-calendar-picker
+          .selected-calendar-heading
+            button.primary.js-calendar-year-previous(type="button" aria-label="{{_ 'previous'}} {{_ 'predicate-year'}}") «
+            button.primary.js-calendar-previous(type="button" aria-label="{{_ 'previous'}} {{_ 'month'}}") ‹
+            span(aria-live="polite")
+              | {{monthLabel}}
+            //- #6838: back to today's month from wherever the arrows went. It only
+            //- shows the month; the date stays as it is until a day is clicked.
+            button.primary.js-calendar-today(type="button" aria-label="{{_ 'today'}}") {{_ 'today'}}
+            button.primary.js-calendar-next(type="button" aria-label="{{_ 'next'}} {{_ 'month'}}") ›
+            button.primary.js-calendar-year-next(type="button" aria-label="{{_ 'next'}} {{_ 'predicate-year'}}") »
+          table
+            thead
+              tr
+                each weekdays
+                  th(scope="col") {{this}}
+            tbody
+              each weeks
+                tr
+                  each days
+                    td(class="{{#if this.today}}is-today-cell{{/if}}")
+                      unless this.empty
+                        button.primary.js-calendar-day(type="button" class="{{#if today}}is-today{{/if}}" data-date=iso title=title aria-label=title aria-pressed=selected aria-current=ariaCurrent tabindex=tabIndex) {{label}}
+        //- #6853: any year, month and day by a pick, under the calendar.
+        .selected-calendar-selects
+          input.js-calendar-year(type="number" step="1" inputmode="numeric" value=yearValue aria-label="{{_ 'predicate-year'}}")
+          select.js-calendar-month(aria-label="{{_ 'month'}}")
+            each monthOptions
+              option(value=value selected=selected) {{label}}
+          select.js-calendar-day-select(aria-label="{{_ 'day'}}")
+            if noDaySelected
+              option(value="" selected disabled) –
+            each dayOptions
+              option(value=value selected=selected) {{label}}

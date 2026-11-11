@@ -1,7 +1,11 @@
 import { Meteor } from 'meteor/meteor';
 import { EJSON } from 'meteor/ejson';
 import { DataCache } from '/imports/lib/dataCache';
+import { KeyedGroupIndex } from '/imports/lib/keyedGroupIndex';
 import { groupBy, indexBy } from '/imports/lib/collectionHelpers';
+const { publicCommentOptions } = require('/models/lib/commentPrivateFields');
+const { applyCardFieldVisibility } = require('/models/lib/cardFieldVisibility');
+const { guardSelectorMethods } = require('/models/lib/selectorGuard');
 
 function lazyCollectionProxy(loadCollection) {
   return new Proxy(
@@ -51,10 +55,12 @@ const CardCommentReactions = lazyCollectionProxy(
   () => require('/models/cardCommentReactions').default,
 );
 const CardComments = lazyCollectionProxy(() => require('/models/cardComments').default);
+const CardTextNotes = lazyCollectionProxy(() => require('/models/cardTextNotes').default);
 const Cards = lazyCollectionProxy(() => require('/models/cards').default);
 const ChecklistItems = lazyCollectionProxy(() => require('/models/checklistItems').default);
 const Checklists = lazyCollectionProxy(() => require('/models/checklists').default);
 const CustomFields = lazyCollectionProxy(() => require('/models/customFields').default);
+const { childrenSelector, cardParentIds } = require('/models/lib/cardParents');
 const ImpersonatedUsers = lazyCollectionProxy(
   () => require('/models/impersonatedUsers').default,
 );
@@ -148,10 +154,12 @@ const ReactiveCacheServer = {
     return ret;
   },
   async getCardComment(idOrFirstObjectSelector = {}, options = {}) {
+    options = publicCommentOptions(options);
     const ret = typeof CardComments.findOneAsync === 'function' ? await CardComments.findOneAsync(idOrFirstObjectSelector, options) : CardComments.findOne(idOrFirstObjectSelector, options);
     return ret;
   },
   async getCardComments(selector = {}, options = {}, getQuery = false) {
+    options = publicCommentOptions(options);
     let ret = CardComments.find(selector, options);
     if (getQuery !== true) {
       ret = typeof ret.fetchAsync === 'function' ? await ret.fetchAsync() : ret.fetch();
@@ -164,6 +172,17 @@ const ReactiveCacheServer = {
   },
   async getCardCommentReactions(selector = {}, options = {}, getQuery = false) {
     let ret = CardCommentReactions.find(selector, options);
+    if (getQuery !== true) {
+      ret = typeof ret.fetchAsync === 'function' ? await ret.fetchAsync() : ret.fetch();
+    }
+    return ret;
+  },
+  async getCardTextNote(idOrFirstObjectSelector = {}, options = {}) {
+    const ret = typeof CardTextNotes.findOneAsync === 'function' ? await CardTextNotes.findOneAsync(idOrFirstObjectSelector, options) : CardTextNotes.findOne(idOrFirstObjectSelector, options);
+    return ret;
+  },
+  async getCardTextNotes(selector = {}, options = {}, getQuery = false) {
+    let ret = CardTextNotes.find(selector, options);
     if (getQuery !== true) {
       ret = typeof ret.fetchAsync === 'function' ? await ret.fetchAsync() : ret.fetch();
     }
@@ -359,6 +378,8 @@ const ReactiveCacheServer = {
     return ret;
   },
 };
+// A Promise given for an id reads as {} and finds the first document (#6831).
+guardSelectorMethods(ReactiveCacheServer);
 
 // only the Client is reactive
 // saving the result has a big advantage if the query is big and often searched for the same data again and again
@@ -367,17 +388,28 @@ const ReactiveCacheClient = {
   getBoard(idOrFirstObjectSelector = {}, options = {}) {
     const idOrFirstObjectSelect = { idOrFirstObjectSelector, options };
     if (!this.__board) {
-      this.__board = new DataCache((_idOrFirstObjectSelect) => {
-        const __select = EJSON.parse(_idOrFirstObjectSelect);
-        const _ret = Boards.findOne(
-          __select.idOrFirstObjectSelector,
-          __select.options,
-        );
-        return _ret;
-      });
+      this.__board = new DataCache(
+        (_idOrFirstObjectSelect) => {
+          const __select = EJSON.parse(_idOrFirstObjectSelect);
+          const _ret = Boards.findOne(
+            __select.idOrFirstObjectSelector,
+            __select.options,
+          );
+          return _ret;
+        },
+        // Keep the last board visible through a transient minimongo miss during a
+        // subscription re-settle instead of flashing the "Board not found" shell
+        // (and the WebKit Blaze "removed DomRange" crash). See dataCache.js.
+        { staleWhileRevalidate: true },
+      );
     }
     const ret = this.__board.get(EJSON.stringify(idOrFirstObjectSelect));
-    return ret;
+    // Admin Panel / Settings / Visibility / Features: a card field the
+    // administrator unticked reads as off on every board, so each card and
+    // minicard template that reads the board's flag hides it without a
+    // second condition. The same object when nothing is hidden; the database
+    // is never written. models/lib/cardFieldVisibility.js
+    return applyCardFieldVisibility(ret, this.getCurrentSetting());
   },
   getBoards(selector = {}, options = {}, getQuery = false) {
     const select = { selector, options, getQuery };
@@ -618,6 +650,36 @@ const ReactiveCacheClient = {
     const ret = this.__cardCommentReactions.get(EJSON.stringify(select));
     return ret;
   },
+  getCardTextNote(idOrFirstObjectSelector = {}, options = {}) {
+    const idOrFirstObjectSelect = { idOrFirstObjectSelector, options };
+    if (!this.__cardTextNote) {
+      this.__cardTextNote = new DataCache((_idOrFirstObjectSelect) => {
+        const __select = EJSON.parse(_idOrFirstObjectSelect);
+        const _ret = CardTextNotes.findOne(
+          __select.idOrFirstObjectSelector,
+          __select.options,
+        );
+        return _ret;
+      });
+    }
+    const ret = this.__cardTextNote.get(EJSON.stringify(idOrFirstObjectSelect));
+    return ret;
+  },
+  getCardTextNotes(selector = {}, options = {}, getQuery = false) {
+    const select = { selector, options, getQuery };
+    if (!this.__cardTextNotes) {
+      this.__cardTextNotes = new DataCache((_select) => {
+        const __select = EJSON.parse(_select);
+        let _ret = CardTextNotes.find(__select.selector, __select.options);
+        if (__select.getQuery !== true) {
+          _ret = _ret.fetch();
+        }
+        return _ret;
+      });
+    }
+    const ret = this.__cardTextNotes.get(EJSON.stringify(select));
+    return ret;
+  },
   getCustomField(idOrFirstObjectSelector = {}, options = {}) {
     const idOrFirstObjectSelect = { idOrFirstObjectSelector, options };
     if (!this.__customField) {
@@ -658,13 +720,12 @@ const ReactiveCacheClient = {
           __select.idOrFirstObjectSelector,
           __select.options,
         );
-        if (!_ret && typeof __select.idOrFirstObjectSelector === 'string') {
-          // Fall back to old structure for single attachment lookup
-          _ret = Attachments.getAttachmentWithBackwardCompatibility(
-            __select.idOrFirstObjectSelector,
-          );
-        }
-        return _ret;
+        // No fallback to the old (CollectionFS) structure here: on the
+        // client it is an async stub (models/attachments.js), and its Promise
+        // was taken for a found attachment - a 6.09 card's coverId became a
+        // "cover" whose link() threw. The server's cache has the real lookup;
+        // the client gets legacy files from legacyBoardAttachments.
+        return _ret || null;
       });
     }
     const ret = this.__attachment.get(EJSON.stringify(idOrFirstObjectSelect));
@@ -679,12 +740,8 @@ const ReactiveCacheClient = {
         let _ret = Attachments.find(__select.selector, __select.options);
         if (__select.getQuery !== true) {
           _ret = _ret.fetch();
-          // If no results and we have a cardId selector, try old structure
-          if (_ret.length === 0 && __select.selector['meta.cardId']) {
-            _ret = Attachments.getAttachmentsWithBackwardCompatibility(
-              __select.selector,
-            );
-          }
+          // No client fallback to the old structure: the stub answers with a
+          // Promise, which callers took for the array (see getAttachment).
         } else {
           // Register a reactive dependency on the underlying Mongo cursor so the
           // DataCache autorun re-runs (and callers see fresh data) when attachments
@@ -1035,7 +1092,17 @@ const ReactiveCacheClient = {
     return ret;
   },
   getCurrentSetting() {
-    if (!this.__currentSetting || !this.__currentSetting.get()) {
+    // #6507: create the DataCache ONCE (like every other getter above), keyed on
+    // `!this.__currentSetting` only. The old guard ALSO rebuilt it whenever the cached
+    // value was FALSY (it OR-ed a check on the getter result), so on a fresh install
+    // with no Settings document (or any moment the setting is briefly absent) a new
+    // DataCache — and a new Tracker.autorun — was built on EVERY reactive read. That
+    // continuous create/teardown churned computations app-wide and raced Blaze's
+    // view teardown, producing an infinite reactive loop and the "Cannot read
+    // properties of undefined (reading 'remove')" crash (the removed-DomRange class
+    // the getBoard staleWhileRevalidate comment above also guards against). Returning
+    // a stable null until the document exists is correct and loop-free.
+    if (!this.__currentSetting) {
       this.__currentSetting = new DataCache(() => {
         const _ret = Settings.findOne();
         return _ret;
@@ -1045,7 +1112,10 @@ const ReactiveCacheClient = {
     return ret;
   },
   getCurrentUser() {
-    if (!this.__currentUser || !this.__currentUser.get()) {
+    // #6507: same fix as getCurrentSetting — create the DataCache once. The old
+    // guard rebuilt it on every read while Meteor.user() was null (before login
+    // lands / a fresh install), thrashing computations and crashing Blaze teardown.
+    if (!this.__currentUser) {
       this.__currentUser = new DataCache(() => {
         const _ret = Meteor.user();
         return _ret;
@@ -1174,11 +1244,33 @@ const ReactiveCache = {
     }
   },
   getCard(idOrFirstObjectSelector = null, options = {}, noCache = false) {
-    if (Meteor.isServer || noCache === true) {
+    if (Meteor.isServer) {
       return ReactiveCacheServer.getCard(idOrFirstObjectSelector, options);
-    } else {
-      return ReactiveCacheClient.getCard(idOrFirstObjectSelector, options);
     }
+    if (noCache === true) {
+      // #2494 (cards sent to another board appear/disappear when reordering):
+      // on the CLIENT, `noCache` must bypass the DataCache but stay
+      // SYNCHRONOUS like every other client-side ReactiveCache getter.
+      // Routing it to the async ReactiveCacheServer.getCard returned a
+      // Promise; synchronous callers such as the multi-select "Move/Copy
+      // selection" max-sort lookup (client/components/sidebar/
+      // sidebarFilters.js getMaxSortForList) read `.sort` off that Promise,
+      // got `undefined`, and wrote `sort: NaN` to every card moved to the
+      // target list — the cards then landed at unpredictable positions,
+      // hid behind each other and could not be reordered. Minimongo's
+      // findOne is synchronous on the client, and callers that `await`
+      // this call (models/cards.js getSort, models/boards.js
+      // getNextCardNumber) work unchanged when given a plain document.
+      if (
+        idOrFirstObjectSelector === null ||
+        idOrFirstObjectSelector === undefined ||
+        idOrFirstObjectSelector === ''
+      ) {
+        return null;
+      }
+      return Cards.findOne(idOrFirstObjectSelector, options);
+    }
+    return ReactiveCacheClient.getCard(idOrFirstObjectSelector, options);
   },
   getCards(selector = {}, options = {}, getQuery = false) {
     if (Meteor.isServer) {
@@ -1233,6 +1325,26 @@ const ReactiveCache = {
         options,
         getQuery,
       );
+    }
+  },
+  getCardTextNote(idOrFirstObjectSelector = {}, options = {}) {
+    if (Meteor.isServer) {
+      return ReactiveCacheServer.getCardTextNote(
+        idOrFirstObjectSelector,
+        options,
+      );
+    } else {
+      return ReactiveCacheClient.getCardTextNote(
+        idOrFirstObjectSelector,
+        options,
+      );
+    }
+  },
+  getCardTextNotes(selector = {}, options = {}, getQuery = false) {
+    if (Meteor.isServer) {
+      return ReactiveCacheServer.getCardTextNotes(selector, options, getQuery);
+    } else {
+      return ReactiveCacheClient.getCardTextNotes(selector, options, getQuery);
     }
   },
   getCustomField(idOrFirstObjectSelector = {}, options = {}) {
@@ -1501,7 +1613,8 @@ const ReactiveMiniMongoIndexServer = {
   async getSubTasksWithParentId(parentId, addSelect = {}, options = {}) {
     let ret = [];
     if (parentId) {
-      ret = await ReactiveCache.getCards({ parentId, ...addSelect }, options);
+      // #3626: a subtask whose other parent is this card is its child too.
+      ret = await ReactiveCache.getCards({ $and: [childrenSelector(parentId), addSelect] }, options);
     }
     return ret;
   },
@@ -1541,93 +1654,78 @@ const ReactiveMiniMongoIndexServer = {
   },
 };
 
+// #6745: one KeyedGroupIndex per (index, select) pair, so a minicard depends
+// only on its own card's group - see imports/lib/keyedGroupIndex.js. These
+// used to be one DataCache object per index that every minicard depended on
+// as a whole.
+function keyedIndex(owner, name, select, build) {
+  if (!owner[name]) owner[name] = new Map();
+  const key = EJSON.stringify(select);
+  let index = owner[name].get(key);
+  if (!index) {
+    const parsed = EJSON.parse(key);
+    index = new KeyedGroupIndex(() => build(parsed));
+    owner[name].set(key, index);
+  }
+  return index;
+}
+
 // Client side little MiniMongo DB "Index"
 const ReactiveMiniMongoIndexClient = {
   getSubTasksWithParentId(parentId, addSelect = {}, options = {}) {
     let ret = [];
     if (parentId) {
-      const select = { addSelect, options };
-      if (!this.__subTasksWithId) {
-        this.__subTasksWithId = new DataCache((_select) => {
-          const __select = EJSON.parse(_select);
-          const _subTasks = ReactiveCache.getCards(
-            { parentId: { $exists: true }, ...__select.addSelect },
-            __select.options,
-          );
-          const _ret = groupBy(_subTasks, 'parentId');
-          return _ret;
-        });
-      }
-      ret = this.__subTasksWithId.get(EJSON.stringify(select));
-      if (ret) {
-        ret = ret[parentId] || [];
-      }
+      ret = keyedIndex(this, '__subTasksWithId', { addSelect, options }, __select => {
+        const _subTasks = ReactiveCache.getCards(
+          { parentId: { $exists: true }, ...__select.addSelect },
+          __select.options,
+        );
+        // #3626: a card is listed under EVERY one of its parents.
+        const _ret = {};
+        for (const subTask of _subTasks) {
+          for (const id of cardParentIds(subTask)) (_ret[id] = _ret[id] || []).push(subTask);
+        }
+        return _ret;
+      }).get(parentId);
     }
     return ret;
   },
   getChecklistsWithCardId(cardId, addSelect = {}, options = {}) {
     let ret = [];
     if (cardId) {
-      const select = { addSelect, options };
-      if (!this.__checklistsWithId) {
-        this.__checklistsWithId = new DataCache((_select) => {
-          const __select = EJSON.parse(_select);
-          const _checklists = ReactiveCache.getChecklists(
-            { cardId: { $exists: true }, ...__select.addSelect },
-            __select.options,
-          );
-          const _ret = groupBy(_checklists, 'cardId');
-          return _ret;
-        });
-      }
-      ret = this.__checklistsWithId.get(EJSON.stringify(select));
-      if (ret) {
-        ret = ret[cardId] || [];
-      }
+      ret = keyedIndex(this, '__checklistsWithId', { addSelect, options }, __select => groupBy(
+        ReactiveCache.getChecklists(
+          { cardId: { $exists: true }, ...__select.addSelect },
+          __select.options,
+        ),
+        'cardId',
+      )).get(cardId);
     }
     return ret;
   },
   getChecklistItemsWithChecklistId(checklistId, addSelect = {}, options = {}) {
     let ret = [];
     if (checklistId) {
-      const select = { addSelect, options };
-      if (!this.__checklistItemsWithId) {
-        this.__checklistItemsWithId = new DataCache((_select) => {
-          const __select = EJSON.parse(_select);
-          const _checklistItems = ReactiveCache.getChecklistItems(
-            { checklistId: { $exists: true }, ...__select.addSelect },
-            __select.options,
-          );
-          const _ret = groupBy(_checklistItems, 'checklistId');
-          return _ret;
-        });
-      }
-      ret = this.__checklistItemsWithId.get(EJSON.stringify(select));
-      if (ret) {
-        ret = ret[checklistId] || [];
-      }
+      ret = keyedIndex(this, '__checklistItemsWithId', { addSelect, options }, __select => groupBy(
+        ReactiveCache.getChecklistItems(
+          { checklistId: { $exists: true }, ...__select.addSelect },
+          __select.options,
+        ),
+        'checklistId',
+      )).get(checklistId);
     }
     return ret;
   },
   getCardCommentsWithCardId(cardId, addSelect = {}, options = {}) {
     let ret = [];
     if (cardId) {
-      const select = { addSelect, options };
-      if (!this.__cardCommentsWithId) {
-        this.__cardCommentsWithId = new DataCache((_select) => {
-          const __select = EJSON.parse(_select);
-          const _cardComments = ReactiveCache.getCardComments(
-            { cardId: { $exists: true }, ...__select.addSelect },
-            __select.options,
-          );
-          const _ret = groupBy(_cardComments, 'cardId');
-          return _ret;
-        });
-      }
-      ret = this.__cardCommentsWithId.get(EJSON.stringify(select));
-      if (ret) {
-        ret = ret[cardId] || [];
-      }
+      ret = keyedIndex(this, '__cardCommentsWithId', { addSelect, options }, __select => groupBy(
+        ReactiveCache.getCardComments(
+          { cardId: { $exists: true }, ...__select.addSelect },
+          __select.options,
+        ),
+        'cardId',
+      )).get(cardId);
     }
     return ret;
   },

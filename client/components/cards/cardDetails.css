@@ -1,40 +1,23 @@
-/* Date Format Selector */
+/* Date section */
 .card-details-item-date-format {
   margin-bottom: 12px;
 }
 
 .card-details-item-date-format .card-details-item-title {
-  font-size: 15px;
+  font-size: calc(15px * var(--wekan-ui-font-scale, 1));
   font-weight: bold;
   margin-bottom: 6px;
   color: #333;
   letter-spacing: 0.03em;
 }
 
-.card-details-item-date-format .js-date-format-selector {
-  width: 100%;
-  padding: 9px 10px;
-  border: 1px solid #ddd;
-  border-radius: 5px;
-  background-color: #fff;
-  font-size: 15px;
-  cursor: pointer;
-  transition: border-color 0.15s, box-shadow 0.15s;
-}
-
-.card-details-item-date-format .js-date-format-selector:focus {
-  outline: none;
-  border-color: #007cba;
-  box-shadow: 0 0 0 2px rgba(0, 124, 186, 0.2);
-}
-
 .assignee {
   display: block;
   position: relative;
-  float: left;
-  height: clamp(24px, 3.5vw, 36px);
-  width: clamp(24px, 3.5vw, 36px);
-  margin: 0.3vh;
+  float: inline-start;
+  height: 24px;
+  width: 24px;
+  margin: 3px;
   cursor: pointer;
   user-select: none;
   z-index: 1;
@@ -73,7 +56,7 @@
   height: 7px;
   width: 7px;
   position: absolute;
-  right: -1px;
+  inset-inline-end: -1px;
   bottom: -1px;
   z-index: 15;
 }
@@ -106,10 +89,10 @@
 }
 .copied-tooltip {
   display: none;
-  padding: 0 1.3vw;
+  padding: 0 18px;
   background-color: rgba(0,0,0,0.875);
   color: #fff;
-  border-radius: 0.7vw;
+  border-radius: 10px;
   font-size: 0.98em;
 }
 
@@ -121,58 +104,129 @@
   overflow-y: auto;
   overflow-x: hidden;
   background: #f7f7f7;
-  border-radius: 0 0 0.4vw 0.4vw;
+  border-radius: 0 0 6px 6px;
   z-index: 30;
   animation: flexGrowIn 0.1s;
-  box-shadow: 0 0 0.9vh 0 #b3b3b3;
+  box-shadow: 0 0 8px 0 #b3b3b3;
   transition: flex-basis 0.1s, box-shadow 0.15s;
   box-sizing: border-box;
 }
 
-/* Desktop mode: position card below board header */
+/* Desktop mode: position card below board header.
+   #6465: the floating window used to span nearly the whole board (insets
+   20px/20px from BOTH edges, top-left anchored) — right on top of the card it
+   belongs to, with big rounded borders. Dock it to the END edge (right in LTR)
+   like the classic 6.09 side panel instead: the board and the card stay
+   visible, and the drag handle still moves it anywhere. */
 body.desktop-mode .card-details:not(.card-details-popup) {
   position: fixed;
   width: auto;
-  max-width: 800px;
+  /* Open at the compact dock width below, but let the bottom-right native
+     resize handle grow the card up to the viewport edge. A fixed 520px cap
+     made the handle capable of shrinking only. */
+  max-width: calc(100vw - 16px);
   flex-basis: auto;
-  border-radius: 8px;
+  border-radius: 3px;
   z-index: 2001;
 }
 
 /* Default position for first card or when dragged */
 body.desktop-mode .card-details:not(.card-details-popup):not([style*="left"]):not([style*="top"]) {
   top: 8px;
-  left: 20px;
-  right: 20px;
-  bottom: 20px;
+  inset-inline-start: auto;
+  inset-inline-end: 8px;
+  width: min(520px, 90vw);
+  bottom: 8px;
 }
 
-/* Stagger positions for multiple cards using nth-of-type */
+/* #6465: the Y half of the rule above, kept when the window has been placed
+   horizontally.
+
+   The default-position rule is `:not([style*="left"]):not([style*="top"])`, so it
+   switches itself off the moment anything writes an inline `left` — and it
+   carried `top` as well as the width. cardDetails.js now writes an inline `left`
+   to dock the window beside its minicard (X only), which would leave a SIXTH open
+   window — past the five staggered rules below — with no `top` at all, i.e.
+   `top: auto`, which for a fixed element is wherever it happened to land.
+
+   Same specificity as the stagger rules and written BEFORE them, so cards 1-5
+   still take their staggered `top` from those and nothing about the vertical
+   position changes. `bottom` is unchanged too: it comes from the
+   `:not(.card-details-collapsed)` rule further down, which never depended on the
+   inline styles. */
+body.desktop-mode .card-details:not(.card-details-popup):not([style*="top"]) {
+  top: 8px;
+}
+
+/* Stagger positions for multiple cards using nth-of-type (from the end edge) */
 body.desktop-mode .card-details:not(.card-details-popup):nth-of-type(1) {
   top: 8px;
-  left: 20px;
+  inset-inline-end: 8px;
 }
 body.desktop-mode .card-details:not(.card-details-popup):nth-of-type(2) {
   top: 38px;
-  left: 50px;
+  inset-inline-end: 38px;
 }
 body.desktop-mode .card-details:not(.card-details-popup):nth-of-type(3) {
   top: 68px;
-  left: 80px;
+  inset-inline-end: 68px;
 }
 body.desktop-mode .card-details:not(.card-details-popup):nth-of-type(4) {
   top: 98px;
-  left: 110px;
+  inset-inline-end: 98px;
 }
 body.desktop-mode .card-details:not(.card-details-popup):nth-of-type(5) {
   top: 128px;
-  left: 140px;
+  inset-inline-end: 128px;
 }
 
 /* For expanded cards, set dimensions */
 body.desktop-mode .card-details:not(.card-details-popup):not(.card-details-collapsed) {
-  right: 20px;
-  bottom: 20px;
+  bottom: 8px;
+}
+
+/* A phone in desktop mode: the header bar wraps to several rows (up to five with
+   the board controls open), far taller than the 8px the floating window docks
+   at, so the card's own top row (caret, number, menu, X) sat among the header's
+   rows and was only seen by dragging the card down. Below 801px the card starts
+   BELOW the header, at the height Utils publishes as --wekan-header-height.
+   Only a card WITHOUT an inline top matches (`:not([style*="top"])`), so the
+   place a finger dragged it to is an inline top and is kept when the finger is
+   lifted - this rule never competes with it. */
+@media screen and (max-width: 800px) {
+  body.desktop-mode .card-details:not(.card-details-popup):not([style*="top"]),
+  /* a card opened as a popup (search result, table, Roadmap bar) docks the same way */
+  body.desktop-mode .card-details.card-details-popup:not([style*="top"]),
+  body.desktop-mode .card-details.card-details-maximized:not(.card-details-popup):not(.card-details-collapsed) {
+    top: calc(var(--wekan-header-height, 0px) + 8px) !important;
+  }
+}
+
+/* #4822: the MAXIMIZED card must be anchored to the VIEWPORT (position: fixed
+   with viewport insets), never laid out inside — or measured from — the
+   scrolled swimlane/board container. Historically the maximized pane was an
+   in-flow flex/float item of its swimlane, so after scrolling down in the
+   swimlanes view it rendered at the swimlane's position in the tall scrolled
+   canvas (off-screen) instead of over the viewport.
+   All four insets are !important for two reasons:
+   1. The floating-window rules above (top: 8px / inset-inline-end: 8px /
+      width: min(520px, 90vw), specificity up to 0,5,1) otherwise override the
+      lower-specificity .card-details-maximized geometry entirely, leaving the
+      Maximize button a no-op.
+   2. The drag handle writes inline left/top styles onto the card; a card that
+      was dragged and then maximized must not keep the stale dragged offsets
+      (an off-viewport inline top is exactly the "wrong place" of #4822).
+      Only !important declarations beat inline styles. */
+body.desktop-mode .card-details.card-details-maximized:not(.card-details-popup):not(.card-details-collapsed) {
+  position: fixed !important;
+  top: 8px !important;
+  inset-inline-start: 8px !important;
+  inset-inline-end: 8px !important;
+  bottom: 8px !important;
+  width: auto !important;
+  height: auto !important;
+  max-width: none !important;
+  resize: none;
 }
 
 /* Collapsed card state - hide content and set height to title row only */
@@ -188,11 +242,15 @@ body.desktop-mode .card-details.card-details-collapsed {
   bottom: auto !important;
 }
 .card-details .mCustomScrollBox {
-  padding-left: 0;
+  padding-inline-start: 0;
 }
 .card-details .card-details-canvas {
   width: auto;
-  padding: 0 2.5vw;
+  box-sizing: border-box;
+  min-width: 0;
+  /* #6465: fixed 20px as in 6.09 — 35px was ~48px of white border per side
+     on a FullHD screen. */
+  padding: 0 20px;
 }
 .card-details .card-details-header {
   margin: 0 -20px 5px;
@@ -208,16 +266,34 @@ body.desktop-mode .card-details.card-details-collapsed {
 .card-details .card-details-header .card-number {
   color: #b3b3b3;
   display: inline-block;
-  margin-right: 6px;
+  margin-inline-end: 6px;
+  /* Above the title's edit zone (z-index 1, over the whole title): a press on the
+     card number moves the window like the rest of the header row; only the title
+     itself edits. */
+  position: relative;
+  z-index: 2;
+}
+
+/* The areas that move the window by a finger. Without touch-action: none the browser
+   takes a finger drag for a scroll and cancels the pointer, so the window never moves
+   (the page behind it scrolls instead). Only in desktop mode, where the card is a
+   window; the full-screen card of mobile mode is not moved. */
+body.desktop-mode .card-details .card-details-header,
+body.desktop-mode .card-details .card-details-header .card-drag-handle {
+  touch-action: none;
+}
+body.card-window-dragging {
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 /* Collapse toggle triangle */
 .card-details .card-details-header .card-collapse-toggle {
-  float: left;
-  font-size: 20px;
+  float: inline-start;
+  font-size: calc(20px * var(--wekan-ui-font-scale, 1));
   padding: 7px 10px;
-  margin-left: -10px;
-  margin-right: 5px;
+  margin-inline-start: -10px;
+  margin-inline-end: 5px;
   cursor: pointer;
   user-select: none;
   color: #000;
@@ -226,13 +302,13 @@ body.desktop-mode .card-details.card-details-collapsed {
 }
 
 .card-details .card-details-header .card-drag-handle {
-  font-size: 20px;
+  font-size: calc(20px * var(--wekan-ui-font-scale, 1));
   padding: 8px 10px;
-  margin-right: 10px;
+  margin-inline-end: 10px;
   cursor: move;
   user-select: none;
   display: inline-block;
-  float: right;
+  float: inline-end;
   vertical-align: middle;
   line-height: 1.2;
 }
@@ -246,14 +322,14 @@ body.desktop-mode .card-details.card-details-collapsed {
 .card-details .card-details-header .close-card-details-mobile-web,
 .card-details .card-details-header .card-details-menu-mobile-web,
 .card-details .card-details-header .copied-tooltip {
-  float: right;
+  float: inline-end;
 }
 .card-details .card-details-header .close-card-details,
 .card-details .card-details-header .maximize-card-details,
 .card-details .card-details-header .minimize-card-details {
-  font-size: 24px;
+  font-size: calc(24px * var(--wekan-ui-font-scale, 1));
   padding: 5px 10px 5px 10px;
-  margin-right: -8px;
+  margin-inline-end: -8px;
   cursor: pointer;
   user-select: none;
   vertical-align: middle;
@@ -262,66 +338,55 @@ body.desktop-mode .card-details.card-details-collapsed {
 }
 .card-details .card-details-header .close-card-details-mobile-web,
 .card-details .card-details-header .card-mobile-desktop-toggle {
-  font-size: 24px;
+  font-size: calc(24px * var(--wekan-ui-font-scale, 1));
   padding: 5px;
-  margin-right: 5px;
+  margin-inline-end: 5px;
   cursor: pointer;
   user-select: none;
 }
 .card-details .card-details-header .card-copy-button {
-  font-size: 17px;
+  font-size: calc(17px * var(--wekan-ui-font-scale, 1));
   padding: 10px;
-  margin-right: 10px;
+  margin-inline-end: 10px;
 }
 .card-details .card-details-header .card-copy-mobile-button {
-  font-size: 17px;
+  font-size: calc(17px * var(--wekan-ui-font-scale, 1));
   padding: 10px;
-  margin-right: 10px;
+  margin-inline-end: 10px;
 }
 .card-details .card-details-header .card-details-menu {
-  font-size: 17px;
+  font-size: calc(17px * var(--wekan-ui-font-scale, 1));
   padding: 10px;
   vertical-align: middle;
   line-height: 1.2;
 }
 .card-details .card-details-header .card-details-menu-mobile-web {
-  font-size: 17px;
+  font-size: calc(17px * var(--wekan-ui-font-scale, 1));
   padding: 10px;
-  margin-right: 30px;
+  margin-inline-end: 30px;
 }
 .card-details .card-details-header .card-mobile-desktop-toggle,
 .card-details .card-details-header .card-zoom-in,
 .card-details .card-details-header .card-zoom-out {
-  font-size: 24px;
+  font-size: calc(24px * var(--wekan-ui-font-scale, 1));
   padding: 5px 10px 5px 10px;
-  margin-right: 5px;
+  margin-inline-end: 5px;
   cursor: pointer;
   user-select: none;
-  float: right;
+  float: inline-end;
 }
 
-/* Unify all card text to match title size */
+/* #6465: the "unify all card text to match title size" block (v8.18) forced
+   EVERY element in card details to the base font size with line-height 1.5,
+   flattening the 6.09 hierarchy where labels/metadata were smaller than body
+   text — a big part of the "card window is WAAAY too big" complaint. Removed:
+   components keep their own sizes again. */
 .card-details {
   font-size: 1em;
 }
-.card-details p,
-.card-details span,
-.card-details div,
-.card-details a,
-.card-details label,
-.card-details input,
-.card-details textarea,
-.card-details select,
-.card-details button,
-.card-details .card-details-item-title,
-.card-details .card-label,
-.card-details .viewer {
-  font-size: inherit;
-  line-height: 1.5;
-}
 .card-details .card-details-header .card-details-watch {
-  font-size: 17px;
-  padding-left: 7px;
+  font-size: calc(17px * var(--wekan-ui-font-scale, 1));
+  padding-inline-start: 7px;
   color: #a6a6a6;
 }
 .card-details .card-details-header .card-details-title {
@@ -333,6 +398,46 @@ body.desktop-mode .card-details.card-details-collapsed {
   vertical-align: middle;
   line-height: 1.3;
   letter-spacing: 0.01em;
+  position: relative;
+}
+
+/* #6839: the whole title edits - every word of it and the space beside a
+   short last line, which is what anybody clicks to change the title. The window
+   is moved from the empty space ABOVE the title, in the row of the collapse
+   caret and the menu (cardDetails.js), or by the drag handle when drag handles
+   are on. It was split like a minicard's - the trailing half dragged - and a
+   click on the right of the title did nothing anybody expected.
+
+   An overlay rather than a link around the text, because the text is a
+   `.viewer` with its own links. */
+.card-details .card-details-header .card-details-title .card-details-title-edit-zone {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  inset-inline-start: 0;
+  width: 100%;
+  cursor: text;
+  z-index: 1;
+}
+
+/* The heading fills the row rather than shrinking to its text, so the edit
+   zone covers the space beside a short title too. It stays inline-block so
+   the complete-toggle beside it keeps its place. */
+.card-details .card-details-header .card-details-title {
+  min-width: 60%;
+}
+
+/* The empty part of the header row is what moves the window when there is no
+   drag handle; with one, the handle alone does. */
+.card-details:not(.card-details-with-handle) .card-details-header {
+  cursor: move;
+}
+.card-details .card-details-header .card-details-title,
+.card-details .card-details-header a {
+  cursor: auto;
+}
+.card-details .card-details-header a {
+  cursor: pointer;
 }
 .card-details .card-details-header .linked-card-location {
   font-style: italic;
@@ -363,11 +468,11 @@ body.desktop-mode .card-details.card-details-collapsed {
   padding: 0 5px;
 }
 .card-details .card-details-header .copied-tooltip {
-  margin-right: 10px;
+  margin-inline-end: 10px;
   padding: 10px;
 }
 .card-details .card-description i.fa.fa-pencil-square-o {
-  float: right;
+  float: inline-end;
 }
 .card-details .card-description textarea {
   min-height: 100px;
@@ -380,11 +485,11 @@ body.desktop-mode .card-details.card-details-collapsed {
   gap: 0.5em;
 }
 .card-details .card-details-items .card-details-item {
-  margin-right: 0.5em;
+  margin-inline-end: 0.5em;
   flex-grow: 1;
 }
 .card-details .card-details-items .card-details-item:last-child {
-  margin-right: 0;
+  margin-inline-end: 0;
 }
 .card-details .card-details-items .card-details-item.card-details-item-labels {
   display: block;
@@ -409,12 +514,49 @@ body.desktop-mode .card-details.card-details-collapsed {
   max-width: 28%;
 }
 .card-details .card-details-items .card-details-item.custom-fields {
-  padding-left: 10px;
+  padding-inline-start: 10px;
 }
 .card-details .card-details-item-title {
-  font-size: 16px;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: bold;
   color: #4d4d4d;
+}
+.card-details .card-details-item-customfield .js-edit-card-custom-field-value {
+  cursor: pointer;
+}
+.card-details .card-details-person-controls {
+  align-items: center;
+  display: flex;
+  flex-direction: row;
+  gap: 0.4em;
+}
+/* #6796: a field's add button sits on the line of its title, not on a line of
+   its own under it - which was most of the height of an opened card with
+   nothing filled in yet. What a field holds (labels, avatars, dates) follows
+   on the same line and wraps onto the next when there is more of it. */
+.card-details .card-details-group-body > .card-details-item:is(
+  .card-details-item-labels, .card-details-item-stickers, .card-details-item-location,
+  .card-details-item-received, .card-details-item-start, .card-details-item-due,
+  .card-details-item-end, .card-details-item-members, .card-details-item-assignees,
+  .card-details-item-creator, .card-details-item-name, .card-details-item-dependencies) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 0.4em;
+  row-gap: 0.25em;
+}
+/* The title as wide as its words, not the whole item (checklists.css and the
+   section header rule give every .card-details-item-title width: 100%), so
+   the add button has room beside it. */
+.card-details .card-details-group-body > .card-details-item:is(
+  .card-details-item-labels, .card-details-item-stickers, .card-details-item-location,
+  .card-details-item-received, .card-details-item-start, .card-details-item-due,
+  .card-details-item-end, .card-details-item-members, .card-details-item-assignees,
+  .card-details-item-creator, .card-details-item-name, .card-details-item-dependencies)
+  > .card-details-item-title {
+  width: auto;
+  flex: 0 1 auto;
+  margin-block: 0;
 }
 .card-details .activities {
   padding-top: 10px;
@@ -422,19 +564,32 @@ body.desktop-mode .card-details.card-details-collapsed {
 @media screen and (min-width: 801px) {
   .card-details {
     top: 97px;
-    left: calc(50% - (600px / 2));
-    width: 600px;
+    inset-inline-start: calc(50% - (520px / 2)); /* #6465: narrower card (was 600px) */
+    width: 520px;
     bottom: 0;
     position: fixed;
     resize: both;
+  }
+
+  /* A card opened as a POPUP (Session popupCardId: from a search result, a table
+     or a Roadmap/Gantt bar) docks at the very top of the window like every other
+     opened card, and covers the header bars, as the .pop-over[data-popup=
+     "cardDetailsPopup"] rule near the end of this file says it must. The 97px
+     above is the room the header takes for a card that is NOT docked by the
+     desktop-mode rules (those skip popups), and it opened the popup BELOW the
+     header: collapsed, it was a bar floating over the swimlane. Mobile mode keeps
+     its own full-window rule (top: 0 !important). */
+  .card-details.card-details-popup {
+    top: 8px;
+    z-index: 2001;
   }
 
   /* Override for mobile mode even on larger screens */
   body.mobile-mode .card-details {
     width: 100vw !important;
     top: 0 !important;
-    left: 0 !important;
-    right: 0 !important;
+    inset-inline-start: 0 !important;
+    inset-inline-end: 0 !important;
     bottom: 0 !important;
     height: 100vh !important;
     max-height: 100vh !important;
@@ -446,6 +601,12 @@ body.desktop-mode .card-details.card-details-collapsed {
     flex-shrink: 0;
     flex-basis: calc(100% - 20px);
     will-change: flex-basis;
+    /* #4822: declare the position strategy explicitly. The maximized pane must
+       be fixed to the viewport in its own right — never an in-flow flex/float
+       item of the scrolled swimlane container, and never dependent on the
+       sibling .card-details rule (or the body.desktop-mode rules) happening to
+       supply position: fixed. */
+    position: fixed;
     overflow-y: auto;
     overflow-x: auto;
     background: #f7f7f7;
@@ -456,36 +617,39 @@ body.desktop-mode .card-details.card-details-collapsed {
     transition: flex-basis 0.1s;
     box-sizing: border-box;
     top: 97px;
-    left: 0px;
+    inset-inline-start: 0px;
     height: calc(100% - 100px);
     width: calc(100% - 20px);
-    float: left;
+    float: inline-start;
   }
   .card-details-maximized .card-details-left {
-    float: left;
+    float: inline-start;
     top: 60px;
-    left: 20px;
+    inset-inline-start: 20px;
     width: 47%;
-    border-right: solid 2px #dbdbdb;
-    padding-right: 10px;
+    border-inline-end: solid 2px #dbdbdb;
+    padding-inline-end: 10px;
   }
   .card-details-maximized .card-details-right {
     position: absolute;
-    float: right;
-    left: 50%;
+    float: inline-end;
+    inset-inline-start: 50%;
     margin: 15px 0;
+    /* The comments are here when maximized (cardCommentsSection): the column
+       is as wide as the left one, beside it. */
+    width: calc(50% - 40px);
   }
   .card-details-maximized .card-details-header {
     width: 100%;
   }
 }
 input[type="text"].attachment-add-link-input {
-  float: left;
+  float: inline-start;
   margin: 0 0 8px;
   width: 80%;
 }
 input[type="submit"].attachment-add-link-submit {
-  float: left;
+  float: inline-start;
   margin: 0 0 8px 4px;
   padding: 6px 12px;
   width: 18%;
@@ -501,52 +665,57 @@ input[type="submit"].attachment-add-link-submit {
     -webkit-overflow-scrolling: touch;
     position: fixed !important;
     top: 0 !important;
-    left: 0 !important;
-    right: 0 !important;
+    inset-inline-start: 0 !important;
+    inset-inline-end: 0 !important;
     bottom: 0 !important;
-    z-index: 100 !important;
+    /* #6419: the open card is a full-screen takeover on mobile, so it must sit
+       ABOVE the app header bar (#header-main-bar is z-index 1000) — otherwise the
+       header overlaps the top of the card and hides the close (X) button, making
+       it impossible to close the card. Kept below popups (z-index 2000+) so card
+       menus / date pickers still open over the card. */
+    z-index: 1100 !important;
     height: 100vh !important;
     max-height: 100vh !important;
     border-radius: 0 !important;
     box-shadow: none !important;
   }
 
-  /* Ensure card details are above everything on mobile */
+  /* Ensure card details are above the app header on mobile (#6419) */
   body.mobile-mode .card-details {
-    z-index: 100 !important;
+    z-index: 1100 !important;
     width: 100vw !important;
-    left: 0 !important;
-    right: 0 !important;
+    inset-inline-start: 0 !important;
+    inset-inline-end: 0 !important;
   }
   .card-details .card-details-canvas {
     width: 100%;
-    padding-left: 0px;
+    padding-inline-start: 0px;
     padding: 0 15px;
   }
   .card-details .card-details-header .close-card-details {
-    margin-right: 0px;
+    margin-inline-end: 0px;
     display: block !important;
   }
   .card-details .card-details-header .close-card-details-mobile-web {
     display: block !important;
-    margin-right: 5px !important;
+    margin-inline-end: 5px !important;
   }
   .card-details .card-details-header .card-mobile-desktop-toggle {
     display: block !important;
-    margin-right: 5px !important;
+    margin-inline-end: 5px !important;
   }
   .card-details .card-details-header .card-mobile-desktop-toggle {
     display: block !important;
-    margin-right: 5px !important;
+    margin-inline-end: 5px !important;
   }
   .card-details .card-details-header .card-details-menu {
-    margin-right: 40px;
+    margin-inline-end: 40px;
   }
   .card-details .card-details-header .maximize-card-details {
-    margin-right: 40px;
+    margin-inline-end: 40px;
   }
   .card-details .card-details-header .minimize-card-details {
-    margin-right: 40px;
+    margin-inline-end: 40px;
   }
   .card-details-popup {
     padding: 0px 10px;
@@ -565,7 +734,7 @@ input[type="submit"].attachment-add-link-submit {
   }
   /* iPhone mobile: enlarge header buttons and increase spacing */
   body.mobile-mode.iphone-device .card-details .card-details-header {
-    padding-right: 16px;
+    padding-inline-end: 16px;
   }
   body.mobile-mode.iphone-device .card-details .card-details-header .close-card-details,
   body.mobile-mode.iphone-device .card-details .card-details-header .maximize-card-details,
@@ -577,12 +746,12 @@ input[type="submit"].attachment-add-link-submit {
   body.mobile-mode.iphone-device .card-details .card-details-header .card-zoom-out {
     font-size: 2em !important; /* 2x bigger */
     padding: 0.3em !important;
-    margin-right: 0.75em !important; /* 2x space compared to default */
-    margin-left: 0 !important;
+    margin-inline-end: 0.75em !important; /* 2x space compared to default */
+    margin-inline-start: 0 !important;
   }
   /* Avoid clipping of the close button on the right edge */
   body.mobile-mode.iphone-device .card-details .card-details-header .close-card-details {
-    margin-right: 0.75em !important;
+    margin-inline-end: 0.75em !important;
   }
   /* Enlarge the header title too */
   body.mobile-mode.iphone-device .card-details .card-details-header .card-details-title {
@@ -598,10 +767,11 @@ body.mobile-mode .card-details {
   margin: 0px !important;
   position: fixed !important;
   top: 0 !important;
-  left: 0 !important;
-  right: 0 !important;
+  inset-inline-start: 0 !important;
+  inset-inline-end: 0 !important;
   bottom: 0 !important;
-  z-index: 100 !important;
+  /* #6419: above the app header (#header-main-bar z-index 1000), below popups. */
+  z-index: 1100 !important;
   height: 100vh !important;
   max-height: 100vh !important;
   border-radius: 0 !important;
@@ -724,15 +894,6 @@ body.mobile-mode .card-details .card-details-header .close-card-details-mobile-w
 .voted {
   opacity: 0.7;
 }
-.vote-title {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-.vote-title .js-edit-date {
-  align-self: flex-start;
-  margin-left: 6px;
-}
 .vote-result {
   display: flex;
   gap: 6px;
@@ -742,15 +903,6 @@ body.mobile-mode .card-details .card-details-header .close-card-details-mobile-w
 }
 .poker-voted {
   opacity: 0.7;
-}
-.poker-title {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-.poker-title .js-edit-date {
-  align-self: flex-start;
-  margin-left: 6px;
 }
 .poker-result {
   display: flex;
@@ -827,11 +979,11 @@ body.mobile-mode .card-details .card-details-header .close-card-details-mobile-w
   display: inline-block;
 }
 .poker-table-side-right {
-  padding-left: 10px;
+  padding-inline-start: 10px;
 }
 @media (max-width: 400px) {
   .poker-table-side-right {
-    padding-left: 0px;
+    padding-inline-start: 0px;
   }
 }
 .estimation-add {
@@ -842,16 +994,16 @@ body.mobile-mode .card-details .card-details-header .close-card-details-mobile-w
 }
 .estimation-add input {
   display: inline-block;
-  float: right;
+  float: inline-end;
   margin: auto;
-  margin-right: 10px;
+  margin-inline-end: 10px;
   width: 100px;
   border-radius: 2px;
   padding: 3px 6px;
 }
 .estimation-add button {
   display: inline-block;
-  float: right;
+  float: inline-end;
   margin: auto;
   border-radius: 2px;
   padding: 3px 10px;
@@ -859,14 +1011,14 @@ body.mobile-mode .card-details .card-details-header .close-card-details-mobile-w
 .poker-card {
   width: 48px;
   height: 72px;
-  float: left;
+  float: inline-start;
   background: #fff;
   border-radius: 5px;
   display: table;
   box-sizing: border-box;
   padding: 5px;
   margin: 3px;
-  font-size: 20px;
+  font-size: calc(20px * var(--wekan-ui-font-scale, 1));
   font-weight: bold;
   text-shadow: #2d2d2d 1px 1px 0;
   box-shadow: 0 0 5px #aaa;
@@ -892,8 +1044,15 @@ body.mobile-mode .card-details .card-details-header .close-card-details-mobile-w
 }
 
 /* Sticker picker + card-detail stickers + due-complete toggle */
+/* The picker fills the popup it is in rather than stopping at eight columns:
+   the popup is wide now (popup.css), and a fixed 320px there would have left
+   the extra width empty while the icons still ran off the bottom. A grid that
+   fits as many 40px cells as there is room for turns that width into rows the
+   reader does not have to scroll past. */
 .card-stickers-picker {
-  max-width: 320px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(40px, 1fr));
+  justify-items: center;
 }
 .card-sticker-select {
   display: inline-flex;
@@ -903,7 +1062,7 @@ body.mobile-mode .card-details .card-details-header .close-card-details-mobile-w
   height: 36px;
   margin: 2px;
   border-radius: 3px;
-  font-size: 18px;
+  font-size: calc(18px * var(--wekan-ui-font-scale, 1));
   color: #4d4d4d;
   cursor: pointer;
   position: relative;
@@ -918,19 +1077,19 @@ body.mobile-mode .card-details .card-details-header .close-card-details-mobile-w
 .card-sticker-select .card-sticker-check {
   position: absolute;
   bottom: 1px;
-  right: 2px;
-  font-size: 10px;
+  inset-inline-end: 2px;
+  font-size: calc(10px * var(--wekan-ui-font-scale, 1));
   color: #3cb500;
 }
 .card-stickers .card-sticker {
   display: inline-flex;
   align-items: center;
   margin: 0 8px 4px 0;
-  font-size: 18px;
+  font-size: calc(18px * var(--wekan-ui-font-scale, 1));
 }
 .card-sticker .card-sticker-remove {
-  margin-left: 3px;
-  font-size: 11px;
+  margin-inline-start: 3px;
+  font-size: calc(11px * var(--wekan-ui-font-scale, 1));
   color: #999;
   cursor: pointer;
 }
@@ -940,13 +1099,13 @@ body.mobile-mode .card-details .card-details-header .close-card-details-mobile-w
 .card-due-complete-toggle {
   display: inline-flex;
   align-items: center;
-  margin-left: 8px;
+  margin-inline-start: 8px;
   vertical-align: middle;
 }
 
 /* Trello-style "mark complete" toggle, left of the card title */
 .card-details-complete-toggle {
-  float: left;
+  float: inline-start;
   display: flex;
   align-items: center;
   /* Title is 1.35em with 1.3 line-height (~28px box) and margin-top 7px; push
@@ -984,8 +1143,8 @@ body.mobile-mode .card-details .card-details-header .close-card-details-mobile-w
   color: #4d4d4d;
 }
 .card-details-item-location .card-location-remove {
-  margin-left: 8px;
-  color: #8c8c8c;
+  margin-inline-start: 8px;
+  color: var(--wekan-quiet-text, #595959);
   cursor: pointer;
 }
 .card-details-item-location .card-location-remove:hover {
@@ -1011,29 +1170,43 @@ body.mobile-mode .card-details .card-details-header .close-card-details-mobile-w
   box-sizing: border-box;
 }
 
-/* "Open map links at" provider selector in the location popup */
-.js-card-location-form .map-provider-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 6px;
-}
-.js-card-location-form .map-provider-row .js-map-provider {
-  flex: 0 0 auto;
-  width: auto;
-}
-
 /* Opened card (card details popup) docks to the very top of the window and
    overlays the global + board header bars instead of opening below them. The
    base .pop-over is position:absolute with a small margin/top offset, which left
    the card's top behind the fixed header bars; fix it to the viewport top with a
    z-index above every header (headers top out around z-index 1000-2000). */
+/* The card details content (.card-details) is always position:fixed (see the
+   min-width:801px and max-width:800px media queries above), so it renders as its
+   own framed, viewport-positioned box and escapes this .pop-over wrapper. That
+   leaves the generic .pop-over chrome (white background, border, shadow, header
+   and ~380px width) visible as a redundant empty second popup at the top of the
+   page. Collapse the wrapper to nothing and make it invisible; the fixed card
+   descendant still renders normally on top of the page. Closing is handled by
+   the card's own close button (.js-close-card-details), clicking outside, or
+   pressing Escape. */
 .pop-over[data-popup="cardDetailsPopup"] {
   position: fixed !important;
   top: 0 !important;
-  margin-top: 0 !important;
+  inset-inline-start: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  width: 0 !important;
+  height: 0 !important;
+  min-height: 0 !important;
+  background: none !important;
+  border: none !important;
+  box-shadow: none !important;
+  overflow: visible !important;
   z-index: 100000 !important;
+}
+
+.pop-over[data-popup="cardDetailsPopup"] > .header {
+  display: none !important;
+}
+
+.pop-over[data-popup="cardDetailsPopup"] > .content-wrapper {
+  max-height: none !important;
+  overflow: visible !important;
 }
 
 /* Sticker highlight styles inside the sticker picker (mascot = underline,
@@ -1053,4 +1226,301 @@ body.mobile-mode .card-details .card-details-header .close-card-details-mobile-w
   height: 1.6em;
   line-height: 1;
   box-sizing: border-box;
+}
+
+/* #6431 follow-up: cover image on the opened card (Card Settings > Cover image
+   on card, opt-in). Mirrors the minicard cover but taller. */
+.card-details-cover {
+  height: 180px;
+  margin: 8px 0;
+  overflow: hidden;
+  background: #f4f5f7;
+  border-radius: 6px;
+  user-select: none;
+}
+.card-details-cover-image {
+  width: 100%;
+  height: 180px;
+  display: block;
+  object-fit: cover;
+  object-position: center;
+}
+
+/* #1591 gave every FIELD of the opened card a caret of its own on its title,
+   and hid everything after that title when it was folded. The section carets
+   replaced it - one handle per section, on the heading - and the two ran at the
+   same time: clicking a section's caret also folded the field the heading was
+   drawn on, and with the field's own caret gone there was nothing left to open
+   it. That is where the Date Format select went. Both halves are gone from
+   here; client/components/cards/cardDetails.js says the same at the handler. */
+
+/* Collapsible card sections.
+   Every section of an opened card - Labels, Date Format, Members, Dependencies,
+   Sort, Custom Fields, Description, Checklists, Subtasks, Attachments, Comments
+   and Activities - has one rule above it and a caret in its heading that
+   collapses it. The rule comes from the same template as the caret, so eleven
+   sections cannot end up with ten separators.
+   The heading holds a real button (cardSectionHeader in the template) that a
+   screen reader and the keyboard reach, and it looks like one to a mouse. */
+/* The GROUP is the full-width row of the card, and the fields inside it share
+   rows within it - which is what puts Assignee and Creator beside Members
+   rather than under it. The class that made an individual field full width is
+   gone with the grouping; a field that is its own section is a group of one. */
+.card-details .card-details-section-rule {
+  width: 100%;
+  margin: calc(14px * min(1, var(--wekan-ui-font-scale, 1))) 0 calc(6px * min(1, var(--wekan-ui-font-scale, 1))) 0;
+}
+.card-details h3.card-details-item-title.js-toggle-card-section {
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+/* The hamburger that opens a section's settings, at the FAR end of its heading
+   - `margin-inline-start: auto` in a flex row, so it mirrors itself in a
+   right-to-left page. It is inside a heading that folds the section when
+   clicked, so its own handler stops the click there. */
+.card-details h3.card-details-item-title .card-details-section-menu {
+  margin-inline-start: auto;
+  padding: 0 4px;
+  color: #808080;
+  cursor: pointer;
+}
+
+.card-details h3.card-details-item-title .card-details-section-menu:hover {
+  color: #000;
+}
+
+/* The caret is the widest part of the heading that must not move as the label
+   changes length, so it gets a fixed box. `text-align: center` rather than a
+   side, because the glyph itself differs between the open and closed states
+   (down, and right or left) and a fixed side would make it jump. */
+.card-details h3.card-details-item-title.js-toggle-card-section .card-details-section-toggle > .fa:first-child {
+  width: 12px;
+  text-align: center;
+  flex: 0 0 auto;
+}
+/* The button inside the heading looks like the heading: no button chrome, the
+   heading's own size, weight and colour, the caret, icon and label in a row. */
+.card-details h3.card-details-item-title .card-details-section-toggle {
+  align-items: center;
+  background: none;
+  border: 0;
+  border-radius: 3px;
+  color: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  font: inherit;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  text-align: start;
+  width: auto;
+}
+.card-details h3.card-details-item-title .card-details-section-toggle:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+.card-details h3.card-details-item-title.js-toggle-card-section:hover {
+  opacity: 0.85;
+}
+/* The checklist "3/7" line that used to be a second h3 under the Checklists
+   heading: a subtitle, so it is not read as another section. */
+.card-details .card-details-item-subtitle {
+  margin: 0 0 4px 0;
+  font-size: calc(13px * var(--wekan-ui-font-scale, 1));
+  font-weight: 400;
+  opacity: 0.8;
+}
+
+/* A GROUP of card fields - Labels with Stickers and Location, Date Format with
+   the four dates, Members with Assignee and Creator, and so on.
+   The group's own title carries the caret that folds it, and the fields inside
+   it do NOT: #1591 gives every .card-details-item a caret of its own, drawn on
+   the title by the rule further up this file, and inside a group that is a
+   second caret on every row saying the same thing in a smaller way. One handle
+   per group is what was asked for, and it is the group's.
+   The fields keep sharing rows inside the group, which is how they were laid
+   out - the group is a full-width row, the fields inside it wrap within it. */
+.card-details .card-details-items .card-details-group {
+  flex: 0 0 100%;
+  width: 100%;
+}
+.card-details .card-details-group-body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5em;
+}
+.card-details .card-details-group-body .card-details-item {
+  flex-grow: 1;
+}
+/* The user's Custom Fields layout toggle has two deliberately distinct modes.
+   Off keeps the compact wrapping grid; on gives every field its own row. */
+.card-details .card-details-group-custom-fields .custom-fields-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
+}
+.card-details .card-details-group-custom-fields .custom-fields-grid > .card-details-item-customfield {
+  margin-inline-end: 0;
+  max-width: none;
+  min-width: 0;
+}
+.card-details .card-details-group-custom-fields .custom-fields-one-per-row > .card-details-item-customfield {
+  flex: 0 0 100%;
+  margin-inline-end: 0;
+  max-width: 100%;
+}
+/* Show only the icon for the current Custom Fields layout: table or list. */
+.card-details .custom-fields-layout-toggle {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  color: #808080;
+  cursor: pointer;
+  display: inline-flex;
+  gap: 2px;
+  margin: 0;
+  margin-inline-start: auto;
+  padding: 2px;
+  width: auto;
+}
+.card-details h3.card-details-item-title .custom-fields-layout-toggle + .card-details-section-menu {
+  margin-inline-start: 0;
+}
+.card-details .custom-fields-layout-toggle .grid-icon,
+.card-details .custom-fields-layout-toggle .list-icon {
+  align-items: center;
+  border-radius: 3px;
+  display: inline-flex;
+  justify-content: center;
+  min-width: 28px;
+  padding: 4px 7px;
+}
+.card-details .custom-fields-layout-toggle .grid-icon .fa,
+.card-details .custom-fields-layout-toggle .list-icon .fa {
+  color: inherit;
+}
+.card-details .custom-fields-layout-toggle:hover {
+  color: #000;
+}
+
+/* The global reset and mobile text normalization must not flatten Markdown
+   headings in the opened-card title. Keep theme colors and scaled base size. */
+#content .card-details-title .viewer h1 { font-size: 2em !important; }
+#content .card-details-title .viewer h2 { font-size: 1.5em !important; }
+#content .card-details-title .viewer h3 { font-size: 1.25em !important; }
+#content .card-details-title .viewer h4 { font-size: 1.125em !important; }
+#content .card-details-title .viewer h5 { font-size: 1em !important; }
+#content .card-details-title .viewer h6 { font-size: 0.875em !important; }
+
+.card-details-list-picker { width: 100%; position: relative; }
+.card-details-list-picker > summary {
+  cursor: pointer; padding: 0.5em; border: 1px solid currentColor;
+  border-radius: 4px;
+}
+.card-details-list-picker > summary .viewer { display: inline-block; min-height: 0; }
+.card-details-list-options { max-height: 18em; overflow-y: auto; }
+.card-details-list-options [role="option"] { padding: 0.5em; cursor: pointer; }
+.card-details-list-options [aria-selected="true"] { font-weight: bold; }
+.card-details-list-options [role="option"]:focus { outline: 2px solid currentColor; outline-offset: -2px; }
+
+/* Measure at the normal size, but paint only once beside the source minicard.
+   Popup, mobile and maximized cards retain their own initial geometry. */
+body.desktop-mode .card-details.card-details-position-pending:not(.card-details-popup):not(.card-details-maximized) {
+  visibility: hidden;
+}
+
+/* Board Settings / Card, Show on Card (2026-10-02): label chips without their
+   words, the labels above the title, and the list title under it. */
+.card-details .card-label.card-label-no-text {
+  min-width: 2.5em;
+  min-height: 1em;
+}
+.card-details-labels-above-title {
+  margin: 0 0 4px;
+}
+.card-details-list-title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  opacity: 0.8;
+}
+
+/* At risk, Show on Card (docs/Features/Cards/At-Risk.md). */
+.card-details-at-risk {
+  margin: 4px 0 8px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: #fdecea;
+  color: #8a1c12;
+  overflow-wrap: anywhere;
+}
+
+/* Suggested members, above the full list (docs/Features/Cards/Suggested-Members.md). */
+.card-members-suggested {
+  margin: 6px 0 4px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+}
+.card-members-suggested-title {
+  margin: 0 0 2px;
+  font-size: 0.85em;
+  color: #666;
+}
+
+/* #2015: the card's link as a QR code - always black on white with its quiet
+   zone, whatever the theme, so a phone camera can read it. */
+.card-qr-code {
+  text-align: center;
+}
+
+.card-qr-code-image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto 8px;
+  background: #fff;
+  image-rendering: pixelated;
+}
+
+.card-qr-code-url {
+  font-size: 0.8em;
+  word-break: break-all;
+}
+
+/* A maximized card has its comments at the top of the right column
+   (cardCommentsSection): nothing is above them there to be separated from, so
+   their heading has no rule. */
+.card-details-right .card-details-comments .card-details-section-rule {
+  display: none;
+}
+
+/* Card kind: the selected one is marked, at the end of its line, and bold. */
+.card-kind-list .js-select-card-kind.is-active { font-weight: bold; }
+.card-kind-list .card-kind-selected { margin-inline-start: 0.5em; color: #3cb500; }
+
+/* ONE SECTION MODEL (2026-10-28): the opened card draws Card Settings'
+   sections (cardDetails.jade `.card-details-section`), each a full-width row
+   of the items, headed by cardSectionHeader with the rule above it. The FIRST
+   section has nothing above it to be separated from, so its rule is not drawn
+   - whichever section the board put first (the template cannot know). */
+.card-details .card-details-items > .card-details-section {
+  flex: 0 0 100%;
+  width: 100%;
+  min-width: 0;
+}
+.card-details .card-details-items > .card-details-section:first-child > hr.card-details-section-rule:first-child,
+.card-details .card-details-items > .card-details-section:first-child > * > hr.card-details-section-rule:first-child,
+.card-details .card-details-items > .card-details-section:first-child > * > .comment-title > hr.card-details-section-rule:first-child,
+.card-details .card-details-items > .card-details-section:first-child > .card-details-group-vote-poker > hr:first-child {
+  display: none;
+}
+/* Lists that were sections of their own and are a field of one now: a row of
+   their own inside the section. */
+.card-details .card-details-group-body > .card-details-item-similar-cards,
+.card-details .card-details-group-body > .card-details-item-buttons,
+.card-details .card-details-section .card-details-item-text-notes {
+  flex: 0 0 100%;
 }

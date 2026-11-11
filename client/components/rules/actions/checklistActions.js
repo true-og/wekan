@@ -1,7 +1,5 @@
-import Actions from '/models/actions';
-import Rules from '/models/rules';
-import Triggers from '/models/triggers';
 import { Utils } from '/client/lib/utils';
+import { saveRuleTriggerAction } from '/client/components/rules/rulesSaveHelper';
 
 Template.checklistActions.onCreated(function () {
   this.subscribe('allRules');
@@ -16,19 +14,12 @@ Template.checklistActions.events({
     const checklistItems = tpl.find('#checklist-items').value;
     const boardId = Session.get('currentBoard');
     const desc = Utils.getTriggerActionDesc(event, tpl);
-    const triggerId = Triggers.insert(trigger);
-    const actionId = Actions.insert({
+    saveRuleTriggerAction(boardId, data.ruleId, ruleName, trigger, {
       actionType: 'addChecklistWithItems',
       checklistName,
       checklistItems,
       boardId,
       desc,
-    });
-    Rules.insert({
-      title: ruleName,
-      triggerId,
-      actionId,
-      boardId,
     });
   },
   'click .js-add-checklist-action'(event, tpl) {
@@ -40,33 +31,19 @@ Template.checklistActions.events({
     const boardId = Session.get('currentBoard');
     const desc = Utils.getTriggerActionDesc(event, tpl);
     if (actionSelected === 'add') {
-      const triggerId = Triggers.insert(trigger);
-      const actionId = Actions.insert({
+      saveRuleTriggerAction(boardId, data.ruleId, ruleName, trigger, {
         actionType: 'addChecklist',
         checklistName,
         boardId,
         desc,
       });
-      Rules.insert({
-        title: ruleName,
-        triggerId,
-        actionId,
-        boardId,
-      });
     }
     if (actionSelected === 'remove') {
-      const triggerId = Triggers.insert(trigger);
-      const actionId = Actions.insert({
+      saveRuleTriggerAction(boardId, data.ruleId, ruleName, trigger, {
         actionType: 'removeChecklist',
         checklistName,
         boardId,
         desc,
-      });
-      Rules.insert({
-        title: ruleName,
-        triggerId,
-        actionId,
-        boardId,
       });
     }
   },
@@ -79,33 +56,19 @@ Template.checklistActions.events({
     const boardId = Session.get('currentBoard');
     const desc = Utils.getTriggerActionDesc(event, tpl);
     if (actionSelected === 'check') {
-      const triggerId = Triggers.insert(trigger);
-      const actionId = Actions.insert({
+      saveRuleTriggerAction(boardId, data.ruleId, ruleName, trigger, {
         actionType: 'checkAll',
         checklistName,
         boardId,
         desc,
       });
-      Rules.insert({
-        title: ruleName,
-        triggerId,
-        actionId,
-        boardId,
-      });
     }
     if (actionSelected === 'uncheck') {
-      const triggerId = Triggers.insert(trigger);
-      const actionId = Actions.insert({
+      saveRuleTriggerAction(boardId, data.ruleId, ruleName, trigger, {
         actionType: 'uncheckAll',
         checklistName,
         boardId,
         desc,
-      });
-      Rules.insert({
-        title: ruleName,
-        triggerId,
-        actionId,
-        boardId,
       });
     }
   },
@@ -113,41 +76,27 @@ Template.checklistActions.events({
     const data = Template.currentData();
     const ruleName = data.ruleName.get();
     const trigger = data.triggerVar.get();
-    const checkItemName = tpl.find('#checkitem-name');
-    const checklistName = tpl.find('#checklist-name3');
+    const checkItemName = tpl.find('#checkitem-name').value;
+    const checklistName = tpl.find('#checklist-name3').value;
     const actionSelected = tpl.find('#check-item-action').value;
     const boardId = Session.get('currentBoard');
     const desc = Utils.getTriggerActionDesc(event, tpl);
     if (actionSelected === 'check') {
-      const triggerId = Triggers.insert(trigger);
-      const actionId = Actions.insert({
+      saveRuleTriggerAction(boardId, data.ruleId, ruleName, trigger, {
         actionType: 'checkItem',
         checklistName,
         checkItemName,
         boardId,
         desc,
       });
-      Rules.insert({
-        title: ruleName,
-        triggerId,
-        actionId,
-        boardId,
-      });
     }
     if (actionSelected === 'uncheck') {
-      const triggerId = Triggers.insert(trigger);
-      const actionId = Actions.insert({
+      saveRuleTriggerAction(boardId, data.ruleId, ruleName, trigger, {
         actionType: 'uncheckItem',
         checklistName,
         checkItemName,
         boardId,
         desc,
-      });
-      Rules.insert({
-        title: ruleName,
-        triggerId,
-        actionId,
-        boardId,
       });
     }
   },

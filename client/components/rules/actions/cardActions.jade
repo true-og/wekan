@@ -15,8 +15,8 @@ template(name="cardActions")
           option(value="receivedAt") {{_'r-df-received-at'}}
       div.trigger-text
         | {{_'r-to-current-datetime'}}
-    div.trigger-button.js-set-date-action.js-goto-rules
-      i.fa.fa-plus
+    button.trigger-button.js-set-date-action.js-goto-rules(type="button" aria-label="{{_ 'r-add-action'}}")
+      i.fa.fa-plus(aria-hidden="true")
 
   div.trigger-item
     div.trigger-content
@@ -29,8 +29,8 @@ template(name="cardActions")
           option(value="dueAt") {{_'r-df-due-at'}}
           option(value="endAt") {{_'r-df-end-at'}}
           option(value="receivedAt") {{_'r-df-received-at'}}
-    div.trigger-button.js-remove-datevalue-action.js-goto-rules
-      i.fa.fa-plus
+    button.trigger-button.js-remove-datevalue-action.js-goto-rules(type="button" aria-label="{{_ 'r-add-action'}}")
+      i.fa.fa-plus(aria-hidden="true")
 
   div.trigger-item
     div.trigger-content
@@ -45,8 +45,8 @@ template(name="cardActions")
           each labels
             option(value="#{_id}")
               = name
-    div.trigger-button.js-add-label-action.js-goto-rules
-      i.fa.fa-plus
+    button.trigger-button.js-add-label-action.js-goto-rules(type="button" aria-label="{{_ 'r-add-action'}}")
+      i.fa.fa-plus(aria-hidden="true")
 
   div.trigger-item
     div.trigger-content
@@ -58,26 +58,127 @@ template(name="cardActions")
         | {{_'r-member'}}
       div.trigger-dropdown
         input(id="member-name",type=text,placeholder="{{_'r-name'}}")
-    div.trigger-button.js-add-member-action.js-goto-rules
-      i.fa.fa-plus
+    button.trigger-button.js-add-member-action.js-goto-rules(type="button" aria-label="{{_ 'r-add-action'}}")
+      i.fa.fa-plus(aria-hidden="true")
+
+  div.trigger-item
+    div.trigger-content
+      div.trigger-text
+        | {{_'r-add-actinguser-member'}}
+    button.trigger-button.js-add-actinguser-member-action.js-goto-rules(type="button" aria-label="{{_ 'r-add-action'}}")
+      i.fa.fa-plus(aria-hidden="true")
 
   div.trigger-item
     div.trigger-content
       div.trigger-text
         | {{_'r-remove-all'}}
-    div.trigger-button.js-add-removeall-action.js-goto-rules
-      i.fa.fa-plus
+    button.trigger-button.js-add-removeall-action.js-goto-rules(type="button" aria-label="{{_ 'r-add-action'}}")
+      i.fa.fa-plus(aria-hidden="true")
+
+  //- #4294: the same for assignees - a name, a {creator} style token, the
+  //- user who triggered the rule, or every assignee.
+  div.trigger-item
+    div.trigger-content
+      div.trigger-dropdown
+        select(id="assignee-action")
+          option(value="add") {{_'r-add'}}
+          option(value="remove") {{_'r-remove'}}
+      div.trigger-text
+        | {{_'r-assignee'}}
+      div.trigger-dropdown
+        input(id="assignee-name",type=text,placeholder="{{_'r-name'}}")
+    button.trigger-button.js-add-assignee-action.js-goto-rules(type="button" aria-label="{{_ 'r-add-action'}}")
+      i.fa.fa-plus(aria-hidden="true")
+
+  div.trigger-item
+    div.trigger-content
+      div.trigger-text
+        | {{_'r-add-actinguser-assignee'}}
+    button.trigger-button.js-add-actinguser-assignee-action.js-goto-rules(type="button" aria-label="{{_ 'r-add-action'}}")
+      i.fa.fa-plus(aria-hidden="true")
+
+  div.trigger-item
+    div.trigger-content
+      div.trigger-text
+        | {{_'r-remove-all-assignees'}}
+    button.trigger-button.js-add-removeall-assignees-action.js-goto-rules(type="button" aria-label="{{_ 'r-add-action'}}")
+      i.fa.fa-plus(aria-hidden="true")
+
+  div.trigger-item
+    div.trigger-content
+      div.trigger-text
+        | {{_'r-remove-all-labels'}}
+    button.trigger-button.js-add-removealllabels-action.js-goto-rules(type="button" aria-label="{{_ 'r-add-action'}}")
+      i.fa.fa-plus(aria-hidden="true")
 
   div.trigger-item
     div.trigger-content
       div.trigger-text
         | {{_'r-set-color'}}
         button.trigger-button.trigger-button-color.js-show-color-palette(
+          type="button"
           id="color-action"
           class="card-details-{{cardColorButton}}")
           | {{_ cardColorButtonText }}
-    div.trigger-button.js-set-color-action.js-goto-rules
-      i.fa.fa-plus
+    button.trigger-button.js-set-color-action.js-goto-rules(type="button" aria-label="{{_ 'select-color'}}")
+      i.fa.fa-plus(aria-hidden="true")
+
+  div.trigger-item
+    div.trigger-content
+      div.trigger-dropdown
+        select(id="complete-action")
+          option(value="markCardComplete") {{_'r-mark-complete'}}
+          option(value="markCardIncomplete") {{_'r-mark-incomplete'}}
+    button.trigger-button.js-set-complete-action.js-goto-rules(type="button" aria-label="{{_ 'r-add-action'}}")
+      i.fa.fa-plus(aria-hidden="true")
+
+  div.trigger-item
+    div.trigger-content
+      div.trigger-text
+        | {{_'r-set-date-relative'}}
+      div.trigger-dropdown
+        select(id="reldate-datefield")
+          option(value="startAt") {{_'r-df-start-at'}}
+          option(value="dueAt") {{_'r-df-due-at'}}
+          option(value="endAt") {{_'r-df-end-at'}}
+          option(value="receivedAt") {{_'r-df-received-at'}}
+      div.trigger-dropdown
+        input(id="reldate-days",type="number",value="0")
+      div.trigger-dropdown
+        select(id="reldate-unit")
+          option(value="minutes") {{_'r-unit-minutes'}}
+          option(value="hours") {{_'r-unit-hours'}}
+          option(value="days",selected="selected") {{_'r-unit-days'}}
+          option(value="weeks") {{_'r-unit-weeks'}}
+          option(value="months") {{_'r-unit-months'}}
+      div.trigger-text
+        | {{_'r-later'}}
+    button.trigger-button.js-set-reldate-action.js-goto-rules(type="button" aria-label="{{_ 'r-add-action'}}")
+      i.fa.fa-plus(aria-hidden="true")
+
+  //- Add a comment, written as the person whose change ran the rule, with
+    the rule variables ({cardTitle}, {user}, ...).
+  div.trigger-item
+    div.trigger-content
+      div.trigger-text
+        | {{_'r-add-comment'}}
+      div.trigger-dropdown
+        input(id="comment-action-text" type="text" placeholder="{{_ 'r-add-comment-placeholder'}}" aria-label="{{_ 'r-add-comment'}}")
+    button.trigger-button.js-add-comment-action.js-goto-rules(type="button" aria-label="{{_ 'r-add-action'}}")
+      i.fa.fa-plus(aria-hidden="true")
+
+  //- Board Settings / Bots: hand the card to one of this board's bots.
+  if boardBots.length
+    div.trigger-item
+      div.trigger-content
+        div.trigger-text
+          | {{_'r-dispatch-bot'}}
+        div.trigger-dropdown
+          select#dispatch-bot-action(aria-label="{{_ 'r-dispatch-bot'}}")
+            each boardBots
+              option(value="{{_id}}") {{title}}
+      button.trigger-button.js-add-dispatch-bot-action.js-goto-rules(type="button" aria-label="{{_ 'r-add-action'}}")
+        i.fa.fa-plus(aria-hidden="true")
 
 template(name="setCardActionsColorPopup")
   form.edit-label
@@ -85,4 +186,4 @@ template(name="setCardActionsColorPopup")
       span.card-label.palette-color.js-palette-color(class="card-details-{{color}}")
         if(isSelected color)
           i.fa.fa-check
-    button.primary.confirm.js-submit {{_ 'save'}}
+    button.primary.confirm.js-submit(type="button") {{_ 'save'}}

@@ -1,19 +1,74 @@
+import Boards from '/models/boards';
 import Cards from '/models/cards';
 import ChecklistItems from '/models/checklistItems';
-import { allowIsBoardMemberWithWriteAccessByCard } from '/server/lib/utils';
+import { denyCrossBoardMoveByChecklistItem, sourceBoardOfCardChild } from '/server/lib/utils';
+import { tripCanaryDeny } from '/server/lib/canary';
+import { denyForgedCardChildInsert } from '/server/lib/cardChildStamp';
+import { canEditCardOrLinkedCard } from '/server/lib/linkedCardPermission';
+const { workerMayToggleChecklistItem } = require('/models/lib/workerChecklistItemToggle');
 
 ChecklistItems.allow({
   async insert(userId, doc) {
     // ReadOnly users cannot create checklist items
-    return await allowIsBoardMemberWithWriteAccessByCard(userId, await Cards.findOneAsync(doc.cardId));
+    return await canEditCardOrLinkedCard(userId, await Cards.findOneAsync(doc.cardId));
   },
-  async update(userId, doc) {
-    // ReadOnly users cannot edit checklist items
-    return await allowIsBoardMemberWithWriteAccessByCard(userId, await Cards.findOneAsync(doc.cardId));
+  // wekan/wekan#3307: a Worker cannot edit or delete a checklist item, but may
+  // still CHECK/UNCHECK it - the same field-level carve-out workerCardWrite.js
+  // gives a Worker on a card (see models/lib/workerChecklistItemToggle.js).
+  async update(userId, doc, fieldNames, modifier) {
+    const card = await Cards.findOneAsync(doc.cardId);
+    // #6798: without recording first - a Worker checking an item is ALLOWED
+    // below, and a recorded refusal here disabled the Worker's account
+    // (server/permissions/cards.js canUpdateCard).
+    if (await canEditCardOrLinkedCard(userId, card, undefined, { recordDenial: false })) {
+      return true;
+    }
+    if (workerMayToggleChecklistItem(userId, modifier)) {
+      const board = await Boards.findOneAsync(doc.boardId);
+      if (board && board.hasWorker(userId)) return true;
+    }
+    // Refused after all: ask again, recording the denial as before.
+    return await canEditCardOrLinkedCard(userId, card);
   },
   async remove(userId, doc) {
     // ReadOnly users cannot delete checklist items
-    return await allowIsBoardMemberWithWriteAccessByCard(userId, await Cards.findOneAsync(doc.cardId));
+    return await canEditCardOrLinkedCard(userId, await Cards.findOneAsync(doc.cardId));
   },
-  fetch: ['userId', 'cardId'],
+  fetch: ['userId', 'cardId', 'boardId'],
+});
+
+// Security (GHSA-gv8h-5p3p-6hx7): the allow rule above only checks write access
+// on the item's SOURCE card/board, so a DDP client could move a checklist item
+// into a private board it is not a member of by $set-ting a new cardId or
+// checklistId (boardId is then denormalized from the destination card). Deny any
+// move whose destination board the caller cannot write to.
+// #1618: the person responsible for an item must be an active member of its
+// board (models/lib/checklistItemSchedule.js).
+ChecklistItems.deny({
+  async update(userId, doc, fieldNames, modifier) {
+    const set = modifier && modifier.$set;
+    if (!set || !Object.prototype.hasOwnProperty.call(set, 'assigneeId')) return false;
+    const { mayBeAssigned } = require('/models/lib/checklistItemSchedule');
+    return !mayBeAssigned(await Boards.findOneAsync(doc.boardId), set.assigneeId);
+  },
+  fetch: ['boardId'],
+});
+
+ChecklistItems.deny({
+  async update(userId, doc, fieldNames, modifier) {
+    // #6813: the source board from the source card, as the allow rule.
+    if (!(await denyCrossBoardMoveByChecklistItem(userId, modifier, await sourceBoardOfCardChild(doc)))) return false;
+    return tripCanaryDeny('checklist-item.cross-board-move', { userId });
+  },
+  fetch: ['cardId'],
+});
+
+// StampBleed: an insert on one's own card stamped with another board's id
+// (or, for an item, another card's checklist) is refused and recorded
+// (server/lib/cardChildStamp.js).
+ChecklistItems.deny({
+  async insert(userId, doc) {
+    return await denyForgedCardChildInsert(doc, { source: 'ddp:checklist-item-insert', checklist: true });
+  },
+  fetch: [],
 });

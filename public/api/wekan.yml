@@ -1,16 +1,16 @@
 swagger: '2.0'
 info:
-  title: Wekan REST API
-  version: v9.42
+  title: WeKan REST API
+  version: v13.06
   description: |
-    The REST API allows you to control and extend Wekan with ease.
+    The REST API allows you to control and extend WeKan with ease.
 
     If you are an end-user and not a dev or a tester, [create an issue](https://github.com/wekan/wekan/issues/new) to request new APIs.
 
     > All API calls in the documentation are made using `curl`.  However, you are free to use Java / Python / PHP / Golang / Ruby / Swift / Objective-C / Rust / Scala / C# or any other programming languages.
 
     # Production Security Concerns
-    When calling a production Wekan server, ensure it is running via HTTPS and has a valid SSL Certificate. The login method requires you to post your username and password in plaintext, which is why we highly suggest only calling the REST login api over HTTPS. Also, few things to note:
+    When calling a production WeKan server, ensure it is running via HTTPS and has a valid SSL Certificate. The login method requires you to post your username and password in plaintext, which is why we highly suggest only calling the REST login api over HTTPS. Also, few things to note:
 
     * Only call via HTTPS
     * Implement a timed authorization token expiration strategy
@@ -150,6 +150,520 @@ paths:
           description: |
             Error in registration
 
+  /api/admin/attachment-settings:
+    get:
+      operationId: get_attachment_settings
+      summary: Get the attachment storage / upload-block settings (GlobalAdmin)
+      description: |
+        Only the global admin can call this. Returns the Admin Panel >
+         Attachments settings document, including `limitSettings.attachmentsUploadBlocked`
+         and `limitSettings.avatarsUploadBlocked` plus the size limits. Cloud-storage
+         secret keys (S3 secretAccessKey, Azure accountKey/connectionString, GCS
+         credentials) are masked and never returned; a boolean `<field>Set` marker
+         shows whether a value exists.
+      tags:
+        - AttachmentStorageSettings
+        - Settings
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: Object
+    put:
+      operationId: update_attachment_settings
+      summary: Update the attachment storage / upload-block settings (GlobalAdmin)
+      description: |
+        Only the global admin can call this. The request body is a
+         partial settings object (for example
+         `{"limitSettings": {"avatarsUploadBlocked": true}}`). It is applied through
+         the same update path as the `updateAttachmentStorageSettings` Meteor method,
+         so validation and `$set` semantics are identical: cloud-storage secrets left
+         blank are preserved. The masked, updated settings document is returned.
+      tags:
+        - AttachmentStorageSettings
+        - Settings
+      consumes:
+        - multipart/form-data
+        - application/json
+      parameters:
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: Object
+  /api/admin/domains:
+    get:
+      operationId: get_admin_domains
+      summary: List email domains with their user counts (GlobalAdmin)
+      description: |
+        Only the global admin can call this. Counts every user by the
+         domain part of their primary email address (the first address in `emails`),
+         mirroring the Admin Panel > People domain grouping. Domains are returned
+         sorted by descending count, then alphabetically.
+      tags:
+        - Users
+        - Users
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                domain:
+                  type: string
+                count:
+                  type: number
+  /api/admin/oauth-providers:
+    get:
+      operationId: get_oauth_provider_settings
+      summary: Get the OAuth login provider and passwordless settings
+      description: |
+        The Admin Panel / People / Login section for Meteor's own
+         accounts-* login services (Google, GitHub, Facebook, X/Twitter, Meteor
+         Developer, Weibo, Meetup) and passwordless email codes. For every provider
+         field, the shared login style, the merge switch and passwordless it reports
+         which source is in effect - `env` (the `OAUTH_*` / `PASSWORDLESS_ENABLED`
+         environment variable), `admin` (a value saved in the Admin Panel) or
+         `unset` - and the resolved value. A provider's secret is reported ONLY as
+         `{ source, hasValue }`; its value is never returned. Only the global admin
+         can call this.
+      tags:
+        - Settings
+        - Settings
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: object
+            properties:
+              providers:
+                type: object
+              loginStyle:
+                type: object
+                properties:
+                  source:
+                    type: string
+                  value:
+                    type: string
+              mergeExistingUsers:
+                type: object
+                properties:
+                  source:
+                    type: string
+                  value:
+                    type: string
+              passwordless:
+                type: object
+                properties:
+                  source:
+                    type: string
+                  value:
+                    type: string
+  /api/admin/oauth-providers/{providerKey}:
+    put:
+      operationId: update_oauth_provider_settings
+      summary: Update one OAuth login provider's Admin Panel settings
+      description: |
+        The same save the Admin Panel makes: `enabled` and `id` are
+         stored as given, `secret` only when non-empty (an empty or missing secret
+         leaves the stored one untouched), and `loginStyle` must be `popup` or
+         `redirect` (anything else clears the per-provider override). The two
+         settings shared by every provider, `globalLoginStyle` and
+         `mergeExistingUsers`, may ride along. A value saved here wins over the
+         environment variable, and the provider is reconfigured at once, without a
+         restart. The response is the same source report as
+         get_oauth_provider_settings and never contains a secret. Only the global
+         admin can call this.
+      tags:
+        - Settings
+        - Settings
+      consumes:
+        - multipart/form-data
+        - application/json
+      parameters:
+        - name: providerKey
+          in: path
+          description: |
+            one of google, github, facebook, twitter, meteor-developer, weibo, meetup
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: object
+            properties:
+              providers:
+                type: object
+              loginStyle:
+                type: object
+                properties:
+                  source:
+                    type: string
+                  value:
+                    type: string
+              mergeExistingUsers:
+                type: object
+                properties:
+                  source:
+                    type: string
+                  value:
+                    type: string
+              passwordless:
+                type: object
+                properties:
+                  source:
+                    type: string
+                  value:
+                    type: string
+  /api/admin/orgs:
+    get:
+      operationId: get_admin_orgs
+      summary: List organizations with their feature toggles (GlobalAdmin)
+      description: |
+        Only the global admin can call this. Returns every organization
+         with its identifying fields and the per-org feature toggles shown as columns
+         in Admin Panel > People > Organizations.
+      tags:
+        - Org
+        - Organizations
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                _id:
+                  type: string
+                orgDisplayName:
+                  type: string
+                orgShortName:
+                  type: string
+                orgSharedTemplates:
+                  type: boolean
+                orgPropagateMembersToBoards:
+                  type: boolean
+                orgSyncMembersFromAuth:
+                  type: boolean
+  /api/admin/orgs/{org}/features:
+    put:
+      operationId: update_admin_org_features
+      summary: Set feature toggles on one organization (GlobalAdmin)
+      description: |
+        Only the global admin can call this. The request body may
+         contain any of `orgSharedTemplates`, `orgPropagateMembersToBoards` and
+         `orgSyncMembersFromAuth` (booleans); only those whitelisted fields are
+         `$set` on the organization. Returns the updated organization.
+      tags:
+        - Org
+        - Organizations
+      consumes:
+        - multipart/form-data
+        - application/json
+      parameters:
+        - name: org
+          in: path
+          description: |
+            the ID of the organization
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: Object
+  /api/admin/orgs/features:
+    put:
+      operationId: update_all_admin_org_features
+      summary: Set one feature toggle on all organizations (GlobalAdmin)
+      description: |
+        Only the global admin can call this. The request body is
+         `{ field, value }` where `field` is one of `orgSharedTemplates`,
+         `orgPropagateMembersToBoards` or `orgSyncMembersFromAuth` and `value` is a
+         boolean. The field is `$set` on ALL organizations. Returns the number of
+         organizations updated.
+      tags:
+        - Org
+        - Organizations
+      consumes:
+        - multipart/form-data
+        - application/json
+      parameters:
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: object
+            properties:
+              updated:
+                type: number
+  /api/admin/passwordless:
+    put:
+      operationId: update_passwordless_settings
+      summary: Turn passwordless (email sign-in code) login on or off
+      description: |
+        The Admin Panel override of `PASSWORDLESS_ENABLED`. While it
+         is off, the sign-in-code form is not shown and the token request and the
+         login attempt are both refused, so the package can neither create accounts
+         nor send codes. Takes effect at once, without a restart. Only the global
+         admin can call this.
+      tags:
+        - Settings
+        - Settings
+      consumes:
+        - multipart/form-data
+        - application/json
+      parameters:
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: object
+            properties:
+              passwordless:
+                type: object
+                properties:
+                  source:
+                    type: string
+                  value:
+                    type: string
+  /api/admin/problems:
+    get:
+      operationId: get_admin_problems
+      summary: Get the Admin Panel / Problems status overview
+      description: |
+        What Admin Panel / Problems / Summary shows: every migration or
+         repair in progress, the detected problems (broken cards, lists missing their
+         swimlane, failing login-page checks), and for each event stream (`security`,
+         `speed`, `tests`, `cpu`, `database`, `integrity`) how many problems are newer
+         than its acknowledgment. The same overview `snap run wekan.problems` prints.
+         Only the global admin can call this.
+      tags:
+        - EventLog
+        - Problems
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: {inProgress: [{kind: string, active: boolean, message: string}], problems: [{id: string, severity: string, title: string, detail: string, count: number}], newProblems: [{stream: string, count: number}], streams: [string]}
+  /api/admin/problems/{stream}:
+    get:
+      operationId: get_admin_problem_stream
+      summary: Get one page of an Admin Panel / Problems event stream
+      description: |
+        One page of a stream's rows, newest first (the `api` usage
+         stream sorts by count): `security` (Security Report), `speed`, `tests`,
+         `cpu`, `database` (restarts, storage and disk-space findings, indexes
+         created), `integrity` and `api`. Each row is a SUMMARY that accumulates -
+         `count`, `firstAt`..`at`, `actors` - never a row per event. Only the global
+         admin can call this.
+      tags:
+        - EventLog
+        - Problems
+      parameters:
+        - name: stream
+          in: path
+          description: |
+            the stream name: security, speed, tests, cpu, database, integrity or api
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: {stream: string, total: number, limit: number, skip: number, rows: [object]}
+  /api/admin/problems/{stream}/acknowledge:
+    post:
+      operationId: acknowledge_admin_problem_stream
+      summary: Acknowledge the new problems of an event stream
+      description: |
+        Marks everything currently in the stream as seen, the way the
+         Admin Panel's acknowledge button does, so `get_admin_problems` reports zero
+         new problems for it until the next one is recorded. Only the global admin
+         can call this.
+      tags:
+        - EventLog
+        - Problems
+      consumes:
+        - multipart/form-data
+        - application/json
+      parameters:
+        - name: stream
+          in: path
+          description: |
+            the stream name: security, speed, tests, cpu, database or integrity
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: object
+            properties:
+              acknowledged:
+                type: string
+  /api/admin/teams:
+    get:
+      operationId: get_admin_teams
+      summary: List teams with their feature toggles (GlobalAdmin)
+      description: |
+        Only the global admin can call this. Returns every team with
+         its identifying fields and the per-team feature toggles shown as columns in
+         Admin Panel > People > Teams.
+      tags:
+        - Team
+        - Teams
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                _id:
+                  type: string
+                teamDisplayName:
+                  type: string
+                teamShortName:
+                  type: string
+                teamSharedTemplates:
+                  type: boolean
+                teamPropagateMembersToBoards:
+                  type: boolean
+                teamSyncMembersFromAuth:
+                  type: boolean
+  /api/admin/teams/{team}/features:
+    put:
+      operationId: update_admin_team_features
+      summary: Set feature toggles on one team (GlobalAdmin)
+      description: |
+        Only the global admin can call this. The request body may
+         contain any of `teamSharedTemplates`, `teamPropagateMembersToBoards` and
+         `teamSyncMembersFromAuth` (booleans); only those whitelisted fields are
+         `$set` on the team. Returns the updated team.
+      tags:
+        - Team
+        - Teams
+      consumes:
+        - multipart/form-data
+        - application/json
+      parameters:
+        - name: team
+          in: path
+          description: |
+            the ID of the team
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: Object
+  /api/admin/teams/features:
+    put:
+      operationId: update_all_admin_team_features
+      summary: Set one feature toggle on all teams (GlobalAdmin)
+      description: |
+        Only the global admin can call this. The request body is
+         `{ field, value }` where `field` is one of `teamSharedTemplates`,
+         `teamPropagateMembersToBoards` or `teamSyncMembersFromAuth` and `value` is a
+         boolean. The field is `$set` on ALL teams. Returns the number of teams
+         updated.
+      tags:
+        - Team
+        - Teams
+      consumes:
+        - multipart/form-data
+        - application/json
+      parameters:
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: object
+            properties:
+              updated:
+                type: number
   /api/boards:
     get:
       operationId: get_boards
@@ -171,6 +685,11 @@ paths:
         - multipart/form-data
         - application/json
       parameters:
+        - name: permission
+          in: formData
+          description: the permission value
+          type: string
+          required: true
       produces:
         - application/json
       security:
@@ -235,6 +754,50 @@ paths:
         '200':
           description: |-
             200 response
+  /api/boards/{board}/attachments/{attachment}:
+    delete:
+      operationId: delete_board_attachment
+      summary: Soft-delete an attachment
+      description: |
+        The same "Delete" the card offers: the attachment gets
+         `deletedAt`, `deletedBy` and `deleteBatchId`, its file is kept, the card and
+         the minicard badge hide it, its cover is unset if it was the card's cover,
+         and the card history records who deleted it. Restore it with
+         `POST /api/boards/:boardId/attachments/:attachmentId/restore`. There is no
+         hard delete of a single attachment over the API. Requires permission to
+         edit the card the attachment is on (or write access to the board for a
+         board-level attachment). Idempotent: an already-deleted attachment is left
+         as it is.
+      tags:
+        - Attachments
+      parameters:
+        - name: board
+          in: path
+          description: |
+            the board ID
+          type: string
+          required: true
+        - name: attachment
+          in: path
+          description: |
+            the attachment ID
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: object
+            properties:
+              deleted:
+                type: boolean
+              batchId:
+                type: string
   /api/boards/{board}/attachments/{attachment}/export:
     get:
       operationId: exportJson
@@ -265,15 +828,33 @@ paths:
         '200':
           description: |-
             200 response
-  /api/boards/{board}/cardSettings:
-    get:
-      operationId: get_board_cardSettings
+  /api/boards/{board}/attachments/{attachment}/restore:
+    post:
+      operationId: restore_board_attachment
+      summary: Restore a soft-deleted attachment
+      description: |
+        The card history's Restore for an attachment row: clears the
+         delete mark so the card, its attachment count and the minicard badge include
+         the attachment again, and records the restore in the card history. The
+         cover is never re-set by a restore. Requires the same permission as
+         deleting. Idempotent: `restored` is false for an attachment that is not
+         deleted.
       tags:
-        - Boards
+        - Attachments
+      consumes:
+        - multipart/form-data
+        - application/json
       parameters:
         - name: board
           in: path
-          description: the board value
+          description: |
+            the board ID
+          type: string
+          required: true
+        - name: attachment
+          in: path
+          description: |
+            the attachment ID
           type: string
           required: true
       produces:
@@ -284,9 +865,295 @@ paths:
         '200':
           description: |-
             200 response
-    put:
-      operationId: put_board_cardSettings
+          schema:
+            type: object
+            properties:
+              restored:
+                type: boolean
+  /api/boards/{board}/attachments/deleted:
+    get:
+      operationId: get_board_deleted_attachments
+      summary: Get the soft-deleted attachments of a board
+      description: |
+        Deleting an attachment from a card is a soft delete: the file
+         is kept, the card hides it, and the card history can restore it. This lists
+         the attachments of a board that are currently deleted, with who deleted each
+         and when, so a script can find one to restore. The live attachments are at
+         `GET /api/boards/:boardId/attachments`. Requires board access.
       tags:
+        - Attachments
+      parameters:
+        - name: board
+          in: path
+          description: |
+            the board ID
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                attachmentId:
+                  type: string
+                attachmentName:
+                  type: string
+                attachmentType:
+                  type: string
+                boardId:
+                  type: string
+                swimlaneId:
+                  type: string
+                listId:
+                  type: string
+                cardId:
+                  type: string
+                deletedAt:
+                  type: string
+                deletedBy:
+                  type: string
+                deleteBatchId:
+                  type: string
+  /api/boards/{board}/boardViewSettings:
+    get:
+      operationId: get_board_view_settings
+      summary: Get the Board Settings / Board View of a board
+      description: |
+        Which entries of the Board View menu this board offers and
+         which one it opens in, separately for when the board is public and when it
+         is private, and the order the menu lists them in. `boardViewSettings` has
+         every view key exactly once with both `showOnPublic` and `showOnPrivate`
+         made explicit (a board that never opened the popup shows every view), the
+         two defaults are resolved (missing or unknown reads as
+         `board-view-swimlanes`), and `boardViewOrder` is made whole: every view
+         exactly once, unknown keys dropped, missing ones appended in default order.
+         `keys` lists the known view keys. Requires board access.
+      tags:
+        - Boards
+        - Boards
+      parameters:
+        - name: board
+          in: path
+          description: |
+            the board ID
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: {boardViewSettings: object, defaultPublicBoardView: string, defaultPrivateBoardView: string, boardViewOrder: [string], keys: [string]}
+    put:
+      operationId: update_board_view_settings
+      summary: Set the Board Settings / Board View of a board
+      description: |
+        Sets any subset of `boardViewSettings` (an object of
+         `"<view>": { showOnPublic, showOnPrivate }`, each side optional),
+         `defaultPublicBoardView`, `defaultPrivateBoardView` and `boardViewOrder`
+         (an array of view keys), with the rules the Board View popup applies: a
+         default is always shown on its side (setting a default also shows it, and
+         hiding a side's current default is refused with 400 - set another default
+         first), an unknown view key anywhere in the body is a 400, and the order is
+         normalised so the menu lists every view exactly once. Defaults are applied
+         before the show flags, so one request can move the default and hide the
+         old one. Requires the caller to be a board admin (or site admin). Returns
+         the settings in effect, in the same shape as GET.
+      tags:
+        - Boards
+        - Boards
+      consumes:
+        - multipart/form-data
+        - application/json
+      parameters:
+        - name: board
+          in: path
+          description: |
+            the board ID
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: {boardViewSettings: object, defaultPublicBoardView: string, defaultPrivateBoardView: string, boardViewOrder: [string], keys: [string]}
+  /api/boards/{board}/calendar.ics:
+    get:
+      operationId: exportCalendarIcs
+      summary: Subscribable iCalendar (.ics) feed of a board's card dates.
+      description: |
+        Answers GitHub issue #2836 ("CalDAV or iCal Support") - #808
+         added the in-app Calendar VIEW, this is the separate EXPORT/subscribe
+         feed the issue actually asked for. One VEVENT per Received / Start-End
+         span / Due date a card has, the same four dates the Calendar view (#808)
+         draws (see models/lib/calendarFilter.js and models/lib/icalExport.js).
+         This is one-way and read-only: paste the URL into a calendar app's
+         "subscribe to URL" feature. Full two-way CalDAV sync is a much larger,
+         separate, stateful sync protocol and is out of scope.
+      tags:
+        - Boards
+      parameters:
+        - name: board
+          in: path
+          description: |
+            the ID of the board whose card dates to export
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+  /api/boards/{board}/cardFieldOrder:
+    get:
+      operationId: get_board_card_field_order
+      summary: Get the order of the opened card's sections
+      description: |
+        The Board Settings "card field order": the sequence in which
+         the opened card draws its Labels, Dates, Members, Custom Fields and
+         Description sections. Always returns every one of the five keys exactly
+         once, in effect - a board that never changed the setting gets the default
+         `labels, dates, members, customFields, description`. Requires board access.
+      tags:
+        - Boards
+        - Boards
+      parameters:
+        - name: board
+          in: path
+          description: |
+            the board ID
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: {cardFieldOrder: [string], keys: [string]}
+    put:
+      operationId: update_board_card_field_order
+      summary: Set the order of the opened card's sections
+      description: |
+        Stores a new card field order for the board. The order is
+         normalised the way the card renders it: unknown keys are dropped,
+         duplicates keep their first position, and any of the five keys left out is
+         appended in its default position - so the card always draws every section
+         exactly once. Requires the caller to be a board admin (or site admin).
+         Returns the order in effect.
+      tags:
+        - Boards
+        - Boards
+      consumes:
+        - multipart/form-data
+        - application/json
+      parameters:
+        - name: cardFieldOrder
+          in: formData
+          description: |
+            JSON array of section keys, e.g. ["description", "labels", "dates", "members", "customFields"]
+          type: string
+          required: true
+        - name: board
+          in: path
+          description: |
+            the board ID
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: {cardFieldOrder: [string], keys: [string]}
+  /api/boards/{board}/cardSettings:
+    get:
+      operationId: get_board_card_settings
+      summary: Get the Board Settings / Card Settings of a board
+      description: |
+        The card feature toggles of Board Settings / Card Settings -
+         which card fields and features this board offers (`allowsDescriptionTitle`,
+         `allowsLabels`, `allowsChecklists`, `allowsAttachments`, `allowsComments`,
+         `allowsActivities`, …, each `true`/`false`) - and the three card-aging day
+         thresholds (`cardAgingDays1`..`cardAgingDays3`). Requires board access.
+      tags:
+        - Boards
+        - Boards
+      parameters:
+        - name: board
+          in: path
+          description: |
+            the board ID
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: object
+            properties:
+              allowsDescriptionTitle:
+                type: boolean
+              allowsLabels:
+                type: boolean
+              allowsChecklists:
+                type: boolean
+              allowsAttachments:
+                type: boolean
+              allowsComments:
+                type: boolean
+              allowsActivities:
+                type: boolean
+              cardAgingDays1:
+                type: number
+              cardAgingDays2:
+                type: number
+              cardAgingDays3:
+                type: number
+    put:
+      operationId: update_board_card_settings
+      summary: Set the Board Settings / Card Settings of a board
+      description: |
+        Sets any subset of the card feature toggles (any `allows*`
+         key of the board, as `true`/`false`) and of the card-aging thresholds
+         (`cardAgingDays1`..`cardAgingDays3`, non-negative integers). Keys not in
+         the body are left as they are; a body with no recognised key is a 400.
+         Requires board administrator access. Returns the settings in effect, in the same
+         shape as GET.
+      tags:
+        - Boards
         - Boards
       consumes:
         - multipart/form-data
@@ -299,7 +1166,8 @@ paths:
           required: true
         - name: board
           in: path
-          description: the board value
+          description: |
+            the board ID
           type: string
           required: true
       produces:
@@ -310,6 +1178,27 @@ paths:
         '200':
           description: |-
             200 response
+          schema:
+            type: object
+            properties:
+              allowsDescriptionTitle:
+                type: boolean
+              allowsLabels:
+                type: boolean
+              allowsChecklists:
+                type: boolean
+              allowsAttachments:
+                type: boolean
+              allowsComments:
+                type: boolean
+              allowsActivities:
+                type: boolean
+              cardAgingDays1:
+                type: number
+              cardAgingDays2:
+                type: number
+              cardAgingDays3:
+                type: number
   /api/boards/{board}/cards/{card}/checklists:
     get:
       operationId: get_board_card_checklists
@@ -394,6 +1283,42 @@ paths:
         '200':
           description: |-
             200 response
+    put:
+      operationId: put_board_card_checklist
+      tags:
+        - Checklists
+      consumes:
+        - multipart/form-data
+        - application/json
+      parameters:
+        - name: title
+          in: formData
+          description: the title value
+          type: string
+          required: true
+        - name: board
+          in: path
+          description: the board value
+          type: string
+          required: true
+        - name: card
+          in: path
+          description: the card value
+          type: string
+          required: true
+        - name: checklist
+          in: path
+          description: the checklist value
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
     delete:
       operationId: delete_board_card_checklist
       tags:
@@ -431,6 +1356,11 @@ paths:
         - multipart/form-data
         - application/json
       parameters:
+        - name: sort
+          in: formData
+          description: the sort value
+          type: string
+          required: true
         - name: board
           in: path
           description: the board value
@@ -636,6 +1566,37 @@ paths:
         '200':
           description: |-
             200 response
+    put:
+      operationId: put_board_card_comment
+      tags:
+        - CardComments
+      consumes:
+        - multipart/form-data
+        - application/json
+      parameters:
+        - name: board
+          in: path
+          description: the board value
+          type: string
+          required: true
+        - name: card
+          in: path
+          description: the card value
+          type: string
+          required: true
+        - name: comment
+          in: path
+          description: the comment value
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
     delete:
       operationId: delete_board_card_comment
       tags:
@@ -664,6 +1625,209 @@ paths:
         '200':
           description: |-
             200 response
+  /api/boards/{board}/cards/{card}/dependencies:
+    get:
+      operationId: get_card_dependencies
+      summary: Get one card's dependencies
+      tags:
+        - Dependencies
+      parameters:
+        - name: board
+          in: path
+          description: |
+            the board ID
+          type: string
+          required: true
+        - name: card
+          in: path
+          description: |
+            the card ID
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                cardId:
+                  type: string
+                type:
+                  type: string
+                color:
+                  type: string
+                icon:
+                  type: string
+    post:
+      operationId: new_card_dependency
+      summary: Add (or update) a typed dependency line from a card to another card
+      description: |
+        The target card must be on the same board. If the dependency
+         already exists, its type/color/icon are updated.
+      tags:
+        - Dependencies
+      consumes:
+        - multipart/form-data
+        - application/json
+      parameters:
+        - name: cardId
+          in: formData
+          description: |
+            the source card ID
+          type: string
+          required: true
+        - name: dependsOn
+          in: formData
+          description: the dependsOn value
+          type: string
+          required: true
+        - name: type
+          in: formData
+          description: |
+            relation type: related-to | blocks | is-blocked-by | fixes | is-fixed-by | duplicates | is-duplicated-by
+          type: string
+          required: false
+        - name: color
+          in: formData
+          description: |
+            line/badge color, any CSS color e.g. "#eb144c"
+          type: string
+          required: false
+        - name: icon
+          in: formData
+          description: |
+            FontAwesome icon name without the "fa-" prefix
+          type: string
+          required: false
+        - name: board
+          in: path
+          description: |
+            the board ID
+          type: string
+          required: true
+        - name: card
+          in: path
+          description: |
+            the source card ID
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: object
+            properties:
+              _id:
+                type: string
+              cardId:
+                type: string
+              type:
+                type: string
+              color:
+                type: string
+              icon:
+                type: string
+  /api/boards/{board}/cards/{card}/dependencies/{target}:
+    put:
+      operationId: edit_card_dependency
+      summary: Edit a dependency line's type, color or icon
+      tags:
+        - Dependencies
+      consumes:
+        - multipart/form-data
+        - application/json
+      parameters:
+        - name: type
+          in: formData
+          description: |
+            relation type: related-to | blocks | is-blocked-by | fixes | is-fixed-by | duplicates | is-duplicated-by
+          type: string
+          required: false
+        - name: key
+          in: formData
+          description: the key value
+          type: string
+          required: true
+        - name: board
+          in: path
+          description: |
+            the board ID
+          type: string
+          required: true
+        - name: card
+          in: path
+          description: |
+            the source card ID
+          type: string
+          required: true
+        - name: target
+          in: path
+          description: |
+            the target card ID of the dependency
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: object
+            properties:
+              _id:
+                type: string
+    delete:
+      operationId: delete_card_dependency
+      summary: Remove a dependency line from a card
+      tags:
+        - Dependencies
+      parameters:
+        - name: board
+          in: path
+          description: |
+            the board ID
+          type: string
+          required: true
+        - name: card
+          in: path
+          description: |
+            the source card ID
+          type: string
+          required: true
+        - name: target
+          in: path
+          description: |
+            the target card ID of the dependency to remove
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: object
+            properties:
+              _id:
+                type: string
   /api/boards/{board}/cards/bulk:
     delete:
       operationId: delete_board_cards_bulk
@@ -695,6 +1859,16 @@ paths:
         - name: cardIds
           in: formData
           description: the cardIds value
+          type: string
+          required: true
+        - name: addLabelIds
+          in: formData
+          description: the addLabelIds value
+          type: string
+          required: true
+        - name: removeLabelIds
+          in: formData
+          description: the removeLabelIds value
           type: string
           required: true
         - name: board
@@ -748,6 +1922,70 @@ paths:
         - name: board
           in: path
           description: the board value
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+  /api/boards/{board}/charts/{chartKey}/exportExcel:
+    get:
+      operationId: exportChartExcel
+      summary: Export one board report chart to Excel (.xlsx).
+      description: |
+        Pass the loginToken as the `authToken` query param for private
+         boards: `/api/boards/:boardId/charts/:chartKey/exportExcel?authToken=:token`.
+      tags:
+        - Boards
+      parameters:
+        - name: board
+          in: path
+          description: |
+            the ID of the board
+          type: string
+          required: true
+        - name: chartKey
+          in: path
+          description: |
+            one of dashboard, burndown, burnup, cumulativeFlow,
+            controlChart, cycleTime, flowEfficiency, leadTime, throughputHistogram, wipRun,
+            time
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+  /api/boards/{board}/charts/{chartKey}/exportPDF:
+    get:
+      operationId: exportChartPDF
+      summary: Export one board report chart (Dashboard, Burndown, Burnup, CFD,  Control Chart, Cycle/Lead Time, Flow Efficiency, Throughput, WIP Run) to PDF.
+      description: |
+        Pass the loginToken as the `authToken` query param for private
+         boards: `/api/boards/:boardId/charts/:chartKey/exportPDF?authToken=:token`.
+      tags:
+        - Boards
+      parameters:
+        - name: board
+          in: path
+          description: |
+            the ID of the board
+          type: string
+          required: true
+        - name: chartKey
+          in: path
+          description: |
+            one of dashboard, burndown, burnup, cumulativeFlow,
+            controlChart, cycleTime, flowEfficiency, leadTime, throughputHistogram, wipRun,
+            time
           type: string
           required: true
       produces:
@@ -812,6 +2050,11 @@ paths:
         - multipart/form-data
         - application/json
       parameters:
+        - name: authorId
+          in: formData
+          description: the authorId value
+          type: string
+          required: true
         - name: board
           in: path
           description: the board value
@@ -995,6 +2238,173 @@ paths:
         '200':
           description: |-
             200 response
+  /api/boards/{board}/dependencies:
+    get:
+      operationId: get_board_dependencies
+      summary: Get all card dependency lines ("Red Strings") of a board
+      tags:
+        - Dependencies
+      parameters:
+        - name: board
+          in: path
+          description: |
+            the board ID
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                from:
+                  type: string
+                fromTitle:
+                  type: string
+                fromCardNumber:
+                  type: number
+                to:
+                  type: string
+                toTitle:
+                  type: string
+                toCardNumber:
+                  type: number
+                type:
+                  type: string
+                color:
+                  type: string
+                icon:
+                  type: string
+  /api/boards/{board}/domains:
+    get:
+      operationId: get_board_domains
+      summary: Get the email domains a board is shared with
+      description: |
+        #5850: returns the `domains` array of a board. Each entry is an
+         object `{ domain: "example.com", isActive: true }`. Requires a site admin
+         (Authentication.checkUserId); a board's own members get the same list as
+         part of GET /api/boards/:boardId.
+      tags:
+        - Boards
+        - Boards
+      parameters:
+        - name: board
+          in: path
+          description: |
+            the board ID
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                domain:
+                  type: string
+                isActive:
+                  type: boolean
+    post:
+      operationId: add_board_domain
+      summary: Share a board with an email domain
+      description: |
+        #5850: add a single email domain to a board's `domains` array
+         with `isActive: true`, leaving any existing domains in place. The domain is
+         trimmed and lowercased and must look like a domain (contain a '.', no '@' and
+         no whitespace); it is added only if not already present. Requires the caller
+         to be a board admin (or site admin). Returns the updated domains array.
+      tags:
+        - Boards
+        - Boards
+      consumes:
+        - multipart/form-data
+        - application/json
+      parameters:
+        - name: domain
+          in: formData
+          description: |
+            the email domain to add, e.g. "example.com"
+          type: string
+          required: true
+        - name: board
+          in: path
+          description: |
+            the board ID
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                domain:
+                  type: string
+                isActive:
+                  type: boolean
+  /api/boards/{board}/domains/{domain}:
+    delete:
+      operationId: delete_board_domain
+      summary: Stop sharing a board with an email domain
+      description: |
+        #5850: remove a single email domain from a board's `domains`
+         array. The domain in the path is trimmed and lowercased before matching.
+         Requires the caller to be a board admin (or site admin). Returns the updated
+         domains array.
+      tags:
+        - Boards
+        - Boards
+      parameters:
+        - name: board
+          in: path
+          description: |
+            the board ID
+          type: string
+          required: true
+        - name: domain
+          in: path
+          description: |
+            the email domain to remove, e.g. "example.com"
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                domain:
+                  type: string
+                isActive:
+                  type: boolean
   /api/boards/{board}/export:
     get:
       operationId: exportJson
@@ -1012,6 +2422,32 @@ paths:
           in: path
           description: |
             the ID of the board we are exporting
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+  /api/boards/{board}/export/{format}:
+    get:
+      operationId: exportExternal
+      summary: Export the board as a NextCloud Deck / Kanboard / OpenProject /  GitHub / GitLab / Gitea / Forgejo / Jira / Asana / Zenkit / Trello style  JSON, a Taiga project dump (JSON), or Markdown.
+      tags:
+        - Boards
+      parameters:
+        - name: board
+          in: path
+          description: |
+            the ID of the board we are exporting
+          type: string
+          required: true
+        - name: format
+          in: path
+          description: the format value
           type: string
           required: true
       produces:
@@ -1075,9 +2511,62 @@ paths:
         '200':
           description: |-
             200 response
+  /api/boards/{board}/exportPDF:
+    get:
+      operationId: exportBoardPDF
+      summary: Export a whole board to PDF (board title, lists and their cards).
+      description: |
+        Pass the loginToken as the `authToken` query param for private
+         boards: `/api/boards/:boardId/exportPDF?authToken=:token`.
+      tags:
+        - Boards
+      parameters:
+        - name: board
+          in: path
+          description: |
+            the ID of the board to export
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+  /api/boards/{board}/exportZip:
+    get:
+      operationId: exportZip
+      summary: Export as a .zip - the JSON document, and the attachments as files.
+      description: |
+        The same export the JSON route produces, with the attachments
+         beside it as the files they are instead of base64 inside the document, so a
+         board whose attachments are too large for one JSON string still exports.
+         Takes the same `fields`, `swimlaneId`, `listId`, `cardId` and `checklistId`
+         parameters as every other export.
+      tags:
+        - Boards
+      parameters:
+        - name: board
+          in: path
+          description: |
+            the ID of the board we are exporting
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
   /api/boards/{board}/integrations:
     get:
       operationId: get_board_integrations
+      tags:
+        - Integrations
       parameters:
         - name: board
           in: path
@@ -1094,6 +2583,8 @@ paths:
             200 response
     post:
       operationId: post_board_integrations
+      tags:
+        - Integrations
       consumes:
         - multipart/form-data
         - application/json
@@ -1114,6 +2605,8 @@ paths:
   /api/boards/{board}/integrations/{int}:
     get:
       operationId: get_board_int
+      tags:
+        - Integrations
       parameters:
         - name: board
           in: path
@@ -1135,10 +2628,17 @@ paths:
             200 response
     put:
       operationId: put_board_int
+      tags:
+        - Integrations
       consumes:
         - multipart/form-data
         - application/json
       parameters:
+        - name: notificationDelivery
+          in: formData
+          description: the notificationDelivery value
+          type: string
+          required: true
         - name: board
           in: path
           description: the board value
@@ -1159,6 +2659,8 @@ paths:
             200 response
     delete:
       operationId: delete_board_int
+      tags:
+        - Integrations
       parameters:
         - name: board
           in: path
@@ -1181,6 +2683,8 @@ paths:
   /api/boards/{board}/integrations/{int}/activities:
     delete:
       operationId: delete_board_int_activities
+      tags:
+        - Integrations
       parameters:
         - name: board
           in: path
@@ -1202,6 +2706,8 @@ paths:
             200 response
     post:
       operationId: post_board_int_activities
+      tags:
+        - Integrations
       consumes:
         - multipart/form-data
         - application/json
@@ -1238,11 +2744,6 @@ paths:
         - multipart/form-data
         - application/json
       parameters:
-        - name: label
-          in: formData
-          description: the label value
-          type: string
-          required: true
         - name: board
           in: path
           description: the board value
@@ -1328,21 +2829,6 @@ paths:
         - multipart/form-data
         - application/json
       parameters:
-        - name: title
-          in: formData
-          description: the title value
-          type: string
-          required: true
-        - name: color
-          in: formData
-          description: the color value
-          type: string
-          required: true
-        - name: wipLimit
-          in: formData
-          description: the wipLimit value
-          type: string
-          required: true
         - name: board
           in: path
           description: the board value
@@ -1365,6 +2851,33 @@ paths:
       operationId: delete_board_list
       tags:
         - Lists
+      parameters:
+        - name: board
+          in: path
+          description: the board value
+          type: string
+          required: true
+        - name: list
+          in: path
+          description: the list value
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+  /api/boards/{board}/lists/{list}/archive:
+    post:
+      operationId: post_board_list_archive
+      tags:
+        - Lists
+      consumes:
+        - multipart/form-data
+        - application/json
       parameters:
         - name: board
           in: path
@@ -1431,6 +2944,11 @@ paths:
           description: the assignees value
           type: string
           required: true
+        - name: dateField
+          in: formData
+          description: the dateField value
+          type: string
+          required: true
         - name: board
           in: path
           description: the board value
@@ -1486,19 +3004,9 @@ paths:
         - multipart/form-data
         - application/json
       parameters:
-        - name: newBoardId
+        - name: moveReason
           in: formData
-          description: the newBoardId value
-          type: string
-          required: true
-        - name: newSwimlaneId
-          in: formData
-          description: the newSwimlaneId value
-          type: string
-          required: true
-        - name: newListId
-          in: formData
-          description: the newListId value
+          description: the moveReason value
           type: string
           required: true
         - name: title
@@ -1506,19 +3014,9 @@ paths:
           description: the title value
           type: string
           required: true
-        - name: sort
-          in: formData
-          description: the sort value
-          type: string
-          required: true
         - name: parentId
           in: formData
           description: the parentId value
-          type: string
-          required: true
-        - name: description
-          in: formData
-          description: the description value
           type: string
           required: true
         - name: color
@@ -1556,11 +3054,6 @@ paths:
           description: the spentTime value
           type: string
           required: true
-        - name: isOverTime
-          in: formData
-          description: the isOverTime value
-          type: string
-          required: true
         - name: customFields
           in: formData
           description: the customFields value
@@ -1576,19 +3069,14 @@ paths:
           description: the assignees value
           type: string
           required: true
-        - name: swimlaneId
+        - name: stickers
           in: formData
-          description: the swimlaneId value
+          description: the stickers value
           type: string
           required: true
-        - name: listId
+        - name: locations
           in: formData
-          description: the listId value
-          type: string
-          required: true
-        - name: archive
-          in: formData
-          description: the archive value
+          description: the locations value
           type: string
           required: true
         - name: board
@@ -2142,6 +3630,33 @@ paths:
         '200':
           description: |-
             200 response
+  /api/boards/{board}/lists/{list}/unarchive:
+    post:
+      operationId: post_board_list_unarchive
+      tags:
+        - Lists
+      consumes:
+        - multipart/form-data
+        - application/json
+      parameters:
+        - name: board
+          in: path
+          description: the board value
+          type: string
+          required: true
+        - name: list
+          in: path
+          description: the list value
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
   /api/boards/{board}/members/{member}:
     post:
       operationId: post_board_member
@@ -2243,6 +3758,213 @@ paths:
         '200':
           description: |-
             200 response
+  /api/boards/{board}/rules:
+    get:
+      operationId: get_board_rules
+      summary: Get the list of automation rules of a board
+      tags:
+        - Rules
+        - Rules
+      parameters:
+        - name: board
+          in: path
+          description: |
+            the board ID
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                _id:
+                  type: string
+                title:
+                  type: string
+                trigger:
+                  type: object
+                action:
+                  type: object
+    post:
+      operationId: new_board_rule
+      summary: Add an automation rule to a board
+      description: |
+        The trigger and action are embedded inline. See the Rules
+         documentation for the available trigger activityTypes and action actionTypes.
+         Trigger matching fields that are omitted (e.g. userId, listName,
+         swimlaneName, cardTitle) default to the '*' wildcard, so e.g. issue #2674's
+         "remove a member when a card is moved away from a list" only needs
+         trigger {activityType: 'moveCard', oldListName: '...'} and
+         action {actionType: 'removeMember', username: '...'}.
+      tags:
+        - Rules
+        - Rules
+      consumes:
+        - multipart/form-data
+        - application/json
+      parameters:
+        - name: title
+          in: formData
+          description: |
+            the rule title
+          type: string
+          required: true
+        - name: trigger
+          in: formData
+          description: |
+            the trigger document (must include activityType)
+          type: string
+          format: json
+          required: true
+        - name: action
+          in: formData
+          description: |
+            the action document (must include actionType)
+          type: string
+          format: json
+          required: true
+        - name: board
+          in: path
+          description: |
+            the board ID
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: object
+            properties:
+              _id:
+                type: string
+              triggerId:
+                type: string
+              actionId:
+                type: string
+  /api/boards/{board}/rules/{rule}:
+    get:
+      operationId: get_board_rule
+      summary: Get a single automation rule
+      tags:
+        - Rules
+        - Rules
+      parameters:
+        - name: board
+          in: path
+          description: |
+            the board ID
+          type: string
+          required: true
+        - name: rule
+          in: path
+          description: |
+            the rule ID
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: object
+            properties:
+              _id:
+                type: string
+              title:
+                type: string
+              trigger:
+                type: object
+              action:
+                type: object
+    put:
+      operationId: edit_board_rule
+      summary: Edit an automation rule
+      description: |
+        Any of title, enabled, trigger and action may be supplied; the trigger
+         and action documents are replaced ($set) when present. A supplied trigger
+         that includes an activityType gets its missing matching fields defaulted
+         to the '*' wildcard, like on creation.
+      tags:
+        - Rules
+        - Rules
+      consumes:
+        - multipart/form-data
+        - application/json
+      parameters:
+        - name: board
+          in: path
+          description: |
+            the board ID
+          type: string
+          required: true
+        - name: rule
+          in: path
+          description: |
+            the rule ID
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: object
+            properties:
+              _id:
+                type: string
+    delete:
+      operationId: delete_board_rule
+      summary: Remove an automation rule (and its trigger and action)
+      tags:
+        - Rules
+        - Rules
+      parameters:
+        - name: board
+          in: path
+          description: |
+            the board ID
+          type: string
+          required: true
+        - name: rule
+          in: path
+          description: |
+            the rule ID
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: object
+            properties:
+              _id:
+                type: string
   /api/boards/{board}/swimlanes:
     get:
       operationId: get_board_swimlanes
@@ -2471,6 +4193,90 @@ paths:
         '200':
           description: |-
             200 response
+  /api/boards/import:
+    post:
+      operationId: import_board
+      summary: Import a whole board (with its lists, cards, swimlanes, custom fields  and automation rules) from a WeKan board export
+      description: |
+        Accepts a WeKan board export JSON (the body returned by
+         `GET /api/boards/:boardId/export`) and recreates the board — including its
+         **rules / triggers / actions (workflows)** and other data — in the
+         authenticated user's account. Combined with the export endpoint, this allows
+         migrating all boards (and their workflows) from another WeKan instance over the
+         REST API: list the remote boards, export each, then POST each here. An optional
+         `membersMapping` ({ sourceUserId: localUserId }) maps members; unmapped members
+         are simply not added.
+      tags:
+        - Boards
+        - Boards
+      consumes:
+        - multipart/form-data
+        - application/json
+      parameters:
+        - name: board
+          in: formData
+          description: |
+            the WeKan board export object
+          type: string
+          format: json
+          required: true
+        - name: membersMapping
+          in: formData
+          description: |
+            map of source user id -> local user id
+          type: string
+          format: json
+          required: false
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: object
+            properties:
+              _id:
+                type: string
+  /api/boards/import/{source}:
+    post:
+      operationId: import_board_from
+      summary: Import a board from another tool's export
+      description: |
+        Generalized import: `:source` is one of `trello`, `wekan`, `csv`,
+         `jira`, `kanboard`, `excel`, `deck` (NextCloud Deck), `openproject`, `github`,
+         `gitlab`, `gitea`, `forgejo`, `asana`, `zenkit`. The request body is that
+         tool's export JSON (sent directly, or wrapped as `{ "board": <export> }`);
+         an optional `membersMapping` maps members. Reuses the same import engine as
+         the UI.
+      tags:
+        - Boards
+        - Boards
+      consumes:
+        - multipart/form-data
+        - application/json
+      parameters:
+        - name: source
+          in: path
+          description: |
+            the import source
+          type: string
+          required: true
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            type: object
+            properties:
+              _id:
+                type: string
   /api/boards_count:
     get:
       operationId: get_boards_count
@@ -2512,6 +4318,11 @@ paths:
         - multipart/form-data
         - application/json
       parameters:
+        - name: reason
+          in: formData
+          description: the reason value
+          type: string
+          required: true
         - name: user
           in: path
           description: the user value
@@ -2552,6 +4363,73 @@ paths:
         '200':
           description: |-
             200 response
+  /api/import/zip:
+    post:
+      operationId: importZip
+      summary: Import a .zip export - the document and its attachment files.
+      description: |
+        POST the .zip as the request body. Takes the same `fields`,
+         `swimlaneId`, `listId`, `cardId` and `checklistId` parameters as the
+         exports: with one of those ids it imports beside that thing, without one it
+         imports the whole document into the board named by `boardId`.
+      tags:
+        - Boards
+      consumes:
+        - multipart/form-data
+        - application/json
+      parameters:
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+  /api/settings:
+    get:
+      operationId: get_global_settings
+      summary: Get the global Admin Panel settings
+      description: |
+        Only the global admin can call this. SMTP/mail-server
+         credentials are never returned.
+      tags:
+        - Settings
+        - Settings
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            $ref: "#/definitions/Settings"
+    put:
+      operationId: update_global_settings
+      summary: Update the global Admin Panel settings
+      description: |
+        Only the global admin can call this. The request body is an
+         object whose keys are settings fields to update (see get_global_settings for
+         the list). Unknown keys and `mailServer` are ignored.
+      tags:
+        - Settings
+        - Settings
+      consumes:
+        - multipart/form-data
+        - application/json
+      parameters:
+      produces:
+        - application/json
+      security:
+          - UserSecurity: []
+      responses:
+        '200':
+          description: |-
+            200 response
+          schema:
+            $ref: "#/definitions/Settings"
   /api/user:
     get:
       operationId: get_user
@@ -2599,21 +4477,6 @@ paths:
         - multipart/form-data
         - application/json
       parameters:
-        - name: username
-          in: formData
-          description: the username value
-          type: string
-          required: true
-        - name: email
-          in: formData
-          description: the email value
-          type: string
-          required: true
-        - name: password
-          in: formData
-          description: the password value
-          type: string
-          required: true
       produces:
         - application/json
       security:
@@ -2669,12 +4532,17 @@ paths:
             200 response
     delete:
       operationId: delete_user
+      summary: Delete a user and confirm that one account was removed
+      description: |
+        Global administrators receive the deleted id; a missing id
+         returns HTTP 404 without reporting a deletion.
       tags:
         - Users
       parameters:
         - name: user
           in: path
-          description: the user value
+          description: |
+            the id of the user to delete
           type: string
           required: true
       produces:
@@ -2685,6 +4553,19 @@ paths:
         '200':
           description: |-
             200 response
+          schema:
+            type: object
+            properties:
+              _id:
+                type: string
+        '404':
+          description: |-
+            No user matched the requested id.
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
   /api/users/{user}/boards:
     get:
       operationId: get_user_boards
@@ -2791,6 +4672,89 @@ paths:
           description: Card or board not found
         '413':
           description: Attachment exceeds the API upload limit
+  /api/attachment/upload-background:
+    post:
+      operationId: upload_board_background
+      summary: Upload a board background image
+      description: |
+        Upload an image and set it as the board's active background. The file
+        content is sent base64-encoded in the JSON body and stored using the
+        current Admin Panel / Attachments / Default Storage backend (the same
+        storage used by card attachment uploads). Board-admin is required.
+      consumes:
+        - application/json
+      produces:
+        - application/json
+      tags:
+        - Attachments
+      security:
+        - UserSecurity: []
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            type: object
+            required:
+              - boardId
+              - fileData
+              - fileName
+            properties:
+              boardId:
+                type: string
+                description: ID of the board
+              fileName:
+                type: string
+                description: Name to store the image under
+              fileType:
+                type: string
+                description: MIME type of the image (optional, defaults to image/png)
+              fileData:
+                type: string
+                description: Base64-encoded image contents
+      responses:
+        '200':
+          description: Background uploaded and set as the board background
+        '400':
+          description: Missing or invalid parameters
+        '401':
+          description: Missing or invalid authentication
+        '403':
+          description: Uploads disabled or caller is not a board admin
+        '404':
+          description: Board not found
+        '413':
+          description: Background exceeds the API upload limit
+  /api/attachment/download-background/{boardId}:
+    get:
+      operationId: download_board_background
+      summary: Download the board's current background image as base64
+      description: |
+        Returns the board's active background image metadata together with the
+        image bytes base64-encoded in `base64Data`. Requires board membership.
+      produces:
+        - application/json
+      tags:
+        - Attachments
+      security:
+        - UserSecurity: []
+      parameters:
+        - name: boardId
+          in: path
+          required: true
+          type: string
+          description: ID of the board
+      responses:
+        '200':
+          description: Background image returned
+        '401':
+          description: Missing or invalid authentication
+        '403':
+          description: Downloads disabled or caller is not a board member
+        '404':
+          description: Board has no background, or board not found
+        '413':
+          description: Background exceeds the API download limit
   /api/attachment/download/{attachmentId}:
     get:
       operationId: download_attachment
@@ -3116,11 +5080,218 @@ paths:
           description: Not a member of the attachment's board
         '404':
           description: Attachment not found
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # iCalendar (.ics) import (server/methods/icsImport.js)
+  #
+  # Registered with `WebApp.handlers.post(...)` in server/methods/ which is not
+  # one of the directories scanned by openapi/generate_openapi.py, so it is
+  # documented here by hand. Keep in sync with server/methods/icsImport.js.
+  # See WeKan issue #6323. Import-only; two-way calendar sync is not provided.
+  # ───────────────────────────────────────────────────────────────────────────
+  /api/boards/{boardId}/swimlanes/{swimlaneId}/lists/{listId}/ics:
+    post:
+      operationId: import_ics
+      summary: Import an iCalendar (.ics) file into a board as cards
+      description: |
+        Parses the supplied iCalendar text and creates one card per VEVENT on the
+        given board / list / swimlane, populating each card's `startAt` (DTSTART)
+        and `dueAt` (DTEND, or DTSTART when there is no DTEND) so the imported
+        events appear on the Calendar and Gantt views.
+
+        Permissions: requires a valid auth token and write access to the board
+        (read-only / comment-only / worker members are rejected; site admins are
+        allowed).
+      consumes:
+        - application/json
+      produces:
+        - application/json
+      tags:
+        - Cards
+      security:
+        - UserSecurity: []
+      parameters:
+        - name: boardId
+          in: path
+          required: true
+          type: string
+          description: the board ID
+        - name: swimlaneId
+          in: path
+          required: true
+          type: string
+          description: the swimlane ID the cards are created in
+        - name: listId
+          in: path
+          required: true
+          type: string
+          description: the list ID the cards are created in
+        - name: body
+          in: body
+          required: true
+          schema:
+            type: object
+            required:
+              - ics
+            properties:
+              ics:
+                type: string
+                description: the raw .ics (iCalendar) file contents
+      responses:
+        '200':
+          description: |
+            Import succeeded. Returns the number of cards created and their ids,
+            e.g. `{ "created": 3, "cardIds": ["abc", "def", "ghi"] }`.
+        '400':
+          description: Missing or empty `ics` body field
+        '401':
+          description: Missing or invalid authentication, or no write access to the board
+        '404':
+          description: Board, list or swimlane not found
 definitions:
+  AttachmentStorageSettings:
+    type: object
+    properties:
+      defaultStorage:
+        type: string
+        enum:
+          - fs
+          - gridfs
+          - s3
+          - azure
+          - gcs
+          - webdav
+      storageConfig:
+        $ref: "#/definitions/AttachmentStorageSettingsStorageconfig"
+        x-nullable: true
+      uploadSettings:
+        $ref: "#/definitions/AttachmentStorageSettingsUploadsettings"
+        x-nullable: true
+      limitSettings:
+        $ref: "#/definitions/AttachmentStorageSettingsLimitsettings"
+        x-nullable: true
+      migrationSettings:
+        $ref: "#/definitions/AttachmentStorageSettingsMigrationsettings"
+        x-nullable: true
+      createdAt:
+        type: string
+      updatedAt:
+        type: string
+      createdBy:
+        type: string
+        x-nullable: true
+      updatedBy:
+        type: string
+        x-nullable: true
+    required:
+      - defaultStorage
+      - createdAt
+      - updatedAt
+  AttachmentStorageSettingsLimitsettings:
+    type: object
+    properties:
+      attachmentsUploadMaxBytes:
+        type: number
+      attachmentsUploadBlocked:
+        type: boolean
+      avatarsUploadBlocked:
+        type: boolean
+      attachmentsDownloadMaxBytes:
+        type: number
+      attachmentsDownloadBlocked:
+        type: boolean
+      apiUploadMaxBytes:
+        type: number
+      apiUploadBlocked:
+        type: boolean
+      apiDownloadMaxBytes:
+        type: number
+      apiDownloadBlocked:
+        type: boolean
+  AttachmentStorageSettingsMigrationsettings:
+    type: object
+    properties:
+      autoMigrate:
+        type: boolean
+      batchSize:
+        type: number
+      delayMs:
+        type: number
+      cpuThreshold:
+        type: number
+    required:
+      - autoMigrate
+      - batchSize
+      - delayMs
+      - cpuThreshold
+  AttachmentStorageSettingsStorageconfig:
+    type: object
+    properties:
+      filesystem:
+        $ref: "#/definitions/AttachmentStorageSettingsStorageconfigFilesystem"
+      gridfs:
+        $ref: "#/definitions/AttachmentStorageSettingsStorageconfigGridfs"
+      s3:
+        type: object
+      azure:
+        type: object
+      gcs:
+        type: object
+      webdav:
+        type: object
+  AttachmentStorageSettingsStorageconfigFilesystem:
+    type: object
+    properties:
+      enabled:
+        type: boolean
+      read:
+        type: boolean
+      write:
+        type: boolean
+      path:
+        type: string
+    required:
+      - enabled
+      - read
+      - write
+  AttachmentStorageSettingsStorageconfigGridfs:
+    type: object
+    properties:
+      enabled:
+        type: boolean
+      read:
+        type: boolean
+      write:
+        type: boolean
+    required:
+      - enabled
+      - read
+      - write
+  AttachmentStorageSettingsUploadsettings:
+    type: object
+    properties:
+      maxFileSize:
+        type: number
+      allowedMimeTypes:
+        type: array
+        items:
+          type: string
+          x-nullable: true
   Boards:
     type: object
     description:  This is a Board.
     properties:
+      scrum:
+        type: object
+        x-nullable: true
+      scrumRevision:
+        type: number
+        x-nullable: true
+      scrumImportLosses:
+        type: array
+        items:
+          $ref: "#/definitions/BoardsScrumimportlosses"
+        x-nullable: true
       title:
         description: |
            The title of the board
@@ -3164,13 +5335,28 @@ definitions:
         type: array
         items:
           $ref: "#/definitions/BoardsMembers"
+      key:
+        description: |
+           The board's key (#2449, #2450): 2-10 capital letters and digits,
+           unique in the instance, so a card's number shows as KEY-7. Given when
+           the board is created (server/boardKeys.js); a board admin may change it.
+        type: string
+        x-nullable: true
+      allowsInstanceEditing:
+        description: |
+           Every signed-in user may edit this open board (#4575), where Admin
+           Panel / Settings / Visibility allows it. Their first edit makes them a
+           Normal member.
+        type: boolean
+        x-nullable: true
       permission:
         description: |
            visibility of the board
         type: string
         enum:
-          - public
           - private
+          - instance
+          - public
       orgs:
         description: |
            the list of organizations that a board belongs to
@@ -3185,6 +5371,21 @@ definitions:
         items:
           $ref: "#/definitions/BoardsTeams"
         x-nullable: true
+      domains:
+        description: |
+           #5850: the list of email-address domains a board is shared with. Every
+           user whose primary email is in one of these domains gets board access.
+        type: array
+        items:
+          $ref: "#/definitions/BoardsDomains"
+        x-nullable: true
+      importRunId:
+        description: |
+           The import run that created this board (server/lib/importRuns.js).
+           An interrupted import is discarded only from the board that carries
+           its run's id.
+        type: string
+        x-nullable: true
       importUsernames:
         description: |
            Usernames of imported (e.g. Trello) board members that were not mapped
@@ -3196,11 +5397,36 @@ definitions:
           type: string
           x-nullable: true
         x-nullable: true
+      announcement:
+        description: |
+           #1566: the board's own announcement - { enabled, body, updatedAt } -
+           written by a board admin, shown to every member until dismissed
+           (models/lib/boardAnnouncement.js).
+        $ref: "#/definitions/BoardsAnnouncement"
+        x-nullable: true
       color:
         description: |
            The color of the board.
         type: string
         enum:
+      wipLimitGroups:
+        description: |
+           List of board-level WIP limit groups.
+        type: array
+        items:
+          $ref: "#/definitions/BoardsWiplimitgroups"
+        x-nullable: true
+      customThemeColors:
+        description: |
+           Optional custom colors for the "flat" (1 color) and "clear" (2 colors,
+           a color slide) theme categories — see docs/Theme/Theme.md. Each entry is a
+           #rrggbb hex validated on the server; dark/special themes never store these.
+           Absent = the named `color` theme's stock colors.
+        type: array
+        items:
+          type: string
+          x-nullable: true
+        x-nullable: true
       backgroundImageURL:
         description: |
            The background image URL of the board.
@@ -3213,10 +5439,48 @@ definitions:
            background is an uploaded/imported image rather than an external URL.
         type: string
         x-nullable: true
+      syncEffectsEnabled:
+        type: boolean
+        x-nullable: true
       allowsCardCounterList:
         description: |
            Show card counter per list
         type: boolean
+      askForMoveReason:
+        type: boolean
+      showEmptyCardFields:
+        type: boolean
+      cardAging:
+        description: |
+           #3984: Visually fade cards that have not been touched for a while
+           (Trello-style "card aging"), based on the card's dateLastActivity.
+        type: boolean
+      showDependencies:
+        description: |
+           #3392: PI Program Board "Red Strings". No longer read since #6732:
+           showing dependencies is each user's own choice
+           (profile.showBoardDependencies / profile.showMyDependencies), so one
+           user turning them on no longer turns them on for everybody. Kept so
+           existing boards and imports still validate.
+        type: boolean
+      mapImageAttachmentId:
+        description: |
+           #3256: the image the Map board view draws the cards on - a board-level
+           attachment (meta.source 'board-map'). Unset = no map yet.
+        type: string
+        x-nullable: true
+      autoArchiveInactiveDays:
+        description: |
+           Nextcloud Deck-style auto-archive: archive cards with no activity for
+           this many days (models/lib/autoArchive.js). Unset means off.
+        $ref: "#/definitions/BoardsAutoarchiveinactivedays"
+        x-nullable: true
+      cardAgingDays1:
+        type: number
+      cardAgingDays2:
+        type: number
+      cardAgingDays3:
+        type: number
       allowsBoardMemberList:
         description: |
            Show board member list
@@ -3241,6 +5505,20 @@ definitions:
            The default List ID assigned to subtasks.
         type: string
         x-nullable: true
+      rulesVisibleToMembers:
+        description: |
+           #2217: board members may read this board's Rules, when Admin Panel /
+           Settings / Visibility allows it (models/lib/rulesReadOnly.js). Set by
+           a board admin; grants no right to change a rule.
+        type: boolean
+        x-nullable: true
+      subtasksDefaultSwimlaneId:
+        description: |
+           #1953: the swimlane new subtasks land in on the deposit board
+           (models/lib/subtaskLandingSwimlane.js). Unset: the swimlane with the
+           parent card's swimlane title, else the default swimlane.
+        type: string
+        x-nullable: true
       dateSettingsDefaultBoardId:
         type: string
         x-nullable: true
@@ -3263,6 +5541,26 @@ definitions:
         description: |
            Does the board allows attachments on minicard?
         type: boolean
+      allowsSwimlaneDragging:
+        type: boolean
+      allowsListDragging:
+        type: boolean
+      allowsCardDragging:
+        type: boolean
+      allowsChecklistDragging:
+        type: boolean
+      allowsChecklistItemDragging:
+        type: boolean
+      allowsSubtaskDragging:
+        type: boolean
+      allowsMinicardCollapse:
+        type: boolean
+      labelsAboveTitleOnMinicard:
+        type: boolean
+      allowsChecklistDueDate:
+        type: boolean
+      allowsChecklistTitle:
+        type: boolean
       allowsChecklists:
         description: |
            Does the board allows checklists?
@@ -3271,9 +5569,27 @@ definitions:
         description: |
            Does the board allows checklists on minicard?
         type: boolean
+      allowsCustomFields:
+        type: boolean
+        x-nullable: true
+      allowsCustomFieldsOnMinicard:
+        type: boolean
+        x-nullable: true
+      allowsChecklistCountBadgeOnMinicard:
+        description: |
+           Does the board show the compact checklist item-count badge
+           (finished/total, e.g. "0/156") on minicards? Issue #6431: opt-in and
+           OFF by default so the (potentially expensive) checklist counting only
+           runs when this is enabled in Card Settings > Show on Minicard.
+        type: boolean
       allowsComments:
         description: |
            Does the board allows comments?
+        type: boolean
+      allowsCommentsOnMinicard:
+        description: |
+           #4285: show a card's comments directly on the minicard? Opt-in and
+           OFF by default so existing boards are unaffected.
         type: boolean
       allowsDescriptionTitle:
         description: |
@@ -3291,13 +5607,87 @@ definitions:
         description: |
            Does the board allows description text on minicard?
         type: boolean
+      cardFieldOrder:
+        description: |
+           The order of the opened card's fields (models/lib/cardFieldOrder.js keys)
+        type: array
+        items:
+          type: string
+          x-nullable: true
+        x-nullable: true
+      minicardFieldOrder:
+        description: |
+           The order of the minicard's fields (models/lib/cardFieldOrder.js keys)
+        type: array
+        items:
+          type: string
+          x-nullable: true
+        x-nullable: true
+      cardSettingsSectionOrder:
+        description: |
+           The order of the Card Settings sections (models/lib/cardSettingsSections.js ids)
+        type: array
+        items:
+          type: string
+          x-nullable: true
+        x-nullable: true
+      minicardSettingsSectionOrder:
+        description: |
+           The order of the Card Settings sections on the minicard (models/lib/cardSettingsSections.js ids)
+        type: array
+        items:
+          type: string
+          x-nullable: true
+        x-nullable: true
+      cardSettingsHiddenOnCard:
+        description: |
+           The Card Settings sections (models/lib/cardSettingsSections.js ids) not shown on the opened card
+        type: array
+        items:
+          type: string
+          x-nullable: true
+        x-nullable: true
+      cardSettingsHiddenOnMinicard:
+        description: |
+           The Card Settings sections (models/lib/cardSettingsSections.js ids) not shown on the minicard
+        type: array
+        items:
+          type: string
+          x-nullable: true
+        x-nullable: true
+      cardFieldsAlwaysShown:
+        description: |
+           The opened card's fields shown on every card, even when empty
+        type: array
+        items:
+          type: string
+          x-nullable: true
+        x-nullable: true
       allowsCoverAttachmentOnMinicard:
         description: |
            Does the board allows cover attachment on minicard?
         type: boolean
+      allowsCoverAttachmentOnCard:
+        description: |
+           Does the board show the cover image on the opened card? ON by default:
+           a card shows its cover when it has one (docs/Features/Cards/Card-Fields.md;
+           server/lib/schemaUpgradeSteps.js cover-on-card-on turned it on, once, on
+           the boards created while it was opt-in).
+        type: boolean
       allowsBadgeAttachmentOnMinicard:
         description: |
            Does the board allows badge attachment on minicard?
+        type: boolean
+      allowsAttachmentCountOnCard:
+        description: |
+           Does the board show the attachment count on the opened card? Opt-in,
+           OFF by default (new Card Settings option).
+        type: boolean
+      allowsChecklistCountBadgeOnCard:
+        description: |
+           Does the board show the checklist item-count total (finished/total)
+           above all checklists on the opened card? Opt-in, OFF by default so the
+           checklist counting only runs when enabled (new Card Settings option).
         type: boolean
       allowsCardSortingByNumberOnMinicard:
         description: |
@@ -3307,6 +5697,26 @@ definitions:
         description: |
            Does the board allows card numbers?
         type: boolean
+      notifyOverrideTray:
+        type: boolean
+        x-nullable: true
+      notifyOverrideEmail:
+        type: boolean
+        x-nullable: true
+      emailToCard:
+        type: object
+        x-nullable: true
+      notificationDelivery:
+        type: object
+        x-nullable: true
+      dueReminderDays:
+        type: array
+        items:
+          $ref: "#/definitions/BoardsDuereminderdays"
+        x-nullable: true
+      dueReminderWebhook:
+        type: boolean
+        x-nullable: true
       allowsCardNumberOnMinicard:
         description: |
            Does the board allows card numbers on minicard?
@@ -3331,6 +5741,16 @@ definitions:
         description: |
            Does the board allow creator?
         type: boolean
+      showLabelText:
+        description: |
+           #4256: does this board show label TEXT on its minicards (coloured
+           words), or only the coloured bars? Board Settings / Card ("Labels
+           text"). A user's own profile.showLabelTextOverride, when set, wins
+           over this on every board - see client/lib/minicardLabelText.js.
+           Defaults to true (text shown), the historical global default, so an
+           existing board with no value stored sees no behaviour change.
+        type: boolean
+        x-nullable: true
       allowsAssignee:
         description: |
            Does the board allows assignee?
@@ -3375,6 +5795,10 @@ definitions:
         description: |
            Does the board allow showing list names on all minicards?
         type: boolean
+      allowsSwimlaneNameOnMinicard:
+        description: |
+           Does the board allow showing the swimlane name on all minicards?
+        type: boolean
       allowsChecklistAtMinicard:
         description: |
            Does the board allow showing checklists on all minicards?
@@ -3383,10 +5807,299 @@ definitions:
         description: |
            Does the board allows received date?
         type: boolean
+      allowsSpentTime:
+        description: |
+           Does the board show the accumulated spent-time badge on the opened card?
+        type: boolean
+      allowsSpentTimeOnMinicard:
+        description: |
+           Does the board show the accumulated spent-time badge on the minicard?
+        type: boolean
+      allowsStickers:
+        description: |
+           Does the board show the Stickers section on the opened card?
+        type: boolean
+      allowsStickersOnMinicard:
+        description: |
+           Does the board show the stickers badge on the minicard?
+        type: boolean
+      allowsLocation:
+        description: |
+           Does the board show the Location section on the opened card?
+        type: boolean
+      allowsDependencies:
+        description: |
+           Does the board show the Dependencies section on the opened card?
+        type: boolean
+      allowsDependenciesOnMinicard:
+        description: |
+           Does the board show the dependencies badge on the minicard?
+        type: boolean
+      allowsFlowtime:
+        description: |
+           Does the board show the Flowtime timer on the opened card?
+        type: boolean
+      allowsPomodoro:
+        description: |
+           Does the board show the Pomodoro timer on the opened card?
+        type: boolean
+      allowsVote:
+        description: |
+           Does the board show a card's voting question and buttons on the opened card?
+        type: boolean
+      allowsVoteOnMinicard:
+        description: |
+           Does the board show the vote-count badge on the minicard?
+        type: boolean
+      allowsPoker:
+        description: |
+           Does the board show a card's Planning Poker on the opened card?
+        type: boolean
+      allowsPokerOnMinicard:
+        description: |
+           Does the board show the Planning Poker badge on the minicard?
+        type: boolean
+      allowsTextNotes:
+        description: |
+           Does the board show the Text Notes section on the opened card?
+        type: boolean
+      allowsCommentCountOnMinicard:
+        description: |
+           Does the board show the comment-count badge on the minicard?
+        type: boolean
+      allowsCardCollapse:
+        type: boolean
+      allowsChecklistTitleOnMinicard:
+        type: boolean
+      allowsLabelTextOnCard:
+        type: boolean
+      labelsAboveTitleOnCard:
+        type: boolean
+        x-nullable: true
+      allowsChecklistDueDateOnMinicard:
+        type: boolean
+        x-nullable: true
+      allowsLocationOnMinicard:
+        type: boolean
+        x-nullable: true
+      allowsSwimlaneNameOnCard:
+        type: boolean
+        x-nullable: true
+      allowsFlowtimeOnMinicard:
+        type: boolean
+        x-nullable: true
+      allowsPomodoroOnMinicard:
+        type: boolean
+        x-nullable: true
+      allowsAttachmentListOnMinicard:
+        type: boolean
+        x-nullable: true
+      allowsTextNotesOnMinicard:
+        type: boolean
+        x-nullable: true
+      allowsCommentCountOnCard:
+        type: boolean
+        x-nullable: true
+      allowsActivitiesOnMinicard:
+        type: boolean
+        x-nullable: true
+      allowsCardColorOnCard:
+        type: boolean
+      allowsCardColorOnMinicard:
+        type: boolean
+      allowsParentCardOnCard:
+        type: boolean
+      allowsParentCardOnMinicard:
+        type: boolean
+      allowsLinkedCardOnCard:
+        type: boolean
+      allowsLinkedCardOnMinicard:
+        type: boolean
+      allowsCardButtonsOnCard:
+        type: boolean
+      allowsDescriptionBadgeOnMinicard:
+        type: boolean
+      allowsUnreadCommentsOnMinicard:
+        type: boolean
+      allowsCardButtonsOnMinicard:
+        type: boolean
+        x-nullable: true
+      allowsDescriptionBadgeOnCard:
+        type: boolean
+        x-nullable: true
+      allowsUnreadCommentsOnCard:
+        type: boolean
+        x-nullable: true
+      allowsDueFromTitleOnCard:
+        type: boolean
+        x-nullable: true
+      allowsDueFromTitleOnMinicard:
+        type: boolean
+        x-nullable: true
+      allowsSimilarCardsOnCard:
+        type: boolean
+        x-nullable: true
+      allowsSimilarCardsOnMinicard:
+        type: boolean
+        x-nullable: true
+      allowsAtRiskOnCard:
+        type: boolean
+        x-nullable: true
+      allowsAtRiskOnMinicard:
+        type: boolean
+        x-nullable: true
+      allowsSuggestedMembersOnCard:
+        type: boolean
+        x-nullable: true
+      allowsForecastOnCard:
+        type: boolean
+        x-nullable: true
+      allowsForecastOnMinicard:
+        type: boolean
+        x-nullable: true
+      allowsChecklistFromDescriptionOnCard:
+        type: boolean
+        x-nullable: true
+      allowsActionItemsOnCard:
+        type: boolean
+        x-nullable: true
+      allowsWhiteboardOnCard:
+        type: boolean
+        x-nullable: true
+      allowsAttachmentPreviewsOnCard:
+        type: boolean
+        x-nullable: true
+      allowsAttachmentDetailsOnCard:
+        type: boolean
+        x-nullable: true
+      allowsIssueTypeOnMinicard:
+        description: |
+           Does the board show the work item type badge on the minicard? It was
+           shown on every board before it had a Board Settings / Card row, so a
+           missing value means shown.
+        type: boolean
+      restrictCommentEditing:
+        description: |
+           When true, board admins can NOT edit or delete comments authored by
+           other users (only the comment's author can). Default false keeps the
+           historical behaviour where board admins may moderate any comment.
+        type: boolean
+      allowsPersonalListWidth:
+        description: |
+           List-width scope for this board (#6409).
+           - false (default): list widths are SHARED — stored in `lists.width`,
+             the same layout for everyone; only members with write access may
+             change them.
+           - true: list widths are PERSONAL — each user keeps their own widths in
+             their profile (or localStorage when not logged in).
+        type: boolean
+      autoWidth:
+        description: |
+           Shared (per-board) auto-width for all lists (#6409). When true, lists
+           fit their content instead of using a fixed width. Used when the board
+           is in SHARED list-width mode (allowsPersonalListWidth = false); in
+           PERSONAL mode each user's own profile.autoWidthBoards value is used
+           instead.
+        type: boolean
+        x-nullable: true
+      stickyListHeaders:
+        description: |
+           #3847: when true, every list's header (title/WIP badge/hamburger)
+           stays pinned to the top of its own list while that list's cards
+           scroll underneath it, instead of scrolling out of view with them.
+           Board-wide rather than per-list - freezing one list's header while
+           its neighbours scrolled normally would look inconsistent - but the
+           toggle itself lives in the List hamburger/action menu
+           (listActionPopup in client/components/lists/listHeader.jade) for
+           discoverability, per the issue reporter's request.
+        type: boolean
+      listWidthResizeLocked:
+        description: |
+           #6680: when true, the list-width drag-resize handle between lists is
+           disabled for everyone on this board, so a viewer who is just
+           navigating cannot accidentally drag a list to a strange width.
+           Toggled from the top header's lock icon, beside the drag-handles
+           toggle. Independent of swimlaneHeightResizeLocked.
+        type: boolean
+        x-nullable: true
+      columnSets:
+        description: |
+           #211: named column sets over the same cards (models/lib/columnSets.js):
+           [{ _id, name, columns: [{ _id, title, color }] }].
+        type: array
+        items:
+          $ref: "#/definitions/BoardsColumnsets"
+        x-nullable: true
+      sharedListHeaders:
+        description: |
+           #2805: one shared list header row for all swimlanes - the first
+           swimlane's, sticky at the top while the board scrolls - instead of the
+           same headers repeated in every swimlane. A board view setting (Board
+           Settings / Swimlane), off by default.
+        type: boolean
+        x-nullable: true
+      swimlaneHeightResizeLocked:
+        description: |
+           #6680: when true, the swimlane-height drag-resize handle at the top
+           of each swimlane is disabled for everyone on this board. Same toggle
+           pattern and reasoning as listWidthResizeLocked, independent of it.
+        type: boolean
+        x-nullable: true
+      boardViewSettings:
+        description: |
+           Per view: { '<board-view-key>': { showOnPublic: Boolean, showOnPrivate: Boolean } }
+        type: object
+        x-nullable: true
+      defaultPublicBoardView:
+        description: |
+           The Board View a PUBLIC board opens in when the viewer has no stored
+           choice (or a choice this board hides). Always shown on public.
+        type: string
+        x-nullable: true
+      defaultPrivateBoardView:
+        description: |
+           The Board View a PRIVATE board opens in when the viewer has no stored
+           choice (or a choice this board hides). Always shown on private.
+        type: string
+        x-nullable: true
+      boardViewOrder:
+        description: |
+           The Board View menu's order: board-view keys, first to last
+        type: array
+        items:
+          type: string
+          x-nullable: true
+        x-nullable: true
+      sameWidthForAllLists:
+        description: |
+           #6680: the BOARD-WIDE equivalent of each user's own "same width for
+           all lists" (fixed width) choice in the Set Width popup
+           (profile.fixedListWidthBoards) - an admin-set toggle, in the top
+           header between the two resize-lock icons, that forces every list on
+           this board to the single sameWidthForAllListsValue for EVERY viewer,
+           overriding their personal fixed-width choice while it is on.
+        type: boolean
+        x-nullable: true
+      sameWidthForAllListsValue:
+        description: |
+           The single width (px) every list uses while sameWidthForAllLists is
+           on. Any board member with write access may change it by dragging a
+           list's resize handle (server/permissions/boards.js allows an update
+           touching only this field); turning the mode itself on/off is
+           admin-only, like the rest of this board's settings.
+        type: number
+        x-nullable: true
       allowsReceivedDateOnMinicard:
         description: |
            Does the board allows received date on minicard?
         type: boolean
+      dateFormatOverride:
+        type: boolean
+        x-nullable: true
+      dateFormat:
+        type: string
+        enum:
+        x-nullable: true
       allowsStartDate:
         description: |
            Does the board allows start date?
@@ -3410,6 +6123,17 @@ definitions:
       allowsDueDateOnMinicard:
         description: |
            Does the board allows due date on minicard?
+        type: boolean
+      allowsDueComplete:
+        description: |
+           Does the board show the "Mark as complete" toggle on cards?
+           Issue #6381: opt-in, hidden by default.
+        type: boolean
+      allowsDueCompleteOnMinicard:
+        description: |
+           Does the board show the "Mark as complete" toggle on minicards?
+           Separate from the card-details toggle (allowsDueComplete): opt-in,
+           hidden by default so it is not shown on minicards unless enabled.
         type: boolean
       presentParentTask:
         description: |
@@ -3483,21 +6207,43 @@ definitions:
       - permission
       - color
       - allowsCardCounterList
+      - askForMoveReason
+      - showEmptyCardFields
+      - cardAging
+      - showDependencies
+      - cardAgingDays1
+      - cardAgingDays2
+      - cardAgingDays3
       - allowsBoardMemberList
       - migrationVersion
       - allowsSubtasks
       - allowsSubtasksOnMinicard
       - allowsAttachments
       - allowsAttachmentsOnMinicard
+      - allowsSwimlaneDragging
+      - allowsListDragging
+      - allowsCardDragging
+      - allowsChecklistDragging
+      - allowsChecklistItemDragging
+      - allowsSubtaskDragging
+      - allowsMinicardCollapse
+      - labelsAboveTitleOnMinicard
+      - allowsChecklistDueDate
+      - allowsChecklistTitle
       - allowsChecklists
       - allowsChecklistsOnMinicard
+      - allowsChecklistCountBadgeOnMinicard
       - allowsComments
+      - allowsCommentsOnMinicard
       - allowsDescriptionTitle
       - allowsDescriptionTitleOnMinicard
       - allowsDescriptionText
       - allowsDescriptionTextOnMinicard
       - allowsCoverAttachmentOnMinicard
+      - allowsCoverAttachmentOnCard
       - allowsBadgeAttachmentOnMinicard
+      - allowsAttachmentCountOnCard
+      - allowsChecklistCountBadgeOnCard
       - allowsCardSortingByNumberOnMinicard
       - allowsCardNumber
       - allowsCardNumberOnMinicard
@@ -3517,8 +6263,40 @@ definitions:
       - allowsAssignedBy
       - allowsAssignedByOnMinicard
       - allowsShowListsOnMinicard
+      - allowsSwimlaneNameOnMinicard
       - allowsChecklistAtMinicard
       - allowsReceivedDate
+      - allowsSpentTime
+      - allowsSpentTimeOnMinicard
+      - allowsStickers
+      - allowsStickersOnMinicard
+      - allowsLocation
+      - allowsDependencies
+      - allowsDependenciesOnMinicard
+      - allowsFlowtime
+      - allowsPomodoro
+      - allowsVote
+      - allowsVoteOnMinicard
+      - allowsPoker
+      - allowsPokerOnMinicard
+      - allowsTextNotes
+      - allowsCommentCountOnMinicard
+      - allowsCardCollapse
+      - allowsChecklistTitleOnMinicard
+      - allowsLabelTextOnCard
+      - allowsCardColorOnCard
+      - allowsCardColorOnMinicard
+      - allowsParentCardOnCard
+      - allowsParentCardOnMinicard
+      - allowsLinkedCardOnCard
+      - allowsLinkedCardOnMinicard
+      - allowsCardButtonsOnCard
+      - allowsDescriptionBadgeOnMinicard
+      - allowsUnreadCommentsOnMinicard
+      - allowsIssueTypeOnMinicard
+      - restrictCommentEditing
+      - allowsPersonalListWidth
+      - stickyListHeaders
       - allowsReceivedDateOnMinicard
       - allowsStartDate
       - allowsStartDateOnMinicard
@@ -3526,9 +6304,22 @@ definitions:
       - allowsEndDateOnMinicard
       - allowsDueDate
       - allowsDueDateOnMinicard
+      - allowsDueComplete
+      - allowsDueCompleteOnMinicard
       - type
       - sort
       - showActivities
+  BoardsAnnouncement:
+    type: object
+    properties:
+      enabled:
+        type: boolean
+      body:
+        type: string
+      updatedAt:
+        type: string
+  BoardsScrumimportlosses:
+    type: object
   BoardsLabels:
     type: object
     properties:
@@ -3549,8 +6340,23 @@ definitions:
            `silver`, `peachpuff`, `crimson`, `plum`, `darkgreen`,
            `slateblue`, `magenta`, `gold`, `navy`, `gray`,
            `saddlebrown`, `paleturquoise`, `mistyrose`, `indigo`
+
+           Since #5514 a label color may also be a custom '#rrggbb' hex chosen
+           from the color wheel, in addition to the named palette colors above.
         type: string
-        enum:
+      sharedLabelId:
+        description: |
+           This label is the board's copy of a shared label (#2761, #4698,
+           models/lib/sharedLabels.js): its name and colour follow the shared one.
+        type: string
+      dueAt:
+        description: |
+           Optional due date carried by the label itself (#2802), e.g. a
+           "milestone" label such as "Sprint 1" that expires on a given date.
+           Unset by default so existing labels/boards are unaffected. Filtering
+           cards by this label is the existing label filter; no separate
+           Milestone object or filter UI is added for this.
+        type: string
     required:
       - _id
       - color
@@ -3597,6 +6403,20 @@ definitions:
         description: |
            Is the member only allowed to read assigned cards (no comments, no editing)
         type: boolean
+      grantedBy:
+        description: |
+           The teams and organizations this membership came through (#4178),
+           e.g. ['team:<id>']. Absent: a direct membership. Leaving the last of
+           them deactivates it (models/lib/groupBoardMembership.js).
+        type: array
+        items:
+          type: string
+          x-nullable: true
+      customRoleId:
+        description: |
+           A custom board role (#3022, models/customBoardRoles.js). The flags above
+           then carry the strongest built-in role that grants nothing more.
+        type: string
     required:
       - userId
       - isAdmin
@@ -3639,7 +6459,56 @@ definitions:
       - teamId
       - teamDisplayName
       - isActive
-  BoardsImportusernames:
+  BoardsDomains:
+    type: object
+    properties:
+      domain:
+        description: |
+           The email-address domain, e.g. example.com
+        type: string
+      isActive:
+        description: |
+           Is the domain share active?
+        type: boolean
+    required:
+      - domain
+      - isActive
+  BoardsWiplimitgroups:
+    type: object
+    properties:
+      _id:
+        description: |
+           Unique id of a WIP limit group.
+        type: string
+      name:
+        description: |
+           Optional display name for the group (e.g. "Middle columns").
+        type: string
+      listIds:
+        description: |
+           The _ids of the board's lists that share this group's limit. At least
+           two - a "group" of one is just that list's own individual wipLimit.
+        type: array
+        items:
+          type: string
+      limit:
+        description: |
+           The combined card-count limit shared by every list in listIds.
+        type: number
+      enabled:
+        description: |
+           Whether this group's limit is currently in effect. Kept (rather than
+           deleting the group) so a temporarily-disabled group's list selection
+           and limit are not lost.
+        type: boolean
+    required:
+      - _id
+      - listIds
+      - limit
+      - enabled
+  BoardsDuereminderdays:
+    type: object
+  BoardsColumnsets:
     type: object
   CardComments:
     type: object
@@ -3657,12 +6526,30 @@ definitions:
         description: |
            the text of the comment
         type: string
+      webhookResponsePending:
+        type: object
+        x-nullable: true
+      webhookResponseRevision:
+        type: string
+        x-nullable: true
+      parentId:
+        description: |
+           the _id of the comment this comment is a reply to (threaded replies).
+           Optional: top-level comments have no parentId.
+        type: string
+        x-nullable: true
       createdAt:
         description: |
            when was the comment created
         type: string
       modifiedAt:
         type: string
+      syncCommentId:
+        description: |
+           List sync: the tracker's own id of the comment this one mirrors
+           (models/lib/listSyncIssueDetails.js). Unset on comments written in WeKan.
+        type: string
+        x-nullable: true
       userId:
         description: |
            the author ID of the comment
@@ -3677,6 +6564,12 @@ definitions:
   Cards:
     type: object
     properties:
+      scrum:
+        type: object
+        x-nullable: true
+      scrumRevision:
+        type: number
+        x-nullable: true
       title:
         description: |
            the title of the card
@@ -3691,10 +6584,29 @@ definitions:
            latest archiving date
         type: string
         x-nullable: true
+      deletedAt:
+        type: string
+        x-nullable: true
+      deletedBy:
+        type: string
+        x-nullable: true
+      deleteBatchId:
+        type: string
+        x-nullable: true
       parentId:
         description: |
-           ID of the parent card
+           ID of the parent card - the PRIMARY parent, always parentIds[0]
+           (#3626, models/lib/cardParents.js).
         type: string
+        x-nullable: true
+      parentIds:
+        description: |
+           #3626: every parent of the card, primary first. A card written before
+           this has only parentId, which is then its one parent.
+        type: array
+        items:
+          type: string
+          x-nullable: true
         x-nullable: true
       listId:
         description: |
@@ -3710,14 +6622,48 @@ definitions:
            Board ID of the card
         type: string
         x-nullable: true
+      mapX:
+        description: |
+           #3256: the card's place on the board's Map view, as a percentage of
+           the map image's width (models/lib/boardMap.js). Unset = not on the map.
+        type: number
+        x-nullable: true
+      mapY:
+        type: number
+        x-nullable: true
       coverId:
         description: |
            Cover ID of the card
         type: string
         x-nullable: true
-      color:
+      drawings:
+        description: |
+           #1178: drawings on this card, editable later (models/lib/cardDrawing.js):
+           [{ _id, strokes, width, height, pngAttachmentId, updatedAt }].
+        type: array
+        items:
+          $ref: "#/definitions/CardsDrawings"
+        x-nullable: true
+      columnSetValues:
+        description: |
+           #211: which column this card is in for each of its board's column
+           sets, { setId: columnId } (models/lib/columnSets.js).
+        type: object
+        x-nullable: true
+      cardKind:
+        description: |
+           #2012: 'story' or 'task'; unset is an ordinary card
+           (models/lib/cardKinds.js).
         type: string
         enum:
+          - story
+          - task
+        x-nullable: true
+      color:
+        type: string
+        x-nullable: true
+      listEnteredAt:
+        type: string
         x-nullable: true
       createdAt:
         description: |
@@ -3732,6 +6678,40 @@ definitions:
         items:
           $ref: "#/definitions/CardsCustomfields"
         x-nullable: true
+      customFieldLinks:
+        description: |
+           #5681: the cards this card's custom fields are linked to, by field
+           name (models/lib/customFieldLinks.js). Written only by the server
+           methods in server/models/customFieldLinks.js, on both cards at once.
+        type: array
+        items:
+          $ref: "#/definitions/CardsCustomfieldlinks"
+        x-nullable: true
+      recurrenceInterval:
+        description: |
+           Kanboard-style whole-card recurrence: automatically create a fresh copy
+           of this card in the same list on a recurring schedule (e.g. a weekly
+           status-report card, a monthly invoice card), so the next occurrence
+           does not have to be created by hand every time. 'none' (default) never
+           recurs. Reuses the exact same due-date mechanism as a checklist's
+           automatic reset (models/lib/checklistResetSchedule.js) - see
+           models/lib/cardRecurrenceSchedule.js and
+           server/cardRecurrenceSchedule.js for the due-date calculation and the
+           periodic job that applies it.
+        type: string
+        enum:
+          - none
+          - daily
+          - weekly
+          - monthly
+        x-nullable: true
+      lastRecurrenceAt:
+        description: |
+           When the automatic-recurrence job last created this card's next
+           occurrence. Falls back to createdAt (in isCardRecurrenceDue()) until
+           the first automatic recurrence happens.
+        type: string
+        x-nullable: true
       dateLastActivity:
         description: |
            Date of last activity
@@ -3743,17 +6723,54 @@ definitions:
         x-nullable: true
       requestedBy:
         description: |
-           who requested the card (ID of the user)
+           display name entered manually or copied from the selected user
         type: string
         x-nullable: true
       assignedBy:
         description: |
-           who assigned the card (ID of the user)
+           display name entered manually or copied from the selected user
+        type: string
+        x-nullable: true
+      syncSourceKey:
+        type: string
+        x-nullable: true
+      syncLabelIds:
+        type: array
+        items:
+          type: string
+          x-nullable: true
+        x-nullable: true
+      syncIssueState:
+        type: string
+        enum:
+          - open
+          - closed
+        x-nullable: true
+      syncLastSource:
+        $ref: "#/definitions/CardsSynclastsource"
+        x-nullable: true
+      syncClosedByWeKan:
+        type: boolean
+        x-nullable: true
+      syncExternalId:
+        type: string
+        x-nullable: true
+      syncSourceType:
         type: string
         x-nullable: true
       labelIds:
         description: |
            list of labels ID the card has
+        type: array
+        items:
+          type: string
+          x-nullable: true
+        x-nullable: true
+      attachedCardIds:
+        description: |
+           #3257: the cards attached to this card (Trello's card attachments),
+           by id - any card the user may read, on any board. Shown beside the
+           file attachments (models/lib/attachedCards.js).
         type: array
         items:
           type: string
@@ -3776,10 +6793,32 @@ definitions:
           type: string
           x-nullable: true
         x-nullable: true
+      requesters:
+        type: array
+        items:
+          type: string
+          x-nullable: true
+        x-nullable: true
+      assigners:
+        type: array
+        items:
+          type: string
+          x-nullable: true
+        x-nullable: true
       receivedAt:
         description: |
            Date the card was received
         type: string
+        x-nullable: true
+      email:
+        description: |
+           #794: the email this card came from or was sent as - { direction:
+           'in'|'out', from: { name, address }, to: [address], cc: [address],
+           subject, messageId, threadIds: [Message-ID], at }. threadIds holds
+           every Message-ID of the conversation, so a reply to it (In-Reply-To /
+           References) becomes a comment here rather than a new card
+           (server/emailToCard.js, server/emailView.js).
+        type: object
         x-nullable: true
       startAt:
         description: |
@@ -3839,6 +6878,9 @@ definitions:
         items:
           $ref: "#/definitions/CardsLocations"
         x-nullable: true
+      lastMoveReason:
+        type: string
+        x-nullable: true
       spentTime:
         description: |
            How much time has been spent on this
@@ -3848,6 +6890,55 @@ definitions:
         description: |
            is the card over time?
         type: boolean
+        x-nullable: true
+      flowStartAt:
+        description: |
+           when the active Flowtime session on this card started, or null/unset
+           when no session is active
+        type: string
+        x-nullable: true
+      flowInterruptions:
+        description: |
+           how many interruptions have been tallied during the active session
+        type: number
+        x-nullable: true
+      flowUserId:
+        description: |
+           the user who started the active Flowtime session; a session belongs
+           to one person
+        type: string
+        x-nullable: true
+      pomodoroStartAt:
+        description: |
+           when the current work/break interval started, or null/unset when no
+           Pomodoro interval is active
+        type: string
+        x-nullable: true
+      pomodoroPhase:
+        description: |
+           'work' or 'break' while an interval is active; null/unset otherwise
+        type: string
+        enum:
+          - work
+          - break
+        x-nullable: true
+      pomodoroCount:
+        description: |
+           how many work intervals have been completed, used for the "long
+           break every 4th interval" rule
+        type: number
+        x-nullable: true
+      pomodoroUserId:
+        description: |
+           the user who started the active Pomodoro session; a session belongs
+           to one person
+        type: string
+        x-nullable: true
+      pomodoroWorkMinutes:
+        description: |
+           length of a work interval in minutes, configurable per session;
+           defaults to the standard 25 minutes
+        type: number
         x-nullable: true
       userId:
         description: |
@@ -3871,6 +6962,17 @@ definitions:
         description: |
            ID of the linked card
         type: string
+        x-nullable: true
+      cardDependencies:
+        description: |
+           #3392: PI Program Board "Red Strings". Typed card-to-card dependencies.
+           Each entry is { cardId, type, color, icon } where cardId points at
+           another card (drawn when on the same board), type is one of
+           DEPENDENCY_TYPE_IDS, color is the connection line / badge color and icon
+           is a FontAwesome name. See models/metadata/dependencies.js.
+        type: array
+        items:
+          $ref: "#/definitions/CardsCarddependencies"
         x-nullable: true
       vote:
         description: |
@@ -3919,6 +7021,27 @@ definitions:
            show list name on minicard?
         type: boolean
         x-nullable: true
+      showListOnCard:
+        description: |
+           show list name on the opened card? (Board Settings / Card, List title)
+        type: boolean
+        x-nullable: true
+      shownFields:
+        description: |
+           legacy, not read: the fields this card once chose to show although empty
+        type: array
+        items:
+          type: string
+          x-nullable: true
+        x-nullable: true
+      hiddenFields:
+        description: |
+           legacy, not read: the fields this card once chose to hide
+        type: array
+        items:
+          type: string
+          x-nullable: true
+        x-nullable: true
       showChecklistAtMinicard:
         description: |
            show checklist on minicard?
@@ -3938,35 +7061,6 @@ definitions:
       - userId
       - type
       - showActivities
-  CardsVote:
-    type: object
-    properties:
-      question:
-        type: string
-      positive:
-        description: |
-           list of members (user IDs)
-        type: array
-        items:
-          type: string
-          x-nullable: true
-      negative:
-        description: |
-           list of members (user IDs)
-        type: array
-        items:
-          type: string
-          x-nullable: true
-      end:
-        type: string
-      public:
-        type: boolean
-      allowNonBoardMembers:
-        type: boolean
-    required:
-      - question
-      - public
-      - allowNonBoardMembers
   CardsPoker:
     type: object
     properties:
@@ -4050,47 +7144,74 @@ definitions:
         description: |
            poker estimation value
         type: number
+  CardsSynclastsource:
+    type: object
+    properties:
+      title:
+        type: string
+      description:
+        type: string
+      estimate:
+        type: number
+      originalEstimate:
+        type: number
+      remainingEstimate:
+        type: number
+      originalEstimateMapping:
+        type: string
+      remainingEstimateMapping:
+        type: string
+      estimateMapping:
+        type: string
+      spentTime:
+        type: number
+      sprint:
+        type: string
+      releases:
+        type: array
+        items:
+          type: string
+          x-nullable: true
+  CardsVote:
+    type: object
+    properties:
+      question:
+        type: string
+      positive:
+        description: |
+           list of members (user IDs)
+        type: array
+        items:
+          type: string
+          x-nullable: true
+      negative:
+        description: |
+           list of members (user IDs)
+        type: array
+        items:
+          type: string
+          x-nullable: true
+      end:
+        type: string
+      public:
+        type: boolean
+      allowNonBoardMembers:
+        type: boolean
+    required:
+      - question
+      - public
+      - allowNonBoardMembers
+  CardsDrawings:
+    type: object
   CardsCustomfields:
     type: object
-  CardsLabelids:
-    type: object
-  CardsMembers:
-    type: object
-  CardsAssignees:
+  CardsCustomfieldlinks:
     type: object
   CardsStickers:
     type: object
   CardsLocations:
     type: object
-  CardsVotePositive:
-    type: object
-  CardsVoteNegative:
-    type: object
-  CardsPokerOne:
-    type: object
-  CardsPokerTwo:
-    type: object
-  CardsPokerThree:
-    type: object
-  CardsPokerFive:
-    type: object
-  CardsPokerEight:
-    type: object
-  CardsPokerThirteen:
-    type: object
-  CardsPokerTwenty:
-    type: object
-  CardsPokerForty:
-    type: object
-  CardsPokerOnehundred:
-    type: object
-  CardsPokerUnsure:
-    type: object
-  CardsTargetid_gantt:
-    type: object
-  CardsLinktype_gantt:
-    type: object
-  CardsLinkid_gantt:
+  CardsCarddependencies:
     type: object
   ChecklistItems:
     type: object
@@ -4108,6 +7229,17 @@ definitions:
         description: |
            Is the item checked?
         type: boolean
+      dueAt:
+        description: |
+           Date the checklist item is due
+        type: string
+        x-nullable: true
+      assigneeId:
+        description: |
+           #1618: the board member responsible for this item (models/lib/
+           checklistItemSchedule.js); unset is nobody.
+        type: string
+        x-nullable: true
       checklistId:
         description: |
            the checklist ID the item is attached to
@@ -4123,6 +7255,19 @@ definitions:
            reactive cursor filtered by boardId. Kept in sync on insert, on the
            item / its checklist moving to another card, and when the card moves to
            another board.
+        type: string
+        x-nullable: true
+      linkedCardId:
+        description: |
+           #2422: the _id of the subtask card created from this checklist item
+           via "Convert to subtask" (checklists.js's
+           'click .js-convert-checklist-item-to-subtask' handler), if any. This
+           is a one-way, set-once reference recorded at conversion time - it is
+           NOT kept in sync with the subtask afterwards (no bidirectional status
+           sync), and it is unrelated to the pre-existing "Convert to card"
+           action (convertChecklistItemToCardPopup) or the #3294 drag-to-card
+           gesture (buildCardFromChecklistItem), neither of which sets this
+           field: both of those create a plain, unlinked, non-subtask card.
         type: string
         x-nullable: true
       createdAt:
@@ -4158,6 +7303,9 @@ definitions:
         description: |
            the title of the checklist
         type: string
+      dueAt:
+        type: string
+        x-nullable: true
       finishedAt:
         description: |
            When was the checklist finished
@@ -4185,15 +7333,37 @@ definitions:
         x-nullable: true
       showChecklistAtMinicard:
         description: |
-           show this checklist on minicard?
+           show this checklist on minicard? Unset = follow the board's
+           allowsChecklistsOnMinicard default; true/false override it.
         type: boolean
+        x-nullable: true
+      resetInterval:
+        description: |
+           #3818 / #4729: automatically uncheck all items of this checklist on a
+           recurring schedule. 'none' (default) never resets automatically.
+           See models/lib/checklistResetSchedule.js and
+           server/checklistResetSchedule.js for the due-date calculation and the
+           periodic job that applies it.
+        type: string
+        enum:
+          - none
+          - daily
+          - weekly
+          - monthly
+        x-nullable: true
+      lastResetAt:
+        description: |
+           When the automatic-reset job last unchecked this checklist's items.
+           Falls back to createdAt (in isChecklistResetDue()) until the first
+           automatic reset happens.
+        type: string
+        x-nullable: true
     required:
       - cardId
       - title
       - createdAt
       - modifiedAt
       - sort
-      - showChecklistAtMinicard
   CustomFields:
     type: object
     description:  A custom field on a card in the board
@@ -4217,6 +7387,7 @@ definitions:
           - number
           - date
           - dropdown
+          - dropdownmultiselect
           - checkbox
           - currency
           - stringtemplate
@@ -4240,10 +7411,46 @@ definitions:
         description: |
            should the label of the custom field be shown on minicards?
         type: boolean
+      cardKinds:
+        description: |
+           #2012: the card kinds this field belongs to ('story', 'task'); empty
+           is every card (models/lib/cardKinds.js).
+        type: array
+        items:
+          type: string
+          x-nullable: true
+        x-nullable: true
       showSumAtTopOfList:
         description: |
            should the sum of the custom fields be shown at top of list?
         type: boolean
+      readOnly:
+        description: |
+           #3143: when true, every board member SEES this custom field's value,
+           but only a board admin can set or change it - a "display-only" field
+           for a score or a computed value. Set through the REST API, a rule or
+           by an admin. Enforced on the server with adminOnly's write guard
+           (models/lib/adminOnlyCustomFields.js mayWriteField). Defaults to false.
+        type: boolean
+      adminOnly:
+        description: |
+           #3141: when true, this custom field's VALUE is hidden from - and
+           cannot be set by - a non board-admin board member: not on the card
+           detail view, not on the minicard, and not through the server-side
+           setCustomField method (a UI-only hide is not real access control).
+           Defaults to false so every existing custom field is unaffected.
+        type: boolean
+      sort:
+        description: |
+           #4165: the user-settable DISPLAY order of the custom field, both in the
+           board-settings list and on a card. Ascending, lower first - mirrors
+           Lists' own `sort` field. A newly created field defaults to the end of
+           the board's current list (the client passes `existingCount` on insert)
+           rather than jumping to the top; fields created before this existed have
+           no `sort` of their own and fall back to name order (see
+           models/lib/customFieldsWD.js).
+        type: number
+        x-nullable: true
       createdAt:
         type: string
         x-nullable: true
@@ -4259,10 +7466,21 @@ definitions:
       - alwaysOnCard
       - showLabelOnMiniCard
       - showSumAtTopOfList
+      - readOnly
+      - adminOnly
       - modifiedAt
   CustomFieldsSettings:
     type: object
     properties:
+      jiraTimeField:
+        type: string
+        enum:
+          - original
+          - remaining
+      jiraEstimateFieldId:
+        type: string
+      jiraEstimateUnit:
+        type: string
       currencyCode:
         type: string
       dropdownItems:
@@ -4275,14 +7493,181 @@ definitions:
         type: string
       stringtemplateSeparator:
         type: string
-  CustomFieldsBoardids:
-    type: object
   CustomFieldsSettingsDropdownitems:
     type: object
+  EventLog:
+    type: object
+    properties:
+      stream:
+        type: string
+      at:
+        type: string
+      severity:
+        type: string
+        x-nullable: true
+      category:
+        type: string
+        x-nullable: true
+      bleed:
+        type: string
+        x-nullable: true
+      action:
+        type: string
+        x-nullable: true
+      source:
+        type: string
+        x-nullable: true
+      cwe:
+        type: string
+        x-nullable: true
+      userId:
+        type: string
+        x-nullable: true
+      username:
+        type: string
+        x-nullable: true
+      ip:
+        type: string
+        x-nullable: true
+      ipv4:
+        type: string
+        x-nullable: true
+      ipv6:
+        type: string
+        x-nullable: true
+      location:
+        type: object
+        x-nullable: true
+      count:
+        type: number
+        x-nullable: true
+      firstAt:
+        type: string
+        x-nullable: true
+      actors:
+        type: object
+        x-nullable: true
+      actorsOverflow:
+        type: number
+        x-nullable: true
+      detail:
+        type: string
+        x-nullable: true
+      type:
+        type: string
+        x-nullable: true
+      db:
+        type: string
+        x-nullable: true
+      kind:
+        type: string
+        x-nullable: true
+      message:
+        type: string
+        x-nullable: true
+      api:
+        type: string
+        x-nullable: true
+      apiUserId:
+        type: string
+        x-nullable: true
+    required:
+      - stream
+      - at
+  Integrations:
+    type: object
+    description:  Integration with third-party applications
+    properties:
+      enabled:
+        description: |
+           is the integration enabled?
+        type: boolean
+      title:
+        description: |
+           name of the integration
+        type: string
+        x-nullable: true
+      type:
+        description: |
+           type of the integratation (Default to 'outgoing-webhooks')
+        type: string
+      activities:
+        description: |
+           activities the integration gets triggered (list)
+        type: array
+        items:
+          type: string
+      url:
+        description: |
+           First-line, NON-AUTHORITATIVE SSRF check.
+
+           This validator runs synchronously (isomorphically) and therefore CANNOT
+           resolve DNS. It only rejects the obvious cases (bad protocol, literal
+           private/loopback IPs, localhost) to give quick feedback in the UI. It is
+           trivially bypassed by a public hostname that resolves to an internal IP
+           (e.g. 169-254-169-254.nip.io), so it MUST NOT be relied on as the SSRF
+           boundary — that was the root cause of GHSA-66m2-4wfr-c45p (DnsBleed).
+
+           The authoritative, DNS-aware checks live server-side and validate the
+           RESOLVED IP of every address family:
+             - input time: validateAttachmentUrl() at the REST write paths
+               (server/models/integrations.js POST/PUT), and
+             - delivery time: fetchSafe() (server/lib/ssrfGuard.js), which resolves
+               once, pins the connection to the validated IP and blocks redirects.
+        type: string
+      notificationDelivery:
+        type: object
+        x-nullable: true
+      token:
+        description: |
+           token of the integration
+        type: string
+        x-nullable: true
+      boardId:
+        description: |
+           Board ID of the integration
+        type: string
+      createdAt:
+        description: |
+           Creation date of the integration
+        type: string
+      modifiedAt:
+        type: string
+      userId:
+        description: |
+           user ID who created the interation
+        type: string
+      mattermostDirectMessages:
+        description: |
+           #1297: also send each message to the card's members and assignees as
+           Mattermost direct messages (models/lib/mattermostDirectMessages.js).
+        type: boolean
+        x-nullable: true
+      bot:
+        description: |
+           Board Settings / Bots (models/lib/botRuns.js): this outgoing webhook
+           is a bot's runner. It is sent dispatches only, never board activity.
+        type: boolean
+        x-nullable: true
+    required:
+      - enabled
+      - type
+      - activities
+      - url
+      - boardId
+      - createdAt
+      - modifiedAt
+      - userId
   Lists:
     type: object
-    description:  A list (column) in the Wekan board.
+    description:  A list (column) in the WeKan board.
     properties:
+      scrum:
+        type: object
+        x-nullable: true
+      scrumRevision:
+        type: number
+        x-nullable: true
       title:
         description: |
            the title of the list
@@ -4300,6 +7685,15 @@ definitions:
       archivedAt:
         description: |
            latest archiving date
+        type: string
+        x-nullable: true
+      deletedAt:
+        type: string
+        x-nullable: true
+      deletedBy:
+        type: string
+        x-nullable: true
+      deleteBatchId:
         type: string
         x-nullable: true
       boardId:
@@ -4332,21 +7726,66 @@ definitions:
            WIP object, see below
         $ref: "#/definitions/ListsWiplimit"
         x-nullable: true
+      cardsUseListColor:
+        description: |
+           #4756: cards without a colour of their own are shown in this list's
+           colour (models/lib/cardDisplayColor.js); nothing is written to them.
+        type: boolean
+        x-nullable: true
       color:
         description: |
            the color of the list
         type: string
-        enum:
         x-nullable: true
       type:
         description: |
            The type of list
         type: string
+      linkedBoardId:
+        description: |
+           #2809: a linked whole list mirrors a list of this other board
+           (models/lib/linkedList.js).
+        type: string
+        x-nullable: true
+      linkedListId:
+        type: string
+        x-nullable: true
       width:
         description: |
            The width of the list in pixels (100-1000).
-           Default width is 272 pixels.
+           #6465: default width is 220 pixels (was 272) so more lists fit on
+           screen; kept in sync with DEFAULT_LIST_WIDTH in models/lib/listWidth.js.
         type: number
+        x-nullable: true
+      roleExceptions:
+        description: |
+           #4527: what each role may do in this list, over the board's own rule:
+           { <role>: { write?: Boolean, comment?: Boolean } }
+           (models/lib/listPermissions.js). Only the lists.setRoleExceptions
+           method writes it; a direct client write is refused.
+        type: object
+        x-nullable: true
+      syncRevision:
+        type: string
+        x-nullable: true
+      syncCredentialIncarnation:
+        type: string
+        x-nullable: true
+      syncCredentialGeneration:
+        type: number
+        x-nullable: true
+      syncCredentialFence:
+        type: string
+        x-nullable: true
+      syncSource:
+        $ref: "#/definitions/ListsSyncsource"
+        x-nullable: true
+      syncWriteBackError:
+        description: |
+           #2698: why the last write-back to GitLab failed, cleared when one
+           succeeds. Beside syncSource, because a run's list writes match
+           syncSource as a whole.
+        type: string
         x-nullable: true
     required:
       - title
@@ -4355,6 +7794,58 @@ definitions:
       - createdAt
       - modifiedAt
       - type
+  ListsSyncsource:
+    type: object
+    properties:
+      type:
+        description: |
+           which parser/fetcher to use: 'jira' | 'github' | 'gitlab' | 'gitea'
+        type: string
+      url:
+        description: |
+           base API URL of the external tracker, e.g. https://org.atlassian.net
+        type: string
+      projectKey:
+        description: |
+           Jira project key, or "owner/repo" for GitHub/Gitea, or numeric project
+           id for GitLab
+        type: string
+      timeMappingIdentities:
+        type: object
+      estimateCustomFieldId:
+        type: string
+      estimateMappingIdentity:
+        type: string
+      estimateSourceField:
+        type: string
+        enum:
+          - weight
+          - time_estimate
+      fields:
+        type: array
+        items:
+          type: string
+          x-nullable: true
+      createCards:
+        type: boolean
+      archiveCards:
+        type: boolean
+      issueDetails:
+        type: boolean
+      writeBack:
+        type: boolean
+      writeBackSince:
+        type: string
+      enabled:
+        type: boolean
+      lastSyncedAt:
+        type: string
+      lastSyncError:
+        description: |
+           short message from the last failed sync attempt, cleared on success -
+           shown in the list's sync settings so a broken credential is visible
+           without needing Admin Panel -> Problems.
+        type: string
   ListsWiplimit:
     type: object
     properties:
@@ -4374,10 +7865,557 @@ definitions:
       - value
       - enabled
       - soft
+  Org:
+    type: object
+    description:  A Organization in WeKan. A Enterprise in Trello.
+    properties:
+      orgDisplayName:
+        description: |
+           the name to display for the organization
+        type: string
+        x-nullable: true
+      orgDesc:
+        description: |
+           the description the organization
+        type: string
+        x-nullable: true
+      orgShortName:
+        description: |
+           short name of the organization
+        type: string
+        x-nullable: true
+      orgAutoAddUsersWithDomainName:
+        description: |
+           automatically add users with domain name
+        type: string
+        x-nullable: true
+      orgWebsite:
+        description: |
+           website of the organization
+        type: string
+        x-nullable: true
+      orgIsActive:
+        description: |
+           status of the organization
+        type: boolean
+        x-nullable: true
+      orgSharedTemplates:
+        description: |
+           #5850: members may drag personal Template Boards onto this org to share
+           (per-org form of "Shared Templates for Organizations"). Off by default.
+        type: boolean
+        x-nullable: true
+      orgPropagateMembersToBoards:
+        description: |
+           #4737: add this org's members to the boards that list this org. Off by default.
+        type: boolean
+        x-nullable: true
+      orgSyncMembersFromAuth:
+        description: |
+           #4737: this org's membership is maintained by the authentication
+           provider's group/membership sync (LDAP, OAuth2/OIDC, SAML, etc.). Off by default.
+        type: boolean
+        x-nullable: true
+      orgDomains:
+        description: |
+           Multitenancy option D (docs/Design/Multitenancy/Multitenancy.md): the
+           hostname(s) this Organization is served on, free text separated by commas,
+           semicolons or whitespace - e.g. "a.example.com, kanban.example.org". A
+           request whose host matches one of these is that tenant's request, and the
+           org's branding below replaces the instance branding for it. Empty (the
+           default) means the org is not a tenant and nothing changes.
+           Only read when the deployment sets MULTITENANCY=true.
+        type: string
+        x-nullable: true
+      orgDomainsRequested:
+        description: |
+           Hostnames this Organization's own admin asked for and a site admin has
+           not yet assigned (2026-10-02: only a site admin assigns a hostname).
+           Not in effect until then.
+        type: string
+        x-nullable: true
+      orgProductName:
+        description: |
+           Per-tenant branding. Each of these overrides the SAME-named instance
+           setting of Admin Panel / Settings / Visibility for this tenant's requests,
+           and an empty one leaves the instance value alone - so a tenant overrides
+           only what it sets. See models/lib/tenants.js BRANDING_FIELDS.
+        type: string
+        x-nullable: true
+      orgThemeColor:
+        description: |
+           The site theme for this Organization's hosts - the layer between WeKan's
+           default theme and a user's own override (docs/Theme/Theme.md). Set in
+           Admin Panel / Settings / Visibility / Change color.
+        type: string
+        x-nullable: true
+      orgThemeCustomColors:
+        description: |
+           The custom colours of that theme, for the flat (1 colour) and clear
+           (2 colours, a gradient) categories.
+        type: array
+        items:
+          type: string
+          x-nullable: true
+        x-nullable: true
+      orgCustomLoginLogoImageUrl:
+        type: string
+        x-nullable: true
+      orgCustomLoginLogoLinkUrl:
+        type: string
+        x-nullable: true
+      orgTextBelowCustomLoginLogo:
+        type: string
+        x-nullable: true
+      orgCustomTopLeftCornerLogoImageUrl:
+        type: string
+        x-nullable: true
+      orgCustomTopLeftCornerLogoLinkUrl:
+        type: string
+        x-nullable: true
+      orgCustomHelpLinkUrl:
+        type: string
+        x-nullable: true
+      orgLegalNotice:
+        type: string
+        x-nullable: true
+      createdAt:
+        description: |
+           creation date of the organization
+        type: string
+      modifiedAt:
+        type: string
+    required:
+      - createdAt
+      - modifiedAt
+  Rules:
+    type: object
+    properties:
+      title:
+        type: string
+      triggerId:
+        type: string
+      actionId:
+        type: string
+      extraTriggerIds:
+        type: array
+        items:
+          type: string
+          x-nullable: true
+        x-nullable: true
+      extraActionIds:
+        type: array
+        items:
+          type: string
+          x-nullable: true
+        x-nullable: true
+      boardId:
+        type: string
+      buttonType:
+        type: string
+        enum:
+          - card
+          - board
+        x-nullable: true
+      buttonLabel:
+        type: string
+        x-nullable: true
+      description:
+        description: |
+           What the rule is for, in Markdown. An imported GitHub Actions
+           workflow keeps its YAML here (models/lib/githubActionsRules.js).
+        type: string
+        x-nullable: true
+      enabled:
+        type: boolean
+        x-nullable: true
+      createdAt:
+        type: string
+        x-nullable: true
+      modifiedAt:
+        type: string
+    required:
+      - title
+      - triggerId
+      - actionId
+      - boardId
+      - modifiedAt
+  Settings:
+    type: object
+    properties:
+      disableRegistration:
+        type: boolean
+        x-nullable: true
+      disableForgotPassword:
+        type: boolean
+        x-nullable: true
+      renderLinksAsPlainText:
+        type: boolean
+        x-nullable: true
+      alwaysShowCodeAsText:
+        type: boolean
+        x-nullable: true
+      externalLinkPatternPrefix:
+        type: string
+        x-nullable: true
+      externalLinkPatternUrl:
+        type: string
+        x-nullable: true
+      externalLinkRules:
+        type: string
+        x-nullable: true
+      externalLinkIdentifierAliases:
+        type: string
+        x-nullable: true
+      disableActivities:
+        type: boolean
+        x-nullable: true
+      enableSyncCronEffects:
+        type: boolean
+        x-nullable: true
+      disableNotifications:
+        type: boolean
+        x-nullable: true
+      disableWatch:
+        type: boolean
+        x-nullable: true
+      enablePermanentDelete:
+        type: boolean
+        x-nullable: true
+      disableAllExport:
+        type: boolean
+        x-nullable: true
+      disableAllImport:
+        type: boolean
+        x-nullable: true
+      disableExportAvatars:
+        type: boolean
+        x-nullable: true
+      disableImportAvatars:
+        type: boolean
+        x-nullable: true
+      anonymizeExportUsers:
+        type: boolean
+        x-nullable: true
+      anonymizeImportUsers:
+        type: boolean
+        x-nullable: true
+      mailServer:
+        $ref: "#/definitions/SettingsMailserver"
+        x-nullable: true
+      inboundMail:
+        type: object
+        x-nullable: true
+      emailBounces:
+        type: object
+        x-nullable: true
+      productName:
+        type: string
+        x-nullable: true
+      themeColor:
+        description: |
+           The site theme, set in Admin Panel / Settings / Visibility / Change color.
+           It is the layer between WeKan's default theme and a user's own override
+           (docs/Theme/Theme.md): whoever has not picked a theme of their own sees
+           this one. On a multitenancy host the Organization's own value replaces it
+           (models/lib/tenants.js BRANDING_FIELDS).
+        type: string
+        x-nullable: true
+      themeCustomColors:
+        description: |
+           The custom colours of that theme: one for a flat theme, two for a clear
+           (gradient) one.
+        type: array
+        items:
+          type: string
+          x-nullable: true
+        x-nullable: true
+      displayAuthenticationMethod:
+        type: boolean
+        x-nullable: true
+      defaultAuthenticationMethod:
+        type: string
+      spinnerName:
+        type: string
+        x-nullable: true
+      hideLogo:
+        type: boolean
+        x-nullable: true
+      hideCardCounterList:
+        type: boolean
+        x-nullable: true
+      featureStates:
+        type: object
+        x-nullable: true
+      webhookInternalHosts:
+        type: array
+        items:
+          type: string
+          x-nullable: true
+        x-nullable: true
+      accountWebhook:
+        type: object
+        x-nullable: true
+      sqrlEnabled:
+        type: boolean
+        x-nullable: true
+      activityPubEnabled:
+        type: boolean
+        x-nullable: true
+      rulesReadOnlyForMembers:
+        type: boolean
+        x-nullable: true
+      optionalApis:
+        type: object
+        x-nullable: true
+      featureApprovalRequired:
+        type: boolean
+        x-nullable: true
+      featureKnownKeys:
+        type: array
+        items:
+          type: string
+          x-nullable: true
+        x-nullable: true
+      featurePreviewAdmins:
+        type: boolean
+        x-nullable: true
+      cardFieldStates:
+        type: object
+        x-nullable: true
+      cardsLoading:
+        type: string
+        enum:
+          - all
+          - lazy
+        x-nullable: true
+      hideDateFormat:
+        type: boolean
+        x-nullable: true
+      globalDateFormat:
+        type: string
+        enum:
+          - yyyy-mm-dd
+          - dd-mm-yyyy
+          - mm-dd-yyyy
+          - yyyy-mm-dd-date-only
+          - dd-mm-yyyy-date-only
+          - mm-dd-yyyy-date-only
+        x-nullable: true
+      hideBoardMemberList:
+        type: boolean
+        x-nullable: true
+      hideBoardActivitiesOnAllBoards:
+        type: boolean
+        x-nullable: true
+      customLoginLogoImageUrl:
+        type: string
+        x-nullable: true
+      customLoginLogoLinkUrl:
+        type: string
+        x-nullable: true
+      customHelpLinkUrl:
+        type: string
+        x-nullable: true
+      textBelowCustomLoginLogo:
+        type: string
+        x-nullable: true
+      loginBackgroundColor:
+        type: string
+        x-nullable: true
+      automaticLinkedUrlSchemes:
+        type: string
+        x-nullable: true
+      customTopLeftCornerLogoImageUrl:
+        type: string
+        x-nullable: true
+      customTopLeftCornerLogoLinkUrl:
+        type: string
+        x-nullable: true
+      customTopLeftCornerLogoHeight:
+        type: string
+        x-nullable: true
+      oidcBtnText:
+        type: string
+        x-nullable: true
+      mailDomainName:
+        type: string
+        x-nullable: true
+      legalNotice:
+        type: string
+        x-nullable: true
+      customPrivateBoardDesc:
+        type: string
+        x-nullable: true
+      customPublicBoardDesc:
+        type: string
+        x-nullable: true
+      customHeadEnabled:
+        type: boolean
+        x-nullable: true
+      customHeadMetaTags:
+        type: string
+        x-nullable: true
+      customHeadLinkTags:
+        type: string
+        x-nullable: true
+      customManifestEnabled:
+        type: boolean
+        x-nullable: true
+      customManifestContent:
+        type: string
+        x-nullable: true
+      customAssetLinksEnabled:
+        type: boolean
+        x-nullable: true
+      customAssetLinksContent:
+        type: string
+        x-nullable: true
+      accessibilityPageEnabled:
+        type: boolean
+        x-nullable: true
+      accessibilityTitle:
+        type: string
+        x-nullable: true
+      accessibilityContent:
+        type: string
+        x-nullable: true
+      supportPopupText:
+        type: string
+        x-nullable: true
+      supportPageEnabled:
+        type: boolean
+        x-nullable: true
+      supportPagePublic:
+        type: boolean
+        x-nullable: true
+      boardMembersFromSameOrgOnly:
+        type: boolean
+        x-nullable: true
+      boardMembersFromSameTeamOnly:
+        type: boolean
+        x-nullable: true
+      boardMembersFromSameOrgOrTeamOnly:
+        type: boolean
+        x-nullable: true
+      notifyDefaultTray:
+        type: boolean
+        x-nullable: true
+      notifyDefaultEmail:
+        type: boolean
+        x-nullable: true
+      notificationDelivery:
+        type: object
+        x-nullable: true
+      inviteEmailSubjectTemplate:
+        type: string
+        x-nullable: true
+      inviteEmailBodyTemplate:
+        type: string
+        x-nullable: true
+      activityEmailSubjectTemplate:
+        type: string
+        x-nullable: true
+      activityEmailBodyTemplate:
+        type: string
+        x-nullable: true
+      supportTitle:
+        type: string
+        x-nullable: true
+      supportPageText:
+        type: string
+        x-nullable: true
+      saml:
+        type: object
+        x-nullable: true
+      ldap:
+        type: object
+        x-nullable: true
+      oidc:
+        type: object
+        x-nullable: true
+      cas:
+        type: object
+        x-nullable: true
+      headerLogin:
+        type: object
+        x-nullable: true
+      loginOptions:
+        type: object
+        x-nullable: true
+      attachmentRetention:
+        type: object
+        x-nullable: true
+      backupOptions:
+        type: object
+        x-nullable: true
+      inboundMailLimits:
+        type: object
+        x-nullable: true
+      windowsSso:
+        type: object
+        x-nullable: true
+      oauthProviders:
+        type: object
+        x-nullable: true
+      oauthProvidersLoginStyle:
+        type: string
+        enum:
+          - popup
+          - redirect
+        x-nullable: true
+      oauthProvidersMergeExistingUsers:
+        type: boolean
+        x-nullable: true
+      oauthProvidersAllowedEmailDomains:
+        type: string
+        x-nullable: true
+      passwordlessEnabled:
+        type: boolean
+        x-nullable: true
+      createdAt:
+        type: string
+      modifiedAt:
+        type: string
+    required:
+      - defaultAuthenticationMethod
+      - createdAt
+      - modifiedAt
+  SettingsMailserver:
+    type: object
+    properties:
+      username:
+        type: string
+      password:
+        type: string
+      host:
+        type: string
+      port:
+        type: string
+      enableTLS:
+        type: boolean
+      from:
+        type: string
+      enabled:
+        type: boolean
+      service:
+        type: string
+      configurations:
+        type: object
+      passwords:
+        type: object
+      passwordSet:
+        type: object
   Swimlanes:
     type: object
     description:  A swimlane is an line in the kaban board.
     properties:
+      scrum:
+        type: object
+        x-nullable: true
+      scrumRevision:
+        type: number
+        x-nullable: true
       title:
         description: |
            the title of the swimlane
@@ -4408,7 +8446,6 @@ definitions:
         description: |
            the color of the swimlane
         type: string
-        enum:
         x-nullable: true
       updatedAt:
         description: |
@@ -4435,6 +8472,61 @@ definitions:
       - createdAt
       - modifiedAt
       - type
+  Team:
+    type: object
+    description:  A Team in WeKan. Organization in Trello.
+    properties:
+      teamDisplayName:
+        description: |
+           the name to display for the team
+        type: string
+        x-nullable: true
+      teamDesc:
+        description: |
+           the description the team
+        type: string
+        x-nullable: true
+      teamShortName:
+        description: |
+           short name of the team
+        type: string
+        x-nullable: true
+      teamWebsite:
+        description: |
+           website of the team
+        type: string
+        x-nullable: true
+      teamIsActive:
+        description: |
+           status of the team
+        type: boolean
+        x-nullable: true
+      teamSharedTemplates:
+        description: |
+           #5850: members may drag personal Template Boards onto this team to share
+           (per-team form of "Shared Templates for Teams"). Off by default.
+        type: boolean
+        x-nullable: true
+      teamPropagateMembersToBoards:
+        description: |
+           #4737: add this team's members to the boards that list this team. Off by default.
+        type: boolean
+        x-nullable: true
+      teamSyncMembersFromAuth:
+        description: |
+           #4737: this team's membership is maintained by the authentication
+           provider's group/membership sync (LDAP, OAuth2/OIDC, SAML, etc.). Off by default.
+        type: boolean
+        x-nullable: true
+      createdAt:
+        description: |
+           creation date of the team
+        type: string
+      modifiedAt:
+        type: string
+    required:
+      - createdAt
+      - modifiedAt
   Users:
     type: object
     description:  A User in wekan
@@ -4476,6 +8568,38 @@ definitions:
            profile settings
         $ref: "#/definitions/UsersProfile"
         x-nullable: true
+      passkeys:
+        description: |
+           #5847: this account's passkeys (server/passkeys.js): [{ id, publicKey,
+           counter, transports, name, createdAt, lastUsedAt }]. Never published,
+           and not writable from the client.
+        type: array
+        items:
+          $ref: "#/definitions/UsersPasskeys"
+        x-nullable: true
+      sqrl:
+        description: |
+           #2460: this account's SQRL identity (server/sqrl.js): { idk, suk, vuk,
+           disabled, addedAt } - public keys only. Never published, and not
+           writable from the client.
+        type: object
+        x-nullable: true
+      webPushSubscriptions:
+        description: |
+           #2026 / #1377: this member's browsers' push subscriptions
+           (models/lib/webPush.js). Never published, not client-writable.
+        type: array
+        items:
+          $ref: "#/definitions/UsersWebpushsubscriptions"
+        x-nullable: true
+      ntfy:
+        description: |
+           #5148: the member's own ntfy topic (models/lib/ntfy.js):
+           { enabled, url, token }. Outside `profile` and never published - the
+           token is a secret - read and saved only through the member's own
+           methods (server/notifications/ntfy.js).
+        type: object
+        x-nullable: true
       services:
         description: |
            services field of the user
@@ -4486,9 +8610,22 @@ definitions:
            last time the user has been seen
         type: string
         x-nullable: true
+      notificationDeliveryRevision:
+        type: string
+        x-nullable: true
+      notificationDeliveryPending:
+        type: object
+        x-nullable: true
       isAdmin:
         description: |
            is the user an admin of the board?
+        type: boolean
+        x-nullable: true
+      featurePreview:
+        description: |
+           #6736: a pilot user who sees the features the instance disabled
+           (Admin Panel / Settings / Visibility / Features). Set only by the
+           site admin's saveInstanceFeatures method.
         type: boolean
         x-nullable: true
       createdThroughApi:
@@ -4499,6 +8636,12 @@ definitions:
       loginDisabled:
         description: |
            loginDisabled field of the user
+        type: boolean
+        x-nullable: true
+      passwordChangeRequired:
+        description: |
+           the password is shorter than PASSWORD_MIN_LENGTH: change it before
+           anything else (server/passwordChangeRequired.js)
         type: boolean
         x-nullable: true
       authenticationMethod:
@@ -4521,6 +8664,33 @@ definitions:
       lastConnectionDate:
         type: string
         x-nullable: true
+      inactivityClockStart:
+        description: |
+           USERS_DISABLE_INACTIVE_AFTER_DAYS: when the inactivity clock last
+           (re)started for an account with no lastConnectionDate, or was re-enabled
+           (models/lib/inactiveUsers.js)
+        type: string
+        x-nullable: true
+      loginDisabledReason:
+        description: |
+           why loginDisabled was set automatically: 'inactive'
+           (USERS_DISABLE_INACTIVE_AFTER_DAYS) or 'ldap' (LDAP background sync);
+           cleared whenever the account is enabled again
+        type: string
+        x-nullable: true
+      anonymized:
+        description: |
+           #2731: true once anonymizeUser has scrubbed this account's PII in
+           place (username/profile/emails replaced with a placeholder,
+           loginDisabled set). Board/card/comment references to this userId are
+           left untouched - see server/models/users.js anonymizeUser.
+        type: boolean
+        x-nullable: true
+      anonymizedAt:
+        description: |
+           When anonymizeUser last ran for this account.
+        type: string
+        x-nullable: true
     required:
       - createdAt
       - modifiedAt
@@ -4539,6 +8709,46 @@ definitions:
         items:
           type: string
           x-nullable: true
+      notifyMutedActivities:
+        description: |
+           #572: kinds of card activity this member is not notified about, as
+           keys of models/lib/notificationActivityGroups.js. Unset or empty
+           means every kind, as before.
+        type: array
+        items:
+          type: string
+          x-nullable: true
+      notifyOverrideTray:
+        description: |
+           Member-level override of the in-app notification tray (3-tier
+           Notification Settings system, see models/lib/notificationSettings.js).
+           Unset means "use the board override, or the Admin Panel default".
+        type: boolean
+      notifyOverrideEmail:
+        description: |
+           Member-level override of email notifications (see
+           models/lib/notificationSettings.js).
+        type: boolean
+      chatViewLayout:
+        description: |
+           Board View / Chat: { treeWidth, chatWidth, treeCollapsed,
+           cardCollapsed, chatCollapsed } - the member's pane widths and which
+           panes are folded (models/lib/chatView.js cleanChatLayout).
+        type: object
+      emailToCard:
+        description: |
+           Email to card (#794): { enabled, parts } - whether this member's
+           board addresses work, and which parts of an email they want on the
+           card (models/lib/emailToCard.js). Unset = on, the board's parts.
+        type: object
+      notificationDelivery:
+        type: object
+      webhookHideIdentity:
+        description: |
+           #3695: true leaves this member's name, username and id out of every
+           outgoing webhook - as the actor and as the person a join or
+           assignment is about (models/lib/webhookPayload.js). Unset = named.
+        type: boolean
       fullname:
         description: |
            full name of the user
@@ -4547,10 +8757,157 @@ definitions:
         description: |
            does the user want to show desktop drag handles?
         type: boolean
-      GreyIcons:
+      leftMenuCollapsed:
         description: |
-           per-user preference to render unicode icons in grey
+           is the left menu of All Boards and the Admin Panel collapsed? One
+           setting for both: they are one menu drawn on two pages.
+           docs/Features/All-Boards/Left-Menu.md
         type: boolean
+      collapsedWorkspaces:
+        description: |
+           which workspaces of the All Boards left menu are folded, as a map of
+           workspace id -> true. Only the folded ones are stored, so a tree of
+           fifty workspaces with two folded is two keys.
+           docs/Features/All-Boards/Workspaces.md
+        type: object
+      cardSettingsSplit:
+        description: |
+           the share (0..1) of Card Settings' width the Minicard pane takes beside
+           the Card pane, set by dragging the splitter between them. Unset = half
+           and half. models/lib/cardSettingsSplit.js
+        type: number
+      leftMenuWidth:
+        description: |
+           user-chosen width (px) of that same left menu, set by dragging its inner
+           edge - the right one while reading left to right, the left one under a
+           right-to-left language. One width for both pages, like the fold above.
+           Unset = the CSS default. docs/Features/All-Boards/Left-Menu.md
+        type: number
+      submitOnEnter:
+        description: |
+           per-user preference: in multi-line editors (card title/description and
+           other inlined forms) submit on plain Enter (Shift+Enter for a newline)
+           instead of the default Ctrl/Cmd+Enter. Off by default. See #4236/#6480.
+        type: boolean
+      unreadChangesSince:
+        description: |
+           #2111 / #1604: when set, the time the member turned on "Mark cards
+           changed since I last opened them"; unset is off
+           (models/lib/unreadChanges.js).
+        type: string
+      keepTitleTags:
+        description: |
+           #1273: when a #label or @member is picked while typing a new card's
+           title, keep the "#label" / "@member" text in the title too. Off by
+           default: the text is replaced by the label or member, as before.
+        type: boolean
+      hideFocusOutline:
+        description: |
+           #6755: Member Settings / Change Settings / "Show focus outline", turned
+           off. The blue ring WeKan draws round the focused control (layouts.css,
+           WCAG 2.4.7) is an accessibility feature and stays on by default; a member
+           who does not want it - it also shows after a click on a minicard - can hide
+           it, for themselves only. Stored as the exception, so an account that never
+           touched the setting keeps the ring.
+        type: boolean
+      keepAddCardFormOpen:
+        description: |
+           #6827: keep a list's Add card form open after a card is added, to type
+           the next one. Off by default: the form closes once the card is added.
+        type: boolean
+      titleBracketLabel:
+        description: |
+           #6810: turn a leading "[Text] " of a new card's title into the label
+           "Text" (#3986). Off by default: a title pasted from a ticket system or
+           a mail ("[EXTERNAL] ...") stays as it was, and no label is created.
+        type: boolean
+      checklistDingSound:
+        description: |
+           #5427: per-user preference - play a short synthesized "ding" when a
+           checklist item is checked off. Off by default.
+        type: boolean
+      openManyCardsAtOnce:
+        description: |
+           #6531: per-user preference. OFF by default, which is what clicking a card
+           has always been expected to do - open THAT card, closing the one that was
+           open. Turned on, every clicked card stays open as its own draggable window,
+           which is what WeKan did unconditionally and what the issue reported as a
+           bug: the previous card simply never closed.
+        type: boolean
+      allBoardsThemeTiles:
+        description: |
+           Member Settings / Change color, beside "Default (no override)": paint the
+           board tiles on the All Boards page in the THEME's lighter colour instead
+           of each board's own colour. Off by default, so All Boards looks as it
+           always has - a wall of boards in the colours their owners chose.
+
+           Turned on, the overview reads as one list rather than a palette, which is
+           what #6593 asked for by making every tile white for everybody. It is a
+           per-user preference here, because "the tile colours are noise" and "the
+           tile colours are how I find my board" are both true, of different people.
+        type: boolean
+      globalThemeColor:
+        description: |
+           #5778: optional per-user GLOBAL theme color override. When set to one of
+           the board color names, that color theme is applied to the WHOLE UI (All
+           Boards, Search, Admin Panel, My Cards, etc.) via a `board-color-<name>`
+           class on <body> and the header — letting a user pick e.g. a dark theme
+           everywhere. Absent = no override (default appearance). A specific board
+           still shows its own Board Settings color while you are on that board.
+        type: string
+      globalThemeCustomColors:
+        description: |
+           Custom colors for the global theme when it is a flat (1 color) or clear
+           (2 colors) theme — see docs/Theme/Theme.md. Each is a validated #rrggbb hex.
+        type: array
+        items:
+          type: string
+          x-nullable: true
+      uiFont:
+        description: |
+           Member Settings / Font (#4759): the user's chosen UI font — one of the
+           curated UI_FONTS (models/lib/uiFonts.js) detected as installed in their
+           browser. Plain text, validated on the server; absent = default font.
+        type: string
+      uiFontSize:
+        description: |
+           Member Settings / Font / Size (#4759): a named preset size key (one of
+           UI_FONT_SIZES, e.g. 'large'), never a free number. Absent / 'default' =
+           the stock size. Validated on the server.
+        type: string
+      uiTextColor:
+        description: |
+           Member Settings / Font / Color (#4759): custom UI text color, chosen from a
+           color wheel. A validated #rrggbb hex; absent = default text color.
+        type: string
+      uiTextBgColor:
+        description: |
+           REMOVED feature (#4759 "text background color"): nothing sets or reads
+           this any more, and `setUiColors` unsets it on every call. The key stays
+           in the schema ONLY so that $unset validates against it for the users who
+           stored a colour before it was removed - a modifier touching a key the
+           schema does not know is rejected, which would leave exactly those
+           profiles unable to be cleaned.
+        type: string
+      dismissedBoardAnnouncements:
+        description: |
+           #1566: { [boardId]: version } of the board announcements this user
+           dismissed; an edited announcement has a new version and shows again.
+        type: object
+      dismissedAnnouncementVersion:
+        description: |
+           version string of the global announcement the user has permanently
+           dismissed (#6051). When the admin changes the announcement text its
+           version changes, so the banner reappears for everyone.
+        type: string
+      drawingColors:
+        description: |
+           #6802: the custom colors the user added to the Drawing popup's palette,
+           as HTML color codes (models/lib/cardDrawing.js addCustomColor).
+        type: array
+        items:
+          type: string
+          x-nullable: true
       cardMaximized:
         description: |
            has user clicked maximize card?
@@ -4577,6 +8934,19 @@ definitions:
         description: |
            does the user want to hide minicard label texts?
         type: boolean
+      cardLabelTextOverride:
+        description: |
+           The same per-user override as showLabelTextOverride below, for the
+           labels of the OPENED card (Boards.allowsLabelTextOnCard).
+        type: boolean
+      showLabelTextOverride:
+        description: |
+           #4256: optional per-user override of a board's "show label text on
+           minicards" setting (Boards.showLabelText), mirroring the shape of
+           profile.globalThemeColor - absent/null = no override, follow the
+           board's own setting; true/false = always show/hide regardless of
+           which board is being viewed.
+        type: boolean
       initials:
         description: |
            initials of the user
@@ -4598,14 +8968,30 @@ definitions:
         items:
           type: string
           x-nullable: true
+      boardLabels:
+        description: |
+           #4791: the member's own board labels, { label: [boardId] }, for the
+           All Boards facet bar (models/lib/allBoardsFacets.js).
+        type: object
+      hiddenBoards:
+        description: |
+           #4265: boards this user left that they still reach through a team,
+           organization or e-mail domain; All Boards leaves them out, and Member
+           Settings / Hidden boards brings them back. The team is not touched.
+        type: array
+        items:
+          type: string
+          x-nullable: true
       language:
         description: |
            language of the user
         type: string
       mapProvider:
         description: |
-           which map service the card "Open in map" links use
-           ('openstreetmap' (default), 'google', 'bing' or 'apple').
+           which map service the card "Open in map" links use, grouped by region:
+           USA: 'google', 'bing', 'apple', 'waze';
+           Europe: 'openstreetmap' (default), 'here', 'yandex', 'mapy', '2gis';
+           Asia: 'baidu', 'amap'.
         type: string
         enum:
           - openstreetmap
@@ -4649,10 +9035,66 @@ definitions:
         items:
           type: string
           x-nullable: true
+      starredSwimlanes:
+        description: |
+           list of starred swimlane IDs (#1172)
+        type: array
+        items:
+          type: string
+          x-nullable: true
+      starredLists:
+        description: |
+           list of starred list IDs (#1172)
+        type: array
+        items:
+          type: string
+          x-nullable: true
+      starredCards:
+        description: |
+           list of starred card IDs (#1172)
+        type: array
+        items:
+          type: string
+          x-nullable: true
+      starredPages:
+        description: |
+           the starred PAGES - bookmarks. A board is starred by id; a page has no
+           id, so each entry is the pair a bookmark is: a relative URL and the
+           title to list it under. docs/Features/Pages/Starred.md
+        type: array
+        items:
+          $ref: "#/definitions/UsersProfileStarredpages"
+      defaultBoardId:
+        description: |
+           #2220: the board that opens automatically after logging in (the user's
+           "home" board). Empty/unset means land on the All Boards page as before.
+        type: string
+      defaultBoardTemplateId:
+        description: |
+           #4205: the "Board Templates" swimlane card (cardType-linkedBoard) the
+           user has marked as their default. When set, creating a board with the
+           plain "type a name and click Create" flow applies this template
+           instead of starting blank. Empty/unset means unchanged (blank board)
+           behavior, exactly as before this feature.
+        type: string
+      defaultBoardTemplateBoardId:
+        description: |
+           #4205: the actual template board (type 'template-board', the card's
+           `linkedId`) that `profile.defaultBoardTemplateId` points at, kept in
+           sync with it. Denormalized so board creation can pass it straight to
+           the same `copyBoard` method the manual "Template" picker already uses
+           (client/components/lists/listBody.js), without a second subscription.
+        type: string
       icode:
         description: |
            icode
         type: string
+      boardViews:
+        description: |
+           #4906 / #4256: the view chosen on each board, { [boardId]: view }.
+           A board without its own entry uses profile.boardView (the choice
+           every board shared before), then the board's default view.
+        type: object
       boardView:
         description: |
            boardView field of the user
@@ -4661,7 +9103,43 @@ definitions:
           - board-view-swimlanes
           - board-view-lists
           - board-view-cal
+          - board-view-calendar-mode
+          - board-view-multiboard-cal
           - board-view-gantt
+          - board-view-gantt-frappe
+          - board-view-gantt-dhtmlx
+          - board-view-table
+          - board-view-stats
+          - board-view-time
+          - board-view-timeline
+          - board-view-group-by-assignee
+          - board-view-product-backlog
+          - board-view-sprints
+          - board-view-sprint-report
+          - board-view-velocity
+          - board-view-roadmap
+          - board-view-dashboard
+          - board-view-bigboard
+          - board-view-burndown
+          - board-view-burnup
+          - board-view-cumulative-flow
+          - board-view-control-chart
+          - board-view-cycle-time
+          - board-view-flow-efficiency
+          - board-view-lead-time
+          - board-view-throughput-histogram
+          - board-view-wip-run
+          - board-view-pulse
+          - board-view-aging-wip
+          - board-view-blocker-analysis
+          - board-view-monte-carlo
+          - board-view-process-behavior
+          - board-view-size-cycle-time
+          - board-view-map
+          - board-view-email
+          - board-view-chat
+          - board-view-version-control
+          - board-view-column-sets
       listSortBy:
         description: |
            default sort list for user
@@ -4673,6 +9151,16 @@ definitions:
           - title
           - -sort
           - sort
+      allBoardsSortBy:
+        description: |
+           How the All Boards page is sorted for this user (#5799):
+           'custom' keeps the manual drag order (default), 'title-asc' / 'title-desc'
+           sort boards alphabetically by title.
+        type: string
+        enum:
+          - custom
+          - title-asc
+          - title-desc
       templatesBoardId:
         description: |
            Reference to the templates board
@@ -4689,11 +9177,34 @@ definitions:
         description: |
            Reference to the board templates swimlane Id
         type: string
+      sidebarWidth:
+        description: |
+           User-specified width (px) of the right board sidebar, set by dragging its
+           left edge (desktop only; mobile is always full width). Unset = CSS default.
+        type: number
       listWidths:
         description: |
            User-specified width of each list (or nothing if default).
            profile[boardId][listId] = width;
         type: object
+      showBoardDependencies:
+        description: |
+           #6732: show the board's card dependencies (Red Strings) to THIS user.
+           Each user's own choice, off by default; set from Member Settings.
+        type: boolean
+      showMyDependencies:
+        description: |
+           #6732: show this user's own My Dependencies. Off by default.
+        type: boolean
+      myDependencies:
+        description: |
+           #6732: this user's own dependency lines, seen only by them:
+           [{ boardId, cardId, targetCardId, type, color, icon }]. Written only by
+           the server methods in server/models/dependencies.js, which check the
+           user can see both cards; never directly by the client.
+        type: array
+        items:
+          $ref: "#/definitions/UsersProfileMydependencies"
       listConstraints:
         description: |
            User-specified constraint of each list (or nothing if default).
@@ -4703,6 +9214,25 @@ definitions:
         description: |
            User-specified flag for enabling auto-width for boards (false is the default).
            profile[boardId][listId] = constraint;
+        type: object
+      boardSortIndex:
+        description: |
+           #6439: per-user manual board order on the All Boards page, set by drag-
+           reorder. profile.boardSortIndex[boardId] = sortIndex. Missing before, so
+           a reorder write was rejected by the schema (INVALID [400]) since
+           `profile` enumerates its subfields and is not blackbox.
+        type: object
+      fixedListWidthBoards:
+        description: |
+           #5729 Per-user flag enabling "same width for all lists" (fixed width)
+           mode for a board (false is the default).
+           profile.fixedListWidthBoards[boardId] = true|false
+        type: object
+      fixedListWidths:
+        description: |
+           #5729 Per-user single width applied to every list of a board when fixed
+           width mode is enabled.
+           profile.fixedListWidths[boardId] = width
         type: object
       swimlaneHeights:
         description: |
@@ -4714,14 +9244,67 @@ definitions:
            Per-user collapsed state for lists.
            profile[boardId][listId] = true|false
         type: object
+      collapsedCards:
+        description: |
+           Per-user collapsed state for whole minicards (#1591).
+           profile[boardId][cardId] = true|false
+        type: object
       collapsedSwimlanes:
         description: |
            Per-user collapsed state for swimlanes.
            profile[boardId][swimlaneId] = true|false
         type: object
+      collapsedCardSections:
+        description: |
+           Per-user collapsed state for the sections of a card (#1591).
+           profile[cardId][sectionKey] = true|false
+
+           ONE map for every foldable thing on a card, because they are all the
+           same question: a whole feature group ('labels', 'members', 'due', ...)
+           uses the section's own name, and an individual checklist uses
+           'checklist-<checklistId>'. The same key works on the opened card and on
+           the minicard, so folding a checklist folds it in both.
+
+           Per USER, like collapsedLists and collapsedSwimlanes above, and unlike
+           the checklist's own hideAllChecklistItems, which is a field on the
+           checklist and therefore changes what EVERYONE on the board sees.
+           Folding something to get it out of your way is a view preference, not
+           an edit to the card.
+        type: object
+      cardLastViews:
+        description: |
+           Per-user, per-card "last viewed" timestamp (#3078).
+           profile.cardLastViews[cardId] = Date
+
+           Set when the user opens a card's detail view (Template.cardDetails
+           onCreated). Used to decide whether a card's minicard should show the
+           "has unread comments" highlight: a comment created after this
+           timestamp is unread, and a card that was never opened is treated as
+           unread whenever it has any comment at all (see
+           models/lib/unreadComments.js). Same shape as collapsedCardSections
+           above - a blackbox map keyed by cardId - because it is the same kind
+           of thing: per-user view state, not an edit to the card, so every
+           board member can have their own.
+        type: object
+      boardVisits:
+        description: |
+           When this user last opened each board: { <boardId>: Date }, at most
+           500 boards. Board menu -> Since your last visit lists what changed
+           after the visit before the current one
+           (docs/Features/General/Since-Last-Visit/Since-Last-Visit.md); written
+           only by boards.markVisited.
+        type: object
+      dismissedRuleSuggestions:
+        description: |
+           The rule suggestions this user dismissed, per board:
+           { <boardId>: [<suggestion key>] }. Board menu -> Rules -> Suggested
+           rules (docs/Features/Rules/Rule-Suggestions.md); written only by
+           rules.dismissSuggestion.
+        type: object
       keyboardShortcuts:
         description: |
-           User-specified state of keyboard shortcut activation.
+           User-specified state of keyboard shortcut activation. On by default,
+           the same default isKeyboardShortcuts() reads (#6755).
         type: boolean
       verticalScrollbars:
         description: |
@@ -4731,6 +9314,8 @@ definitions:
         description: |
            User-specified state of week-of-year in date displays.
         type: boolean
+      dateFormatOverride:
+        type: boolean
       dateFormat:
         description: |
            User-specified date format for displaying dates (includes time HH:MM).
@@ -4739,34 +9324,62 @@ definitions:
           - yyyy-mm-dd
           - dd-mm-yyyy
           - mm-dd-yyyy
-      zoomLevel:
+          - yyyy-mm-dd-date-only
+          - dd-mm-yyyy-date-only
+          - mm-dd-yyyy-date-only
+      calendarSystem:
         description: |
-           User-specified zoom level for board view (1.0 = 100%, 1.5 = 150%, etc.)
-        type: number
+           Member-selected calendar for rendered dates and calendar inputs.
+           Native Date storage and ISO interchange values are unchanged.
+        type: string
+        enum:
+          - gregorian
+          - jalali
+          - buddhist
+          - chinese
+          - coptic
+          - dangi
+          - ethioaa
+          - ethiopic
+          - hebrew
+          - indian
+          - islamic
+          - islamic-civil
+          - islamic-rgsa
+          - islamic-tbla
+          - islamic-umalqura
+          - iso8601
+          - japanese
+          - roc
       mobileMode:
         description: |
-           User-specified mobile/desktop mode toggle
+           User-specified mobile/desktop mode toggle.
+           #6419: must be OPTIONAL with NO default. A defaultValue of false set
+           mobileMode=false on every user, so Utils.getMobileMode() always returned
+           the profile value and the viewport-based auto-detection below it never
+           ran — every user was locked to desktop-mode even on a phone. Left unset,
+           it stays undefined until the user explicitly toggles, so phones
+           auto-detect mobile mode.
         type: boolean
       cardZoom:
         description: |
            User-specified zoom level for card details (1.0 = 100%, 1.5 = 150%, etc.)
         type: number
     required:
-      - templatesBoardId
-      - cardTemplatesSwimlaneId
-      - listTemplatesSwimlaneId
-      - boardTemplatesSwimlaneId
       - listWidths
       - listConstraints
       - autoWidthBoards
+      - fixedListWidthBoards
+      - fixedListWidths
       - swimlaneHeights
       - collapsedLists
+      - collapsedCards
       - collapsedSwimlanes
+      - collapsedCardSections
+      - cardLastViews
       - keyboardShortcuts
       - verticalScrollbars
       - showWeekOfYear
-      - zoomLevel
-      - mobileMode
       - cardZoom
   UsersSessiondata:
     type: object
@@ -4787,6 +9400,15 @@ definitions:
         description: |
            The display name of the organization
         type: string
+      isAdmin:
+        description: |
+           Multitenancy option D (docs/Design/Multitenancy/Multitenancy.md): this user
+           is a per-tenant Global Admin OF THIS ORGANIZATION - they may administer its
+           people and its backups, and nothing else. It is deliberately a flag on the
+           membership the user already has rather than a second membership list.
+           It NEVER implies the site-wide `isAdmin` flag, and a per-tenant admin can
+           never grant that one (models/lib/tenantAdmin.js).
+        type: boolean
     required:
       - orgId
       - orgDisplayName
@@ -4801,6 +9423,11 @@ definitions:
         description: |
            The display name of the team
         type: string
+      isAdmin:
+        description: |
+           #802: this member administers this team's members in All Boards, as
+           orgs.$.isAdmin does for an organization (models/lib/groupMembers.js).
+        type: boolean
     required:
       - teamId
       - teamDisplayName
@@ -4818,11 +9445,11 @@ definitions:
     required:
       - address
       - verified
-  UsersProfileEmailbuffer:
+  UsersPasskeys:
+    type: object
+  UsersWebpushsubscriptions:
     type: object
   UsersProfileBoardworkspacestree:
-    type: object
-  UsersProfileInvitedboards:
     type: object
   UsersProfileNotifications:
     type: object
@@ -4835,9 +9462,27 @@ definitions:
         description: |
            the date on which this notification was read
         type: string
+      showAt:
+        description: |
+           #5171: when the drawer starts showing this entry (ms since epoch),
+           from the member's tray schedule (models/lib/notificationDelivery.js).
+           Unset = at once, as before.
+        type: number
     required:
       - activity
-  UsersProfileStarredboards:
+  UsersProfileStarredpages:
     type: object
-  UsersImportusernames:
+    properties:
+      url:
+        description: |
+           RELATIVE, so a bookmark survives the site moving to another host.
+        type: string
+      title:
+        description: |
+           The words the browser tab shows, which are the words the dropdown lists.
+        type: string
+    required:
+      - url
+      - title
+  UsersProfileMydependencies:
     type: object

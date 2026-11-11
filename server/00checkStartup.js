@@ -26,14 +26,46 @@ if (errors.length > 0) {
   process.exit(1);
 }
 
-// Import cron job storage for persistent job tracking
-// import './cronJobStorage';
+
+// #6538: every link WeKan puts in an email - the board invitation, the password
+// reset, the address verification - is built from ROOT_URL. When ROOT_URL is left
+// at localhost, those mails go out with `http://127.0.0.1/b/...` in them, which
+// is the SENDER's own machine and unusable for everybody who receives it. The
+// mail is sent, nothing errors, and the only symptom is a link nobody can follow.
+//
+// Say it once, at startup, naming the setting and what to set it to. It is a
+// warning, not a refusal: a single-machine install where localhost IS the address
+// is perfectly valid.
+//
+// Not in a Sandstorm grain: there ROOT_URL is ALWAYS the grain's own loopback
+// address on port 4000 behind sandstorm-http-bridge (sandstorm-src/start.js sets
+// it), the grain has no SMTP of its own, and none of the advice applies - so the
+// warning was a false alarm in every grain's log.
+if (process.env.SANDSTORM !== '1') {
+  const rootUrl = process.env.ROOT_URL || '';
+  const local = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?\/?$/i.test(rootUrl);
+
+  if (!rootUrl) {
+    console.warn(
+      'ROOT_URL is not set. Links in invitation and password-reset emails are built ' +
+      'from it, so they will point at the wrong place. Set it to the address users ' +
+      'open WeKan at, e.g. ROOT_URL=https://boards.example.com (snap: snap set wekan ' +
+      'root-url=https://boards.example.com).',
+    );
+  } else if (local) {
+    console.warn(
+      `ROOT_URL is ${rootUrl}. Every link WeKan sends by email is built from it, so ` +
+      'invitation and password-reset mails will contain a localhost address that only ' +
+      'works on this machine. If WeKan is reached from anywhere else, set ROOT_URL to ' +
+      'that address (snap: snap set wekan root-url=https://boards.example.com).',
+    );
+  }
+}
 
 // Import migrations - COMMENTED OUT
-// import './migrations/fixMissingListsMigration';
 // import './migrations/fixAvatarUrls';
 // import './migrations/fixAllFileUrls';
-// import './migrations/comprehensiveBoardMigration';
+// (fixMissingListsMigration / comprehensiveBoardMigration removed in #6521)
 
 // Import file serving routes
 import './routes/universalFileServer';
@@ -46,5 +78,3 @@ import './lib/customHeadRender';
 import './import-users-for-methods';
 
 // Note: Automatic migrations are disabled - migrations only run when opening boards
-// import './boardMigrationDetector';
-// import './cronMigrationManager';

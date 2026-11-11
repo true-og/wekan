@@ -8,6 +8,11 @@
       #---------------------------------------------
       export MONGO_URL='mongodb://127.0.0.1:27017/wekan'
       #---------------------------------------------
+      # Card loading: 'all' (default, every card into the browser) or 'lazy'
+      # (each list loads only visible cards on demand, for very large boards).
+      # Also changeable in Admin Panel / Features.
+      #export CARDS_LOADING=lazy
+      #---------------------------------------------
       # Production: https://example.com/wekan
       # Local: http://localhost:2000
       #export ipaddress=$(ifdata -pa eth0)
@@ -15,6 +20,8 @@
       #---------------------------------------------
       # https://github.com/wekan/wekan/wiki/Troubleshooting-Mail
       # https://github.com/wekan/wekan-mongodb/blob/master/docker-compose.yml
+      # In Admin Panel / People / Email, enable "Enable below email settings"
+      # to reveal additional email sending options below the checkbox.
       export MAIL_URL='smtp://user:pass@mailserver.example.com:25/'
       export MAIL_FROM='Wekan Boards <info@example.com>'
       #export MAIL_SERVICE=Outlook365
@@ -62,9 +69,6 @@
       #export AVATARS_UPLOAD_MIME_TYPES="image/*"
       #export AVATARS_UPLOAD_MAX_SIZE=500000
       #---------------------------------------------------------------
-      # ==== RICH TEXT EDITOR IN CARD COMMENTS ====
-      # https://github.com/wekan/wekan/pull/2560
-      export RICHER_CARD_COMMENT_EDITOR=false
       #---------------------------------------------------------------
       # ==== CARD OPENED, SEND WEBHOOK MESSAGE ====
       export CARD_OPENED_WEBHOOK_ENABLED=false
@@ -157,7 +161,7 @@
       # Azure AD B2C. https://github.com/wekan/wekan/issues/5242
       #- OAUTH2_B2C_ENABLED=false
       # OAuth2 docs: https://github.com/wekan/wekan/wiki/OAuth2
-      # OAuth2 login style: popup or redirect.
+      # OAuth2 login style: redirect (default) or popup.
       #export OAUTH2_LOGIN_STYLE=redirect
       # Application GUID captured during app registration:
       #export OAUTH2_CLIENT_ID=xxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxx
@@ -179,7 +183,7 @@
       # ==== OAUTH2 KEYCLOAK ====
       # https://github.com/wekan/wekan/wiki/Keycloak  <== MAPPING INFO, REQUIRED
       #export OAUTH2_ENABLED=true
-      # OAuth2 login style: popup or redirect.
+      # OAuth2 login style: redirect (default) or popup.
       #export OAUTH2_LOGIN_STYLE=redirect
       #export OAUTH2_CLIENT_ID=<Keycloak create Client ID>
       #export OAUTH2_SERVER_URL=<Keycloak server name>/auth
@@ -194,7 +198,7 @@
       # https://github.com/wekan/wekan/wiki/OAuth2
       # Enable the OAuth2 connection
       #export OAUTH2_ENABLED=true
-      # OAuth2 login style: popup or redirect.
+      # OAuth2 login style: redirect (default) or popup.
       #export OAUTH2_LOGIN_STYLE=redirect
       # OAuth2 Client ID.
       #export OAUTH2_CLIENT_ID=abcde12345
@@ -375,6 +379,18 @@
       #export HEADER_LOGIN_FIRSTNAME=HEADERFIRSTNAME
       #export HEADER_LOGIN_LASTNAME=HEADERLASTNAME
       #export HEADER_LOGIN_EMAIL=HEADEREMAILADDRESS
+      # SECURITY (GHSA-jggc-qvfc-jr6x): comma-separated allowlist of source IPs
+      # allowed to use header login. The source IP is the real TCP peer of the
+      # connection (your reverse proxy), NOT the spoofable X-Forwarded-For header.
+      # REQUIRED when header login is enabled: if empty/unset, header login fails
+      # CLOSED and authenticates no one.
+      #export HEADER_LOGIN_TRUSTED_IPS=127.0.0.1,10.0.0.2
+      # Optional: if WeKan is behind MULTIPLE proxy hops, list the intermediate
+      # proxy IPs here. X-Forwarded-For is then honored ONLY when the immediate
+      # TCP peer is one of these trusted proxies, and the right-most hop that is
+      # not itself a trusted proxy (the real client) is matched against
+      # HEADER_LOGIN_TRUSTED_IPS above.
+      #export HEADER_LOGIN_TRUSTED_PROXIES=10.0.0.1,10.0.0.2
       #---------------------------------------------------------------------
       # LOGOUT_WITH_TIMER : Enables or not the option logout with timer
       # example : LOGOUT_WITH_TIMER=true
@@ -406,6 +422,76 @@
       #export SAML_IDENTIFIER_FORMAT=
       #export SAML_LOCAL_PROFILE_MATCH_ATTRIBUTE=
       #export SAML_ATTRIBUTES=
+      #export SAML_MERGE_EXISTING_USERS=false
+      #export SAML_IDP_PROFILE=standard
+      #export SAML_WANT_RESPONSE_SIGNED=
+      #export SAML_WANT_ASSERTIONS_SIGNED=
+      #export SAML_LOGIN_FLOW=
+      #---------------------------------------------------------------------
+      # Login with Meteor accounts providers, see docs/Features/Login-Page/OAuth-Providers.md
+      # and docs/Features/Login-Page/Passwordless.md. Every one of these can be overridden
+      # in Admin Panel / People / Login; a value set there wins over the environment
+      # variable. Register this callback URL at the provider:
+      #   <ROOT_URL>/_oauth/<service>  where service is google, github, facebook,
+      #   twitter, meteor-developer, weibo or meetup.
+      # ==== Google ==== create the app at https://console.cloud.google.com/apis/credentials
+      # callback URL: <ROOT_URL>/_oauth/google
+      #export OAUTH_GOOGLE_ENABLED=true
+      #export OAUTH_GOOGLE_CLIENT_ID=
+      #export OAUTH_GOOGLE_SECRET=
+      # OAUTH_GOOGLE_SECRET_FILE : read the secret from a file (Docker secrets) instead
+      #export OAUTH_GOOGLE_SECRET_FILE=/run/secrets/oauth_google_secret
+      # ==== GitHub ==== create the app at https://github.com/settings/developers
+      # callback URL: <ROOT_URL>/_oauth/github
+      #export OAUTH_GITHUB_ENABLED=true
+      #export OAUTH_GITHUB_CLIENT_ID=
+      #export OAUTH_GITHUB_SECRET=
+      # OAUTH_GITHUB_SECRET_FILE : read the secret from a file (Docker secrets) instead
+      #export OAUTH_GITHUB_SECRET_FILE=/run/secrets/oauth_github_secret
+      # ==== Facebook ==== create the app at https://developers.facebook.com/apps/
+      # callback URL: <ROOT_URL>/_oauth/facebook
+      #export OAUTH_FACEBOOK_ENABLED=true
+      #export OAUTH_FACEBOOK_APP_ID=
+      #export OAUTH_FACEBOOK_SECRET=
+      # OAUTH_FACEBOOK_SECRET_FILE : read the secret from a file (Docker secrets) instead
+      #export OAUTH_FACEBOOK_SECRET_FILE=/run/secrets/oauth_facebook_secret
+      # ==== Twitter / X ==== create the app at https://developer.x.com/en/portal/dashboard
+      # callback URL: <ROOT_URL>/_oauth/twitter
+      #export OAUTH_TWITTER_ENABLED=true
+      #export OAUTH_TWITTER_CONSUMER_KEY=
+      #export OAUTH_TWITTER_SECRET=
+      # OAUTH_TWITTER_SECRET_FILE : read the secret from a file (Docker secrets) instead
+      #export OAUTH_TWITTER_SECRET_FILE=/run/secrets/oauth_twitter_secret
+      # ==== Meteor Developer ==== create the app at https://www.meteor.com/
+      # callback URL: <ROOT_URL>/_oauth/meteor-developer
+      #export OAUTH_METEOR_DEVELOPER_ENABLED=true
+      #export OAUTH_METEOR_DEVELOPER_CLIENT_ID=
+      #export OAUTH_METEOR_DEVELOPER_SECRET=
+      # OAUTH_METEOR_DEVELOPER_SECRET_FILE : read the secret from a file (Docker secrets) instead
+      #export OAUTH_METEOR_DEVELOPER_SECRET_FILE=/run/secrets/oauth_meteor_developer_secret
+      # ==== Weibo ==== create the app at https://open.weibo.com/
+      # callback URL: <ROOT_URL>/_oauth/weibo
+      #export OAUTH_WEIBO_ENABLED=true
+      #export OAUTH_WEIBO_CLIENT_ID=
+      #export OAUTH_WEIBO_SECRET=
+      # OAUTH_WEIBO_SECRET_FILE : read the secret from a file (Docker secrets) instead
+      #export OAUTH_WEIBO_SECRET_FILE=/run/secrets/oauth_weibo_secret
+      # ==== Meetup ==== create the app at https://www.meetup.com/api/oauth/list/
+      # callback URL: <ROOT_URL>/_oauth/meetup
+      #export OAUTH_MEETUP_ENABLED=true
+      #export OAUTH_MEETUP_CLIENT_ID=
+      #export OAUTH_MEETUP_SECRET=
+      # OAUTH_MEETUP_SECRET_FILE : read the secret from a file (Docker secrets) instead
+      #export OAUTH_MEETUP_SECRET_FILE=/run/secrets/oauth_meetup_secret
+      # OAUTH_PROVIDERS_LOGIN_STYLE : redirect or popup, for all providers above. Default: redirect
+      #export OAUTH_PROVIDERS_LOGIN_STYLE=redirect
+      # OAUTH_PROVIDERS_MERGE_EXISTING_USERS : link a provider login to an existing WeKan
+      # account with the same email. Default: false = the login is refused, not merged,
+      # like OAUTH2_MERGE_EXISTING_USERS. Enable only if you trust the provider's emails.
+      #export OAUTH_PROVIDERS_MERGE_EXISTING_USERS=false
+      # PASSWORDLESS_ENABLED : email a one-time sign-in code instead of asking a
+      # password. Needs MAIL_URL. Also switchable in Admin Panel / People / Login.
+      #export PASSWORDLESS_ENABLED=true
       #---------------------------------------------------------------------
       # Wait spinner to use
       #export WAIT_SPINNER=Bounce

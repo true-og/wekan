@@ -1,5 +1,5 @@
 .js-add-subtask {
-  color: #8c8c8c;
+  color: var(--wekan-quiet-text, #595959);
 }
 textarea.js-add-subtask-item,
 textarea.js-edit-subtask-item {
@@ -12,7 +12,7 @@ textarea.js-edit-subtask-item {
 .subtask-title .js-delete-subtask,
 .subtask-title .js-view-subtask,
 .js-delete-subtask-item {
-  color: #8c8c8c;
+  color: var(--wekan-quiet-text, #595959);
   text-decoration: underline;
   word-wrap: break-word;
   flex-shrink: 0;
@@ -33,12 +33,12 @@ textarea.js-edit-subtask-item {
   flex-shrink: 0;
   width: 30px;
   height: 30px;
-  font-size: 18px;
-  line-height: 30px;
+  font-size: calc(18px * var(--wekan-ui-font-scale, 1));
+  line-height: calc(30px * var(--wekan-ui-font-scale, 1));
 }
 .subtask-title .title {
-  font-size: 18px;
-  line-height: 25px;
+  font-size: calc(18px * var(--wekan-ui-font-scale, 1));
+  line-height: calc(25px * var(--wekan-ui-font-scale, 1));
   flex: 1;
   order: 1;
 }
@@ -59,13 +59,13 @@ textarea.js-edit-subtask-item {
 .js-confirm-subtask-delete {
   background-color: #f7f7f7;
   position: absolute;
-  float: left;
+  float: inline-start;
   width: 60%;
   margin-top: 0;
-  margin-left: 13%;
+  margin-inline-start: 13%;
   padding-bottom: 2%;
-  padding-left: 3%;
-  padding-right: 3%;
+  padding-inline-start: 3%;
+  padding-inline-end: 3%;
   z-index: 17;
   border-radius: 3px;
 }
@@ -86,17 +86,17 @@ textarea.js-edit-subtask-item {
   padding: left 2% right 2%;
 }
 .js-confirm-subtask-delete .js-subtask-delete-buttons .confirm-subtask-delete {
-  margin-left: 12%;
-  float: left;
+  margin-inline-start: 12%;
+  float: inline-start;
 }
 .js-confirm-subtask-delete .js-subtask-delete-buttons .toggle-delete-subtask-dialog {
-  margin-right: 12%;
-  float: right;
+  margin-inline-end: 12%;
+  float: inline-end;
 }
 #card-details-overlay {
   top: 0;
   bottom: -600px;
-  right: 0;
+  inset-inline-end: 0;
   z-index: 15;
 }
 
@@ -121,7 +121,7 @@ textarea.js-edit-subtask-item {
 }
 .subtasks-item {
   margin: 0 0 0 0.1em;
-  line-height: 18px;
+  line-height: calc(18px * var(--wekan-ui-font-scale, 1));
   font-size: 1.1em;
   margin-top: 3px;
   display: flex;
@@ -140,7 +140,7 @@ textarea.js-edit-subtask-item {
   background-color: #ebebeb;
 }
 .subtasks-item .check-box-container {
-  padding-right: 10px;
+  padding-inline-end: 10px;
 }
 .subtasks-item .check-box {
   margin: 0.1em 0 0 0;
@@ -152,28 +152,18 @@ textarea.js-edit-subtask-item {
 /* Unicode checkbox icons styling */
 .subtasks-item .check-box-unicode {
   font-size: 1.3em;
-  margin-right: 8px;
+  margin-inline-end: 8px;
   cursor: pointer;
   display: inline-block;
   vertical-align: middle;
   line-height: 1;
 }
-/* Grey checkmarks when grey icons setting is enabled */
-body.grey-icons-enabled .subtasks-item .check-box.is-checked {
-  border-bottom: 2px solid #7a7a7a;
-  border-right: 2px solid #7a7a7a;
-}
-body.grey-icons-enabled .subtasks-item .check-box-unicode {
-  filter: grayscale(100%);
-  -webkit-filter: grayscale(100%);
-  opacity: 0.85;
-}
 .subtasks-item .item-title {
   flex: 1;
-  padding-left: 10px;
+  padding-inline-start: 10px;
 }
 .subtasks-item .item-title.is-checked {
-  color: #8c8c8c;
+  color: var(--wekan-quiet-text, #595959);
   font-style: italic;
 }
 .subtasks-item .item-title .viewer p {
@@ -191,4 +181,75 @@ body.grey-icons-enabled .subtasks-item .check-box-unicode {
   flex-shrink: 0;
   padding: 6px 10px 6px 10px;
   order: 2;
+}
+/* #3409: an archived subtask stays visible in the list, marked completed,
+   instead of disappearing — the same dimmed/italic treatment a checked
+   checklist item gets (.subtasks-item .item-title.is-checked above). */
+.subtask.is-completed .subtask-title .title {
+  color: var(--wekan-quiet-text, #595959);
+  font-style: italic;
+  text-decoration: line-through;
+}
+.subtask-completed-icon {
+  color: #3cb500;
+  flex-shrink: 0;
+  padding-top: 6px;
+  margin-inline-end: 0.3em;
+}
+.subtasks-hide-completed-toggle {
+  display: inline-block;
+  margin: 0.2em 0 0.5em 1.33em;
+  color: var(--wekan-quiet-text, #595959);
+  cursor: pointer;
+}
+.subtasks-hide-completed-toggle:hover {
+  color: inherit;
+}
+.subtasks-hide-completed-toggle i.fa {
+  margin-inline-end: 4px;
+}
+/* #2184: "Inherit parent's labels" checkbox on the add-subtask form */
+.subtask-inherit-labels {
+  display: block;
+  margin: 0.4em 0;
+  font-weight: normal;
+  cursor: pointer;
+}
+.subtask-inherit-labels input {
+  margin-inline-end: 4px;
+}
+/* #6091: read-only status (current list / board) of a subtask */
+.subtask-title .subtask-status {
+  order: 1;
+  flex-shrink: 0;
+  margin: 0 0.5em;
+  padding-top: 6px;
+  color: var(--wekan-quiet-text, #595959);
+  font-size: 0.85em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 40%;
+}
+.subtask-title .subtask-status i.fa {
+  margin-inline-end: 4px;
+}
+
+/* #4693: the done checkbox at the start of each subtask row, like a checklist
+   item's. order: -1 keeps it first whatever else the row carries. */
+.subtask-title .subtask-done-toggle {
+  order: -1;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  margin-inline-end: 8px;
+  cursor: pointer;
+}
+.subtask-title .subtask-done-toggle.is-disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+.subtask-title.is-done .title {
+  text-decoration: line-through;
+  color: var(--wekan-quiet-text, #595959);
 }

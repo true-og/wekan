@@ -1,6 +1,7 @@
 #!/bin/bash
+if [ -n "${ZSH_VERSION:-}" ]; then exec /bin/bash "$0" "$@"; fi
 
-# WeKan REMOTE release script — pushes your CHANGELOG.md edit and triggers the
+# WeKan REMOTE release script — pushes your CHANGELOG-big.md edit and triggers the
 # GitHub Actions release workflow, which does EVERYTHING else remotely.
 #
 # For a fully LOCAL release (build on this machine), use ./releases/release.sh.
@@ -8,17 +9,27 @@
 # published on your machine — GitHub Actions does it all, in parallel.
 #
 # Usage:
-#   1. Add the new release section to CHANGELOG.md (e.g. "# v9.36 2026-06-10").
-#   2. Run:
-#        ./releases/release-all.sh                 # versions read from CHANGELOG.md
-#      or override explicitly:
+#   1. Add your changes under a "# Upcoming WeKan ® release" section in
+#      CHANGELOG-big.md - there isn't one lying around empty between releases,
+#      so create it yourself from docs/DeveloperDocs/Changelog-Upcoming-Template.md
+#      the moment you have a real entry for it.
+#   2. Run (NO version number needed):
+#        ./releases/release-all.sh
+#      The script renames "# Upcoming ..." to the next version (always +1 minor)
+#      dated today. You can also specify the same version pair explicitly:
 #        ./releases/release-all.sh 9.35 9.36       # PREVIOUS NEW
 #
 # What this script does locally (the only local steps):
-#   1. Determines PREVIOUS and NEW version (from CHANGELOG.md, or from args).
-#   2. Commits and pushes pending changes (your CHANGELOG.md edit) to main so the
+#   1. Repoints stale commit links in the CHANGELOG section being released: a rebase,
+#      amend or squash between writing an entry and releasing it changes the hashes,
+#      and the links would 404 once pushed. Each is remapped by commit subject.
+#   2. Determines PREVIOUS and NEW version automatically: renames the "# Upcoming
+#      WeKan ® release" heading to the next version. A missing Upcoming heading
+#      stops the script; everything under it is optional. An explicit
+#      "PREVIOUS NEW" pair must match the next version.
+#   3. Commits and pushes pending changes (your CHANGELOG-big.md edit) to main so the
 #      workflow can read them.
-#   3. Triggers .github/workflows/release-all.yml.
+#   4. Triggers .github/workflows/release-all.yml.
 #
 # GitHub Actions (release-all.yml) then does everything else remotely, in
 # parallel where possible:
@@ -30,6 +41,14 @@
 #   - builds:  tags v<new>, builds amd64/arm64/win64/mac bundles, creates the
 #              GitHub Release, builds+pushes Docker images, builds the snap.
 #
+# Release notes summarize translation details as updated language names.
+# Add **Languages updated:** metadata beneath the Translations group label
+# (optional; without it the notes do not list that group's languages).
+# Notes include only In short, Security, translation languages, thanks and
+# the changelog link. Other details stay in CHANGELOG-big.md. Never append
+# "Binaries in these bundles" or a provenance table; retain provenance.tsv
+# build artifacts and checksum verification separately.
+#
 # Track progress at: https://github.com/wekan/wekan/actions
 #
 # Required GitHub secrets (DOCKERHUB_AUTH, QUAY_AUTH, GHCR_AUTH, SNAP_AUTH,
@@ -37,57 +56,126 @@
 # documented in, and can be created with: ./releases/create-github-secrets.sh
 
 set -e
+. "$(dirname "${BASH_SOURCE[0]}")/tools-env.sh"   # temporary files and downloads go to .tools/tmp
+CHECK_ONLY=false
+if [ "${1:-}" = --check ]; then CHECK_ONLY=true; shift; fi
 
-# Install the tools this trigger needs (Ubuntu apt / macOS brew) if missing.
-. "$(cd "$(dirname "$0")" && pwd)/ensure-tools.sh"
-ensure_tools git gh
-
-# Resolve repo root from script location so this works regardless of CWD.
+# Check release notes before installing tools, changing files or contacting forges.
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_DIR"
+bash "$REPO_DIR/releases/check-upcoming-release.sh" "$REPO_DIR/CHANGELOG-big.md"
+mkdir -p "$REPO_DIR/.tools/tmp"
+export TMPDIR="$REPO_DIR/.tools/tmp"
 
-# ── Determine PREVIOUS (OLD) and NEW version ────────────────────────────────
-# Explicit args win; otherwise read the top two "# v<x> <date>" headings from
-# CHANGELOG.md (newest first).
-if [ -n "${1:-}" ] && [ -n "${2:-}" ]; then
-  OLD="${1#v}"
-  NEW="${2#v}"
-else
-  mapfile -t RELEASE_LINES < <(grep -E '^# v[0-9]+\.[0-9]+(\.[0-9]+)?[ -]+[0-9]{4}-[0-9]{2}-[0-9]{2}' CHANGELOG.md | head -2)
-  NEW=$(echo "${RELEASE_LINES[0]:-}" | grep -oE 'v[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 | sed 's/^v//')
-  OLD=$(echo "${RELEASE_LINES[1]:-}" | grep -oE 'v[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 | sed 's/^v//')
-  if [ -z "$NEW" ] || [ -z "$OLD" ]; then
-    echo "Error: could not detect both NEW and PREVIOUS version from CHANGELOG.md." >&2
-    echo "Add a '# v<new> <YYYY-MM-DD>' heading, or pass versions: $0 9.35 9.36" >&2
+# Refuse stale source reviews before changing release notes or publishing.
+# The workflows repeat this gate against their own checkout.
+python3 "$REPO_DIR/releases/check-telemetry.py" --source "$REPO_DIR"
+
+python3 "$REPO_DIR/releases/remote-release.py" --audit
+[ "$(git branch --show-current)" = main ] || { echo "Error: Release from main only." >&2; exit 1; }
+
+case "$(git remote get-url origin)" in
+  git@github.com:wekan/wekan|git@github.com:wekan/wekan.git|\
+  ssh://git@github.com/wekan/wekan|ssh://git@github.com/wekan/wekan.git|\
+  https://github.com/wekan/wekan.git|https://github.com/wekan/wekan) ;;
+  *) echo 'Error: origin must point to wekan/wekan.' >&2; exit 1 ;;
+esac
+
+# Install the tools this trigger needs if missing.
+. "$REPO_DIR/releases/ensure-tools.sh"
+ensure_tools git gh
+gh auth status
+
+# ── Release on top of what GitHub has ─────────────────────────────────────────
+# Somebody else - a merged pull request, the release bot's version bump - may
+# have pushed since the last pull. v12.73 was prepared on a stale main: its
+# push was refused, and the script stopped before dispatching the workflow, so
+# no release ran at all. Pull first, the same way build.sh's "git pull" does
+# (fetch, fast-forward or merge, repoint moved CHANGELOG links), so the version,
+# the rename and the push all start from origin/main.
+"$REPO_DIR/build.sh" git-pull || { echo "Error: git pull did not finish; nothing was released." >&2; exit 1; }
+bash "$REPO_DIR/releases/check-upcoming-release.sh" "$REPO_DIR/CHANGELOG-big.md"
+
+# ── Version helpers ─────────────────────────────────────────────────────────
+# WeKan versions are NN.MM with a 2-digit minor. Encode NN.MM as the integer
+# NN*100+MM so the release-to-release step (always +1) can be applied with
+# plain integer arithmetic, and a minor of 99 rolls into the next major
+# (9.99 -> 10.00).
+wekan_enc() { local v="${1#v}"; local M="${v%%.*}"; local m="${v#*.}"; m="${m%%.*}"; echo $(( 10#$M * 100 + 10#$m )); }
+wekan_dec() { printf '%d.%02d' $(( $1 / 100 )) $(( $1 % 100 )); }
+
+# Check every version source before changing any files. A release can exist even
+# when its changelog heading was mistakenly left as Upcoming.
+LATEST="$(bash "$REPO_DIR/releases/latest-release-version.sh")"
+
+# An Upcoming heading is mandatory, including explicit versions; its content is optional.
+OLD="$LATEST"
+NEW="$(wekan_dec $(( $(wekan_enc "$OLD") + 1 )) )"
+if [ -n "${1:-}" ] || [ -n "${2:-}" ] || [ "$#" -gt 2 ]; then
+  if [ "$#" -ne 2 ] || [ "${1#v}" != "$OLD" ] || [ "${2#v}" != "$NEW" ]; then
+    echo "Error: release must advance v$OLD to v$NEW; refusing stale or reused versions." >&2
     exit 1
   fi
 fi
 
+if [ "$CHECK_ONLY" = true ]; then
+  echo "Release preflight passed: v$OLD -> v$NEW"
+  exit 0
+fi
+
+# ── Repoint stale commit links in the section about to be released ───────────
+# A rebase / amend / squash between writing a CHANGELOG bullet and releasing it
+# rewrites the linked commit's hash, so the not-yet-released links would 404 once
+# pushed. Just before the release is prepared, repoint each stale link in the
+# unreleased section to the rewritten copy of the same commit (matched by commit
+# subject). The logic lives in releases/fix-changelog-hashes.sh — shared with
+# build.sh's "Update git ..." option so there is ONE implementation.
+bash "$(dirname "$0")/fix-changelog-hashes.sh" || true
+
+# ── Determine PREVIOUS (OLD) and NEW version — no version argument needed ────
+DATE="$(date +%F)"
+echo "--- Renaming '# Upcoming WeKan ® release' -> '# v$NEW $DATE WeKan ® release' ---"
+_tmp="$(mktemp "$TMPDIR/wekan.XXXXXX")"
+sed "s|^# Upcoming WeKan ® release.*|# v$NEW $DATE WeKan ® release|" CHANGELOG-big.md > "$_tmp" && mv "$_tmp" CHANGELOG-big.md
+
+# Keep CHANGELOG-big.md small enough for GitHub to show it: older releases move
+# to old-CHANGELOG/ (the newest, this one, always stays). Committed with the rename.
+node "$REPO_DIR/releases/changelog-archive.mjs"
+# CHANGELOG.md is the short changelog - the In short of the five newest releases
+# - written from CHANGELOG-big.md, so it gains this release in the same commit.
+node "$REPO_DIR/releases/changelog-short.mjs"
+
+# Do not open an empty Upcoming section. Add real notes before the next release.
+
 echo "=== WeKan remote release: v$OLD -> v$NEW ==="
-echo "    Previous version (from CHANGELOG.md): v$OLD"
-echo "    New version      (from CHANGELOG.md): v$NEW"
+echo "    Previous version (changelog, package and local/remote tags): v$OLD"
+echo "    New version: v$NEW"
 echo ""
 
-# ── Step 1: Push your pending CHANGELOG.md edit so the workflow can read it ──
+# ── Step 1: Push your pending CHANGELOG-big.md edit so the workflow can read it ──
 # This is the only thing built/changed on your machine. version bumps, docs,
 # builds and cross-repo updates all happen remotely in GitHub Actions.
-if ! git diff --quiet || ! git diff --cached --quiet; then
-  echo "--- Committing and pushing pending changes (e.g. CHANGELOG.md) ---"
+if [ -n "$(git status --porcelain)" ]; then
+  echo "--- Committing and pushing pending changes (e.g. CHANGELOG-big.md) ---"
   git add --all
   git commit -m "Prepare v$NEW release"
 fi
 
-LOCAL=$(git rev-parse HEAD)
-REMOTE=$(git rev-parse @{upstream} 2>/dev/null || echo "")
-if [ "$LOCAL" != "$REMOTE" ]; then
-  echo "--- Pushing to remote ---"
-  git push
-fi
+# build.sh's "git push": checks the CHANGELOG links, pushes, and when origin
+# moved meanwhile pulls once and pushes again - instead of stopping here with
+# the release commit made and no workflow dispatched.
+echo "--- Pushing to remote ---"
+"$REPO_DIR/build.sh" git-push || {
+  echo "Error: the push did not finish, so the release workflow was NOT dispatched." >&2
+  echo "       Fix what build.sh said, then run ./build.sh git-push and dispatch it:" >&2
+  echo "       gh workflow run release-all.yml --repo wekan/wekan --ref main -f old_version=$OLD -f new_version=$NEW" >&2
+  exit 1
+}
 echo ""
 
 # ── Step 2: Trigger the GitHub Actions release workflow ─────────────────────
 echo "--- Triggering GitHub Actions release workflow (release-all.yml) ---"
-gh workflow run release-all.yml \
+gh workflow run release-all.yml --repo wekan/wekan --ref main \
   -f old_version="$OLD" \
   -f new_version="$NEW"
 echo ""

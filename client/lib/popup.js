@@ -4,6 +4,8 @@ import { Tracker } from 'meteor/tracker';
 import { TAPi18n } from '/imports/i18n';
 import { EscapeActions } from '/client/lib/escapeActions';
 import { Utils } from '/client/lib/utils';
+import { computePopupOffset } from '/client/lib/popupOffset';
+import { focusFirstControl } from '/client/lib/accessibility';
 
 window.Popup = new (class {
   constructor() {
@@ -26,12 +28,28 @@ window.Popup = new (class {
     this._dep = new Tracker.Dependency();
   }
 
+  focusCurrentPopup() {
+    Tracker.afterFlush(() => {
+      const popup = document.querySelector('.js-pop-over');
+      if (!popup) return;
+      focusFirstControl(popup);
+    });
+  }
+
   /// This function returns a callback that can be used in an event map:
   ///   Template.tplName.events({
   ///     'click .elementClass': Popup.open("popupName"),
   ///   });
   /// The popup inherit the data context of its parent.
-  open(name) {
+  ///
+  /// `openOptions.titleKey` names the translation to use for the header title,
+  /// for a popup whose title is a phrase the app ALREADY has. The convention is
+  /// `<popupName>-title`, which is right when the title is that popup's own
+  /// words; it is wrong when they are words that exist elsewhere, because
+  /// adding the convention key would put a second copy of one phrase into all
+  /// 147 language files - starting as English in every one of them, so most
+  /// languages would show English for something they have already translated.
+  open(name, openOptions = {}) {
     const self = this;
     const popupName = `${name}Popup`;
     function clickFromPopup(evt) {
@@ -53,6 +71,19 @@ window.Popup = new (class {
           $(previousOpenerElement).removeClass('is-active');
           // Clean up previous popup content to prevent mixing
           self._cleanupPreviousPopupContent();
+          // #6686: a popup opened from a card (e.g. the Labels popup) that is
+          // never explicitly closed (the card is closed/switched without going
+          // through Popup.close/back) leaves this popup's stack non-empty. The
+          // next *fresh* open (not a sub-popup opened from within the current
+          // popup) must replace that stale stack rather than push on top of
+          // it - otherwise the old, still-rendered entry stacks alongside the
+          // new one and its data context (the previous card) can end up
+          // reacting to clicks meant for the new card. A sub-popup opened
+          // from inside the currently open popup (clickFromPopup) legitimately
+          // grows the stack and must not be reset here.
+          if (!clickFromPopup(evt)) {
+            self._stack = [];
+          }
         }
       }
 
@@ -82,13 +113,13 @@ window.Popup = new (class {
         popupName,
         openerElement,
         hasPopupParent: clickFromPopup(evt),
-        title: self._getTitle(popupName),
+        title: self._getTitle(popupName, openOptions.titleKey),
         depth: self._stack.length,
         offset: self._getOffset(openerElement, popupName),
-        dataContext: (this && this.currentData && this.currentData()) || (options && options.dataContextIfCurrentDataIsUndefined) || this,
+        dataContext: openOptions.dataContext || (this && this.currentData && this.currentData()) || (options && options.dataContextIfCurrentDataIsUndefined) || this,
       });
 
-      const $contentWrapper = $('.content-wrapper')
+      const $contentWrapper = $('.content-wrapper');
       if ($contentWrapper.length > 0) {
         const contentWrapper = $contentWrapper[0];
         self._getTopStack().scrollTop = contentWrapper.scrollTop;
@@ -118,8 +149,10 @@ window.Popup = new (class {
           },
           document.body,
         );
+        self.focusCurrentPopup();
       } else {
         self._dep.changed();
+        self.focusCurrentPopup();
       }
     };
   }
@@ -135,7 +168,16 @@ window.Popup = new (class {
 
     return function(evt, tpl) {
       const context = (this.currentData && this.currentData()) || this;
-      context.__afterConfirmAction = action;
+      // #6479: store the pending confirm action on the Popup instance, NOT on the
+      // Blaze data context. The old code stashed it as a field on the context and
+      // the confirm button read it back as `this.__afterConfirmAction`; but the
+      // context is a ReactiveCache/Minimongo document (e.g. a board member sub-doc),
+      // and once Blaze re-renders the confirmation popup with a fresh/immutable copy
+      // of that context the field is gone, so clicking "Remove member" (and every
+      // other confirm dialog) silently did nothing. The instance field survives the
+      // re-render; the action is still invoked with the confirmation popup's own data
+      // context as `this`, so `this.userId` etc. keep working.
+      self._afterConfirmAction = action;
       self.open(name).call(context, evt, tpl);
     };
   }
@@ -153,7 +195,7 @@ window.Popup = new (class {
   /// steps back is greater than the popup stack size, the popup will be closed.
   back(n = 1) {
     if (this._stack.length > n) {
-      const $contentWrapper = $('.content-wrapper')
+      const $contentWrapper = $('.content-wrapper');
       if ($contentWrapper.length > 0) {
         const contentWrapper = $contentWrapper[0];
         const stack = this._stack[this._stack.length - n];
@@ -170,6 +212,7 @@ window.Popup = new (class {
       }
       for (let i = 0; i < n; i++) this._stack.pop();
       this._dep.changed();
+      this.focusCurrentPopup();
     } else {
       this.close();
     }
@@ -187,6 +230,11 @@ window.Popup = new (class {
       this._stack = [];
       // Clean up popup content when closing
       this._cleanupPreviousPopupContent();
+      Tracker.afterFlush(() => {
+        if (openerElement?.isConnected && typeof openerElement.focus === 'function') {
+          openerElement.focus();
+        }
+      });
     }
   }
 
@@ -222,117 +270,43 @@ window.Popup = new (class {
     return () => {
       Utils.windowResizeDep.depend();
 
-      if (Utils.isMiniScreen()) return { left: 0, top: 0 };
+      // #5667: read the current page scroll and the opener's document offset,
+      // then delegate the geometry to the pure, unit-tested computePopupOffset.
+      // It lays the popup out in VIEWPORT coordinates — so a date-picker opened
+      // low on a scrolled page stays fully visible instead of extending past the
+      // visible area — and returns document coordinates for the absolute style.
+      const hasOpener = !!($element && $element.length);
+      const offset = hasOpener ? $element.offset() : null;
+      const opener = hasOpener
+        ? { top: offset.top, left: offset.left, height: $element.outerHeight() }
+        : null;
 
-      const viewportWidth = $(window).width();
-      const viewportHeight = $(window).height();
-      const viewportPadding = 10;
-      // Calculate actual popup width based on CSS: min(380px, 55vw)
-      const popupWidth = Math.min(380, viewportWidth * 0.55);
-
-      // Card details popup: dock it to the top of the viewport so it overlays
-      // the global and board header bars (its z-index already sits above them)
-      // instead of opening downward from the clicked minicard.
-      if (popupName === 'cardDetailsPopup') {
-        const cardWidth = Math.min(600, viewportWidth * 0.8);
-        const centeredLeft = (viewportWidth - cardWidth) / 2;
-        // top is forced to 0 in CSS (.pop-over[data-popup="cardDetailsPopup"])
-        // so the card overlays the header bars; use the full viewport height.
-        return {
-          left: Math.max(viewportPadding, centeredLeft),
-          top: 0,
-          maxHeight: viewportHeight,
-        };
-      }
-
-      // If the opener element is missing (e.g., programmatic open), fallback to viewport origin
-      if (!$element || $element.length === 0) {
-        return {
-          left: viewportPadding,
-          top: viewportPadding,
-          maxHeight: viewportHeight - viewportPadding * 2,
-        };
-      }
-
-      const offset = $element.offset();
-      const openerTop = offset.top;
-      const openerBottom = offset.top + $element.outerHeight();
-      const clampedLeft = Math.max(
-        viewportPadding,
-        Math.min(offset.left, viewportWidth - popupWidth - viewportPadding),
-      );
-
-      // Check if this is an admin panel edit popup
-      const isAdminEditPopup = $element.hasClass('edit-user') ||
-                              $element.hasClass('edit-org') ||
-                              $element.hasClass('edit-team');
-
-      if (isAdminEditPopup) {
-        // Center the popup horizontally and use full height
-        const centeredLeft = (viewportWidth - popupWidth) / 2;
-
-        return {
-          left: Math.max(viewportPadding, centeredLeft), // Ensure popup doesn't go off screen
-          top: viewportPadding, // Start from top with small margin
-          maxHeight: viewportHeight - viewportPadding * 2, // Use full height minus small margins
-        };
-      }
-
-      // Calculate available heights around the opener
-      const spaceBelow = viewportHeight - openerBottom - viewportPadding;
-      const spaceAbove = openerTop - viewportPadding;
-      const preferBelow = spaceBelow >= spaceAbove;
-
-      // For language popup, don't use dynamic height to avoid overlapping board
-      const isLanguagePopup = $element.hasClass('js-change-language');
-      let availableHeight;
-
-      if (isLanguagePopup) {
-        // For language popup, position content area below right vertical scrollbar
-        const languageTop = openerBottom;
-        const languageAvailable = Math.max(
-          0,
-          viewportHeight - languageTop - viewportPadding,
-        );
-        const calculatedHeight = Math.min(
-          languageAvailable,
-          viewportHeight * 0.5,
-        ); // Max 50% of viewport
-
-        return {
-          left: clampedLeft,
-          top: languageTop,
-          maxHeight: Math.max(calculatedHeight, 0),
-        };
-      } else {
-        // For other popups, choose the side with more space and keep popup fully in viewport.
-        if (preferBelow) {
-          availableHeight = Math.max(0, Math.min(spaceBelow, viewportHeight * 0.8));
-          return {
-            left: clampedLeft,
-            top: openerBottom,
-            maxHeight: availableHeight,
-          };
-        }
-
-        availableHeight = Math.max(0, Math.min(spaceAbove, viewportHeight * 0.8));
-        const top = Math.max(viewportPadding, openerTop - availableHeight);
-
-        return {
-          left: clampedLeft,
-          top,
-          maxHeight: availableHeight,
-        };
-      }
+      return computePopupOffset({
+        viewportWidth: $(window).width(),
+        viewportHeight: $(window).height(),
+        scrollTop: $(window).scrollTop() || 0,
+        scrollLeft: $(window).scrollLeft() || 0,
+        opener,
+        popupName,
+        isMiniScreen: Utils.isMiniScreen(),
+        isAdminEditPopup:
+          hasOpener &&
+          ($element.hasClass('edit-user') ||
+            $element.hasClass('edit-org') ||
+            $element.hasClass('edit-team')),
+        isLanguagePopup: hasOpener && $element.hasClass('js-change-language'),
+        viewportPadding: 10,
+      });
     };
   }
 
   // We get the title from the translation files. Instead of returning the
   // result, we return a function that compute the result and since `TAPi18n.__`
   // is a reactive data source, the title will be changed reactively.
-  _getTitle(popupName) {
+  _getTitle(popupName, titleKey) {
     return () => {
-      const translationKey = `${popupName}-title`;
+      // An explicit key wins, for a title the app already has words for.
+      const translationKey = titleKey || `${popupName}-title`;
 
       // XXX There is no public API to check if there is an available
       // translation for a given key. So we try to translate the key and if the

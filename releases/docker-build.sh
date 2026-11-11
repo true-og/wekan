@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 if [ $# -ne 1 ]
   then
@@ -9,8 +10,9 @@ fi
 
 VERSION=$1
 
-# Check is there script for deleting Docker containers
-W_DIR="../w"
+# Check is there script for deleting Docker containers. Companion repositories
+# live under .tools/ (CLAUDE.md), not in ../w beside the repo.
+W_DIR=".tools"
 CLEANUP_DIR="$W_DIR/docker-cleanup-volumes"
 if [ ! -d "$W_DIR" ]; then
     mkdir -p "$W_DIR"
@@ -19,7 +21,7 @@ if [ ! -d "$CLEANUP_DIR" ]; then
     (cd "$W_DIR" && git clone https://github.com/wekan/docker-cleanup-volumes)
 fi
 # Delete Docker containers
-(cd ../w/docker-cleanup-volumes && git pull && ./start.sh)
+(cd "$CLEANUP_DIR" && git pull && ./start.sh)
 
 # Install Docker build deps
 ./releases/docker-build-deps.sh
@@ -88,19 +90,44 @@ fi
 echo "  OK: No Go buildinfo binaries found"
 '
 
-echo "=== Step 3: Checks passed - building and pushing multi-arch image to registries ==="
+echo "=== Step 3: Checks passed - building and pushing multi-arch image to Docker Hub and GHCR ==="
+# --provenance=mode=max: full build provenance (SLSA), matching release-all.yml.
+# The local --load build above gets none - the docker exporter cannot carry
+# attestations - so only this pushing build has it.
+#
+# The comment is HERE and not among the arguments below: a `#` after a line
+# continuation comments out the REST OF THE JOINED LINE, so the command becomes
+# `buildx build` with every argument swallowed. `bash -n` accepts it, because it
+# is valid syntax - it is just a different command.
 ${DOCKER} buildx build \
+  --provenance=mode=max \
   --platform linux/amd64,linux/arm64 \
   -t wekanteam/wekan:v${VERSION} \
   -t wekanteam/wekan:latest \
-  -t quay.io/wekan/wekan:v${VERSION} \
-  -t quay.io/wekan/wekan:latest \
   -t ghcr.io/wekan/wekan:v${VERSION} \
   -t ghcr.io/wekan/wekan:latest \
   --push \
   .
 
+# Copy the published manifest to Quay separately. Its read-only outages must
+# not undo a completed Docker Hub/GHCR build; other Quay errors still fail.
+if quay_output="$(${DOCKER} buildx imagetools create \
+  -t "quay.io/wekan/wekan:v${VERSION}" \
+  -t "quay.io/wekan/wekan:latest" \
+  "ghcr.io/wekan/wekan:v${VERSION}" 2>&1)"; then
+  printf '%s\n' "$quay_output"
+  echo "Quay manifest published"
+else
+  printf '%s\n' "$quay_output" >&2
+  if printf '%s' "$quay_output" | grep -qi 'System is currently read-only.*write operations are currently suspended'; then
+    echo "Quay is read-only; Docker Hub and GHCR were published. Re-run the Quay manifest copy when writes resume." >&2
+  else
+    echo "Could not copy the published manifest to Quay." >&2
+    exit 1
+  fi
+fi
+
 echo "=== Step 4: Cleanup local check image ==="
 ${DOCKER} rmi "${CHECK_IMAGE}" || true
 
-echo "=== All done: v${VERSION} pushed to all registries ==="
+echo "=== All done: v${VERSION} published to Docker Hub and GHCR ==="

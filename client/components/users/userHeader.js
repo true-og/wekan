@@ -1,9 +1,30 @@
+import '/client/components/forms/dateFormatSettings';
+import { accountOperationErrorKey } from '/client/lib/accountOperationError';
+import { languageFlags, languageLabelParts } from '/imports/i18n/languageFlags';
 import { ReactiveCache } from '/imports/reactiveCache';
 import { TAPi18n } from '/imports/i18n';
 import { FlowRouter } from 'meteor/ostrio:flow-router-extra';
 import AccountSettings from '/models/accountSettings';
 import Users from '/models/users';
 import { Utils } from '/client/lib/utils';
+import { ReactiveVar } from 'meteor/reactive-var';
+import { detectAvailableFonts } from '/client/lib/fontDetector';
+import { fontFamilyValue, fontSizeValue, UI_FONT_SIZES, isHexColor6, colorValue, readableUiTextColor } from '/models/lib/uiFonts';
+import { activeThemeName } from '/client/lib/activeTheme';
+const { allBoardsPath, SECTION_ARCHIVE } = require('/models/lib/allBoardsUrls');
+
+// WCAG 2.5.3 Label in Name: the link shows the avatar's initials (when the avatar
+// is not a picture) and the name, so its accessible name starts with exactly
+// those, followed by what it opens.
+Template.headerUserBar.helpers({
+  userBarLabel() {
+    const user = ReactiveCache.getCurrentUser();
+    if (!user) return TAPi18n.__('memberMenuPopup-title');
+    const initials = Template.userAvatar.__helpers.get('initialsInName').call({ userId: user._id });
+    const name = (user.profile && user.profile.fullname) || user.username || '';
+    return `${initials}${name} ${TAPi18n.__('memberMenuPopup-title')}`.replace(/\s+/g, ' ').trim();
+  },
+});
 
 Template.headerUserBar.events({
   'click .js-open-header-member-menu': Popup.open('memberMenu'),
@@ -15,24 +36,8 @@ Template.memberMenuPopup.onCreated(function () {
 });
 
 Template.memberMenuPopup.helpers({
-  templatesBoardId() {
-    const currentUser = ReactiveCache.getCurrentUser();
-    if (currentUser) {
-      return currentUser.getTemplatesBoardId();
-    } else {
-      // No need to getTemplatesBoardId on public board
-      return false;
-    }
-  },
-  templatesBoardSlug() {
-    const currentUser = ReactiveCache.getCurrentUser();
-    if (currentUser) {
-      return currentUser.getTemplatesBoardSlug();
-    } else {
-      // No need to getTemplatesBoardSlug() on public board
-      return false;
-    }
-  },
+  // #2460: Member Settings / SQRL, when the site admin offers SQRL.
+  sqrlOffered() { return require('/client/lib/sqrl').sqrlOffered(ReactiveCache.getCurrentSetting()); },
   isSupportPageEnabled() {
     const setting = ReactiveCache.getCurrentSetting();
     return setting && setting.supportPageEnabled;
@@ -75,7 +80,7 @@ Template.memberMenuPopup.events({
       FlowRouter.go('bookmarks');
       Popup.back();
     } else {
-      Popup.open('bookmarksPopup')(e);
+      Popup.open('bookmarks')(e);
     }
   },
   'click .js-my-cards'() {
@@ -84,33 +89,68 @@ Template.memberMenuPopup.events({
   'click .js-due-cards'() {
     Popup.back();
   },
+  'click .js-my-attachments'() {
+    Popup.back();
+  },
+  'click .js-starred-items'() {
+    Popup.back();
+  },
+  // Boards in Archive is a SECTION of All Boards - the row in its left menu -
+  // not a page of its own. This sent the reader to `/archive`, the full-width
+  // page that section replaced: the same list, but with no menu beside it and
+  // no way to step across to Starred or Remaining without going back first.
+  // docs/Features/All-Boards/Archive.md
   'click .js-open-archived-board'() {
-    Modal.open('archivedBoards');
+    FlowRouter.go(allBoardsPath(SECTION_ARCHIVE, []));
+    Popup.back();
   },
   'click .js-invite-people': Popup.open('invitePeople'),
   'click .js-edit-profile': Popup.open('editProfile'),
+  'click .js-member-date-settings': Popup.open('memberDateSettings', { titleKey: 'date' }),
   'click .js-change-settings': Popup.open('changeSettings'),
+  'click .js-change-color': Popup.open('changeColor'),
+  'click .js-open-notification-settings': Popup.open('notificationSettings', {
+    titleKey: 'notifications',
+    dataContext: { scope: 'member' },
+  }),
+  'click .js-change-font': Popup.open('changeFont'),
   'click .js-change-avatar': Popup.open('changeAvatar'),
   'click .js-change-password': Popup.open('changePassword'),
+  'click .js-two-factor-auth': Popup.open('twoFactorAuth'),
+  'click .js-passkeys': Popup.open('passkeys'),
+  'click .js-sqrl': Popup.open('sqrl'),
+  'click .js-hidden-boards': Popup.open('hiddenBoards'),
   'click .js-change-language': Popup.open('changeLanguage'),
   'click .js-support': Popup.open('support'),
-  'click .js-notifications-drawer-toggle'() {
-    Session.set('showNotificationsDrawer', !Session.get('showNotificationsDrawer'));
-  },
-  'click .js-toggle-grey-icons'(event) {
+  async 'click .js-logout'(event) {
     event.preventDefault();
-    const currentUser = ReactiveCache.getCurrentUser();
-    if (!currentUser || !Meteor.userId()) return;
-    const current = (currentUser.profile && currentUser.profile.GreyIcons) || false;
-    Meteor.call('toggleGreyIcons', (err) => {
-      if (err && process.env.DEBUG === 'true') console.error('toggleGreyIcons error', err);
-    });
-  },
-  'click .js-logout'(event) {
-    event.preventDefault();
-
+    if (Meteor.user()?.authenticationMethod === 'saml') {
+      try {
+        const url = await Meteor.callAsync('getSamlLogoutUrl');
+        if (url) {
+          Meteor.logout(error => {
+            if (!error) window.location.assign(url);
+          });
+          return;
+        }
+      } catch (error) {
+        console.error('Could not start SAML logout:', error);
+      }
+    }
     AccountsTemplates.logout();
   },
+  // #5847: every login token of this account goes, so Meteor closes every
+  // session at once; then this browser signs out the usual way.
+  'click .js-logout-everywhere': Popup.afterConfirm('logoutEverywhere', async function () {
+    Popup.back();
+    try {
+      await Meteor.callAsync('logoutEverywhere');
+    } catch (error) {
+      console.error('Log out everywhere failed:', error);
+      return;
+    }
+    AccountsTemplates.logout();
+  }),
   'click .js-go-setting'() {
     Popup.back();
   },
@@ -193,15 +233,18 @@ Template.editProfilePopup.events({
     const email = templateInstance.find('.js-profile-email').value.trim();
     let isChangeUserName = false;
     let isChangeEmail = false;
-    Users.update(Meteor.userId(), {
-      $set: {
-        'profile.fullname': fullname,
-        'profile.initials': initials,
-      },
+    Meteor.call('setOwnProfile', fullname, initials, error => {
+      if (error) console.error('Could not save profile:', error);
     });
-    isChangeUserName = username !== ReactiveCache.getCurrentUser().username;
+    const currentUser = ReactiveCache.getCurrentUser();
+    const primaryEmail =
+      Array.isArray(currentUser.emails) && currentUser.emails.length
+        ? currentUser.emails[0]
+        : null;
+    isChangeUserName = username !== currentUser.username;
     isChangeEmail =
-      email.toLowerCase() !== ReactiveCache.getCurrentUser().emails[0].address.toLowerCase();
+      email.toLowerCase() !==
+      (primaryEmail ? primaryEmail.address.toLowerCase() : '');
     if (isChangeUserName && isChangeEmail) {
       Meteor.call(
         'setUsernameAndEmail',
@@ -241,9 +284,11 @@ Template.editProfilePopup.events({
       Meteor.call('setEmail', email.toLowerCase(), Meteor.userId(), function(
         error,
       ) {
+        const hardlocked = !!error && error.error === 'sqrl-hardlock';
         const messageElement = templateInstance.$('.email-taken');
+        templateInstance.$('.sqrl-hardlock-error').toggle(hardlocked);
         if (error) {
-          messageElement.show();
+          messageElement.toggle(!hardlocked);
         } else {
           messageElement.hide();
           Popup.back();
@@ -260,10 +305,29 @@ Template.editProfilePopup.events({
         if (process.env.DEBUG === 'true') {
           console.error('Error removing user:', error);
         }
-        alert('Error deleting account: ' + error.reason);
+        alert(TAPi18n.__(accountOperationErrorKey(error)));
       } else {
         if (process.env.DEBUG === 'true') {
           console.log('User deleted successfully:', result);
+        }
+        AccountsTemplates.logout();
+      }
+    });
+  }),
+  // #2731: GDPR-friendlier alternative to account deletion - scrubs PII and
+  // disables login without pruning the account's board/card/comment history.
+  'click #anonymizeButton': Popup.afterConfirm('userAnonymize', function() {
+    Popup.back();
+
+    Meteor.call('anonymizeUser', Meteor.userId(), (error, result) => {
+      if (error) {
+        if (process.env.DEBUG === 'true') {
+          console.error('Error anonymizing user:', error);
+        }
+        alert(TAPi18n.__(accountOperationErrorKey(error)));
+      } else {
+        if (process.env.DEBUG === 'true') {
+          console.log('User anonymized successfully:', result);
         }
         AccountsTemplates.logout();
       }
@@ -276,6 +340,109 @@ Template.editProfilePopup.events({
 Template.changePasswordPopup.onRendered(function() {
   $('.at-pwd-form').show();
   this.find('#at-field-current_password').focus();
+});
+
+// Issue #3058: opt-in per-user TOTP two-factor authentication, via Meteor's
+// official accounts-2fa package (https://docs.meteor.com/packages/accounts-2fa.html).
+// TOTP secret generation and code verification are entirely accounts-2fa's
+// job (Accounts.generate2faActivationQrCode / Accounts.enableUser2fa /
+// Accounts.disableUser2fa / Accounts.has2faEnabled) - this template only
+// renders the QR code / secret it returns and calls those functions.
+Template.twoFactorAuthPopup.onCreated(function() {
+  this.isLoadingStatus = new ReactiveVar(true);
+  this.hasTwoFactorAuth = new ReactiveVar(false);
+  this.activationStep = new ReactiveVar(false);
+  this.qrSvg = new ReactiveVar('');
+  this.qrSecret = new ReactiveVar('');
+  this.errorMessage = new ReactiveVar('');
+
+  const templateInstance = this;
+  if (typeof Accounts.has2faEnabled === 'function') {
+    Accounts.has2faEnabled((error, enabled) => {
+      templateInstance.isLoadingStatus.set(false);
+      templateInstance.hasTwoFactorAuth.set(!error && !!enabled);
+    });
+  } else {
+    // accounts-2fa not available on the client build; nothing to show.
+    templateInstance.isLoadingStatus.set(false);
+  }
+});
+
+Template.twoFactorAuthPopup.helpers({
+  isLoadingStatus() {
+    return Template.instance().isLoadingStatus.get();
+  },
+  hasTwoFactorAuth() {
+    return Template.instance().hasTwoFactorAuth.get();
+  },
+  activationStep() {
+    return Template.instance().activationStep.get();
+  },
+  qrSvg() {
+    return Template.instance().qrSvg.get();
+  },
+  qrSecret() {
+    return Template.instance().qrSecret.get();
+  },
+});
+
+Template.twoFactorAuthPopup.events({
+  'click .js-two-factor-start-enable'(event, templateInstance) {
+    event.preventDefault();
+    const productName =
+      (ReactiveCache.getCurrentSetting() &&
+        ReactiveCache.getCurrentSetting().productName) ||
+      'WeKan';
+    Accounts.generate2faActivationQrCode(productName, (error, result) => {
+      if (error) {
+        console.error('Could not start 2FA activation:', error);
+        return;
+      }
+      templateInstance.qrSvg.set(result.svg || '');
+      templateInstance.qrSecret.set(result.secret || '');
+      templateInstance.activationStep.set(true);
+    });
+  },
+  'click .js-two-factor-cancel-activation'(event, templateInstance) {
+    event.preventDefault();
+    templateInstance.activationStep.set(false);
+    templateInstance.qrSvg.set('');
+    templateInstance.qrSecret.set('');
+  },
+  'submit .js-two-factor-confirm-form'(event, templateInstance) {
+    event.preventDefault();
+    const code = templateInstance
+      .find('.js-two-factor-confirm-input')
+      .value.trim();
+    const errorElement = templateInstance.find('.two-factor-auth-error');
+    if (!code) return;
+    Accounts.enableUser2fa(code, error => {
+      if (error) {
+        if (errorElement) {
+          errorElement.textContent =
+            (error && (error.reason || error.message)) ||
+            TAPi18n.__('twoFactorCode-invalid');
+          errorElement.classList.remove('hide');
+        }
+        return;
+      }
+      if (errorElement) errorElement.classList.add('hide');
+      templateInstance.activationStep.set(false);
+      templateInstance.qrSvg.set('');
+      templateInstance.qrSecret.set('');
+      templateInstance.hasTwoFactorAuth.set(true);
+    });
+  },
+  'click .js-two-factor-disable'(event, templateInstance) {
+    event.preventDefault();
+    Accounts.disableUser2fa(error => {
+      if (error) {
+        console.error('Could not disable 2FA:', error);
+        return;
+      }
+      templateInstance.hasTwoFactorAuth.set(false);
+    });
+  },
 });
 
 Template.changeLanguagePopup.helpers({
@@ -296,43 +463,71 @@ Template.changeLanguagePopup.helpers({
   },
 
   languageFlag() {
-    const flagMap = {
-      'en': '🇺🇸', 'es': '🇪🇸', 'fr': '🇫🇷', 'de': '🇩🇪', 'it': '🇮🇹', 'pt': '🇵🇹', 'ru': '🇷🇺',
-      'ja': '🇯🇵', 'ko': '🇰🇷', 'zh': '🇨🇳', 'ar': '🇸🇦', 'hi': '🇮🇳', 'th': '🇹🇭', 'vi': '🇻🇳',
-      'tr': '🇹🇷', 'pl': '🇵🇱', 'nl': '🇳🇱', 'sv': '🇸🇪', 'da': '🇩🇰', 'no': '🇳🇴', 'fi': '🇫🇮',
-      'cs': '🇨🇿', 'hu': '🇭🇺', 'ro': '🇷🇴', 'bg': '🇧🇬', 'hr': '🇭🇷', 'sk': '🇸🇰', 'sl': '🇸🇮',
-      'et': '🇪🇪', 'lv': '🇱🇻', 'lt': '🇱🇹', 'el': '🇬🇷', 'he': '🇮🇱', 'uk': '🇺🇦', 'be': '🇧🇾',
-      'ca': '🇪🇸', 'eu': '🇪🇸', 'gl': '🇪🇸', 'cy': '🇬🇧', 'ga': '🇮🇪', 'mt': '🇲🇹', 'is': '🇮🇸',
-      'mk': '🇲🇰', 'sq': '🇦🇱', 'sr': '🇷🇸', 'bs': '🇧🇦', 'me': '🇲🇪', 'fa': '🇮🇷', 'ur': '🇵🇰',
-      'bn': '🇧🇩', 'ta': '🇮🇳', 'te': '🇮🇳', 'ml': '🇮🇳', 'kn': '🇮🇳', 'gu': '🇮🇳', 'pa': '🇮🇳',
-      'or': '🇮🇳', 'as': '🇮🇳', 'ne': '🇳🇵', 'si': '🇱🇰', 'my': '🇲🇲', 'km': '🇰🇭', 'lo': '🇱🇦',
-      'ka': '🇬🇪', 'hy': '🇦🇲', 'az': '🇦🇿', 'kk': '🇰🇿', 'ky': '🇰🇬', 'uz': '🇺🇿', 'mn': '🇲🇳',
-      'bo': '🇨🇳', 'dz': '🇧🇹', 'ug': '🇨🇳', 'ii': '🇨🇳', 'za': '🇨🇳', 'yue': '🇭🇰', 'zh-HK': '🇭🇰',
-      'zh-TW': '🇹🇼', 'zh-CN': '🇨🇳', 'id': '🇮🇩', 'ms': '🇲🇾', 'tl': '🇵🇭', 'ceb': '🇵🇭',
-      'haw': '🇺🇸', 'mi': '🇳🇿', 'sm': '🇼🇸', 'to': '🇹🇴', 'fj': '🇫🇯', 'ty': '🇵🇫', 'mg': '🇲🇬',
-      'sw': '🇹🇿', 'am': '🇪🇹', 'om': '🇪🇹', 'so': '🇸🇴', 'ti': '🇪🇷', 'ha': '🇳🇬', 'yo': '🇳🇬',
-      'ig': '🇳🇬', 'zu': '🇿🇦', 'xh': '🇿🇦', 'af': '🇿🇦', 'st': '🇿🇦', 'tn': '🇿🇦', 'ss': '🇿🇦',
-      've': '🇿🇦', 'ts': '🇿🇦', 'nr': '🇿🇦', 'nso': '🇿🇦', 'wo': '🇸🇳', 'ff': '🇸🇳', 'dy': '🇲🇱',
-      'bm': '🇲🇱', 'tw': '🇬🇭', 'ak': '🇬🇭', 'lg': '🇺🇬', 'rw': '🇷🇼', 'rn': '🇧🇮', 'ny': '🇲🇼',
-      'sn': '🇿🇼', 'nd': '🇿🇼'
-    };
-    return flagMap[this.tag] || '🌐';
+    return languageFlags(this.tag).language;
+  },
+  countryFlag() {
+    return languageFlags(this.tag).country;
+  },
+  languageName() {
+    return languageLabelParts(this.name, languageFlags(this.tag).country).languageName;
+  },
+  regionName() {
+    return languageLabelParts(this.name, languageFlags(this.tag).country).regionName;
+  },
+  languageDirection() {
+    return TAPi18n.isRTL() ? 'rtl' : 'ltr';
   },
 });
 
 Template.changeLanguagePopup.events({
   'click .js-set-language'(event) {
-    Users.update(Meteor.userId(), {
-      $set: {
-        'profile.language': this.tag,
-      },
+    Meteor.call('setLanguage', this.tag, error => {
+      if (error) console.error(`Could not save language ${this.tag}:`, error);
     });
-    TAPi18n.setLanguage(this.tag);
+    // setLanguage is async; surface a failed load instead of silently leaving
+    // the UI in English (#5756).
+    Promise.resolve(TAPi18n.setLanguage(this.tag)).catch(error => {
+      // eslint-disable-next-line no-console
+      console.error(`Failed to switch language to ${this.tag}:`, error);
+    });
     event.preventDefault();
   },
 });
 
 Template.changeSettingsPopup.helpers({
+  isUnreadChanges() {
+    const currentUser = ReactiveCache.getCurrentUser();
+    return !!(currentUser && currentUser.unreadChangesSince && currentUser.unreadChangesSince());
+  },
+  isKeepTitleTags() {
+    const currentUser = ReactiveCache.getCurrentUser();
+    return currentUser ? currentUser.hasKeepTitleTags() : false;
+  },
+  // #6755: the outline is shown unless this member hid it.
+  isShowFocusOutline() {
+    const currentUser = ReactiveCache.getCurrentUser();
+    return currentUser ? !currentUser.hasHideFocusOutline() : true;
+  },
+  isKeepAddCardFormOpen() {
+    const currentUser = ReactiveCache.getCurrentUser();
+    return currentUser ? currentUser.hasKeepAddCardFormOpen() : false;
+  },
+  isTitleBracketLabel() {
+    const currentUser = ReactiveCache.getCurrentUser();
+    return currentUser ? currentUser.hasTitleBracketLabel() : false;
+  },
+  isSubmitOnEnter() {
+    const currentUser = ReactiveCache.getCurrentUser();
+    return currentUser ? currentUser.hasSubmitOnEnter() : false;
+  },
+  isOpenManyCardsAtOnce() {
+    const currentUser = ReactiveCache.getCurrentUser();
+    return currentUser ? currentUser.hasOpenManyCardsAtOnce() : false;
+  },
+  isChecklistDingSound() {
+    const currentUser = ReactiveCache.getCurrentUser();
+    return currentUser ? currentUser.hasChecklistDingSound() : false;
+  },
   rescueCardDescription() {
     const currentUser = ReactiveCache.getCurrentUser();
     if (currentUser) {
@@ -351,27 +546,7 @@ Template.changeSettingsPopup.helpers({
       return window.localStorage.getItem('limitToShowCardsCount');
     }
   },
-  weekDays(startDay) {
-    return [
-      TAPi18n.__('sunday'),
-      TAPi18n.__('monday'),
-      TAPi18n.__('tuesday'),
-      TAPi18n.__('wednesday'),
-      TAPi18n.__('thursday'),
-      TAPi18n.__('friday'),
-      TAPi18n.__('saturday'),
-    ].map(function(day, index) {
-      return { name: day, value: index, isSelected: index === startDay };
-    });
-  },
-  startDayOfWeek() {
-    const currentUser = ReactiveCache.getCurrentUser();
-    if (currentUser) {
-      return currentUser.getStartDayOfWeek();
-    } else {
-      return window.localStorage.getItem('startDayOfWeek');
-    }
-  },
+
 });
 
 Template.changeSettingsPopup.events({
@@ -383,13 +558,52 @@ Template.changeSettingsPopup.events({
     return ret;
   },
   'click .js-toggle-desktop-drag-handles'() {
+    // Toggle the EFFECTIVE state and store it EXPLICITLY, so the choice sticks on
+    // a touch screen too. Storing "off" as a real `false` (rather than removing
+    // the setting) is what lets Utils.showDragHandles() tell "turned off" apart
+    // from "never chosen", which is the only reason the toggle could not hide the
+    // handles on a touch device.
+    const show = !Utils.showDragHandles();
     const currentUser = ReactiveCache.getCurrentUser();
     if (currentUser) {
-      Meteor.call('toggleDesktopDragHandles');
-    } else if (window.localStorage.getItem('showDesktopDragHandles')) {
-      window.localStorage.removeItem('showDesktopDragHandles');
+      Meteor.call('toggleDesktopDragHandles', show);
     } else {
-      window.localStorage.setItem('showDesktopDragHandles', 'true');
+      window.localStorage.setItem('showDesktopDragHandles', show ? 'true' : 'false');
+    }
+  },
+  'click .js-toggle-unread-changes'() {
+    if (ReactiveCache.getCurrentUser()) Meteor.call('toggleUnreadChanges');
+  },
+  'click .js-toggle-hide-focus-outline'() {
+    if (ReactiveCache.getCurrentUser()) Meteor.call('toggleHideFocusOutline');
+  },
+  'click .js-toggle-keep-add-card-form-open'() {
+    if (ReactiveCache.getCurrentUser()) Meteor.call('toggleKeepAddCardFormOpen');
+  },
+  'click .js-toggle-title-bracket-label'() {
+    if (ReactiveCache.getCurrentUser()) Meteor.call('toggleTitleBracketLabel');
+  },
+  'click .js-toggle-keep-title-tags'() {
+    if (ReactiveCache.getCurrentUser()) Meteor.call('toggleKeepTitleTags');
+  },
+  'click .js-toggle-submit-on-enter'() {
+    // Saved to the user profile (Member Settings only; requires a logged-in user).
+    if (ReactiveCache.getCurrentUser()) {
+      Meteor.call('toggleSubmitOnEnter');
+    }
+  },
+  // #6531: keep every clicked card open, instead of the click closing the previous
+  // one. Saved to the user profile, like the setting above it.
+  'click .js-toggle-open-many-cards-at-once'() {
+    if (ReactiveCache.getCurrentUser()) {
+      Meteor.call('toggleOpenManyCardsAtOnce');
+    }
+  },
+  // #5427: saved to the user profile (Member Settings only; requires a
+  // logged-in user), like the toggles above it.
+  'click .js-toggle-checklist-ding-sound'() {
+    if (ReactiveCache.getCurrentUser()) {
+      Meteor.call('toggleChecklistDingSound');
     }
   },
   'click .js-rescue-card-description'() {
@@ -399,10 +613,6 @@ Template.changeSettingsPopup.events({
     event.preventDefault();
     let minLimit = parseInt(
       templateInstance.$('#show-cards-count-at').val(),
-      10,
-    );
-    const startDay = parseInt(
-      templateInstance.$('#start-day-of-week').val(),
       10,
     );
     const currentUser = ReactiveCache.getCurrentUser();
@@ -416,13 +626,218 @@ Template.changeSettingsPopup.events({
         window.localStorage.setItem('limitToShowCardsCount', minLimit);
       }
     }
-    if (!isNaN(startDay)) {
-      if (currentUser) {
-        Meteor.call('changeStartDayOfWeek', startDay);
-      } else {
-        window.localStorage.setItem('startDayOfWeek', startDay);
-      }
-    }
     Popup.back();
+  },
+});
+
+// #5778 + docs/Theme/Theme.md: the Member Menu / Change Color popup renders the
+// shared themeColorPicker (scope="global"); all of its logic lives there.
+
+// #4759: Member Menu / Font. A dropdown of fonts detected as installed in this
+// browser; the value is stored to the profile and validated server-side. The first
+// option unsets the custom font.
+Template.changeFontPopup.onCreated(function () {
+  const user = ReactiveCache.getCurrentUser();
+  this.available = detectAvailableFonts(); // ordered subset of the curated whitelist
+  this.selected = new ReactiveVar((user && user.getUiFont && user.getUiFont()) || '');
+  this.selectedSize = new ReactiveVar((user && user.getUiFontSize && user.getUiFontSize()) || 'default');
+  // null = use default (unset); a hex string = custom color.
+  this.textColor = new ReactiveVar((user && user.getUiTextColor && user.getUiTextColor()) || null);
+});
+
+Template.changeFontPopup.helpers({
+  detectedFonts() {
+    const tpl = Template.instance();
+    const sel = tpl.selected.get();
+    return tpl.available.map(name => ({
+      name,
+      selected: name === sel,
+      optionStyle: `font-family: "${name}", sans-serif;`,
+    }));
+  },
+  isNoneSelected() {
+    return !Template.instance().selected.get();
+  },
+  fontSizes() {
+    const cur = Template.instance().selectedSize.get();
+    // Ordered by percent so the buttons read: smaller ... 100% (default) ... larger.
+    return [...UI_FONT_SIZES].sort((a, b) => a.percent - b.percent).map(s => ({
+      key: s.key,
+      label: TAPi18n.__(`font-size-${s.key}`),
+      selected: s.key === cur,
+    }));
+  },
+  // Wheel <input type=color> needs a hex value even when unset — show a sensible
+  // default so the wheel opens somewhere reasonable.
+  textColorHex() {
+    return Template.instance().textColor.get() || '#000000';
+  },
+  hasTextColor() {
+    return !!Template.instance().textColor.get();
+  },
+  // The chosen text color as it is applied: made legible on the theme's surface
+  // (4.5:1), and whether that changed it, so the member is told why the page does
+  // not show exactly what the wheel did.
+  readableTextColor() {
+    return readableUiTextColor(Template.instance().textColor.get(), activeThemeName());
+  },
+  textColorAdjusted() {
+    const chosen = colorValue(Template.instance().textColor.get());
+    return !!chosen && readableUiTextColor(chosen, activeThemeName()) !== chosen.toLowerCase();
+  },
+  // Preview reflects the chosen font, size and text color.
+  previewStyle() {
+    const tpl = Template.instance();
+    const family = fontFamilyValue(tpl.selected.get());
+    const size = fontSizeValue(tpl.selectedSize.get());
+    const color = readableUiTextColor(tpl.textColor.get(), activeThemeName());
+    return [
+      family && `font-family: ${family};`,
+      size && `font-size: ${size};`,
+      color && `color: ${color};`,
+    ].filter(Boolean).join('');
+  },
+});
+
+// Apply the chosen text colour immediately (no Save button). The second
+// argument is the removed text-background colour: the method still takes it so
+// an older client cannot fail, and it UNSETS it whatever is passed, so a value
+// stored before the feature was removed is cleared the next time this runs.
+function applyUiColors(tpl) {
+  Meteor.call('setUiColors', tpl.textColor.get(), null, err => {
+    if (err && process.env.DEBUG === 'true') console.error('setUiColors error', err);
+  });
+}
+
+Template.changeFontPopup.events({
+  // Click a font-name button -> apply that font immediately ('' = default/unset).
+  'click .js-ui-font-btn'(event, tpl) {
+    event.preventDefault();
+    const font = event.currentTarget.dataset.font || null;
+    tpl.selected.set(font || '');
+    Meteor.call('setUiFont', font, err => {
+      if (err && process.env.DEBUG === 'true') console.error('setUiFont error', err);
+    });
+  },
+  // Click a size button -> apply that size immediately.
+  'click .js-ui-font-size-btn'(event, tpl) {
+    event.preventDefault();
+    const size = event.currentTarget.dataset.size || 'default';
+    tpl.selectedSize.set(size);
+    Meteor.call('setUiFontSize', size, err => {
+      if (err && process.env.DEBUG === 'true') console.error('setUiFontSize error', err);
+    });
+  },
+  // Live-preview while dragging the wheel...
+  'input .js-ui-text-color'(event, tpl) {
+    const v = event.currentTarget.value;
+    if (isHexColor6(v)) tpl.textColor.set(v);
+  },
+  // ...and apply the color when the wheel is committed.
+  'change .js-ui-text-color'(event, tpl) {
+    const v = event.currentTarget.value;
+    if (isHexColor6(v)) tpl.textColor.set(v);
+    applyUiColors(tpl);
+  },
+  'click .js-reset-text-color'(event, tpl) {
+    event.preventDefault();
+    tpl.textColor.set(null); // back to default
+    applyUiColors(tpl);
+  },
+});
+
+// #5847: Member Settings / Passkeys (client/lib/passkeys.js).
+Template.passkeysPopup.onCreated(function () {
+  this.passkeys = new ReactiveVar([]);
+  this.message = new ReactiveVar('');
+  this.load = () => Meteor.call('passkeyList', (error, list) => { if (!error) this.passkeys.set(list || []); });
+  this.load();
+});
+
+Template.passkeysPopup.helpers({
+  passkeys() { return Template.instance().passkeys.get(); },
+  createdText() { return this.createdAt ? new Date(this.createdAt).toLocaleDateString() : ''; },
+  supported() { return require('/client/lib/passkeys').passkeysSupported(); },
+  message() { return Template.instance().message.get(); },
+});
+
+Template.passkeysPopup.events({
+  async 'click .js-add-passkey-button, submit .js-add-passkey'(event, tpl) {
+    event.preventDefault();
+    tpl.message.set('');
+    try {
+      await require('/client/lib/passkeys').addPasskey(String(tpl.$('.js-passkey-name').val() || ''));
+      tpl.$('.js-passkey-name').val('');
+      tpl.message.set(TAPi18n.__('passkey-added'));
+      tpl.load();
+    } catch (error) {
+      tpl.message.set(TAPi18n.__(error.error || 'passkey-invalid'));
+    }
+  },
+  async 'click .js-remove-passkey'(event, tpl) {
+    event.preventDefault();
+    await Meteor.callAsync('passkeyRemove', event.currentTarget.dataset.id);
+    tpl.load();
+  },
+});
+
+// #2460: Member Settings / SQRL - add this account's SQRL identity with the
+// SQRL client, or remove it (client/lib/sqrl.js).
+Template.sqrlPopup.onCreated(function () {
+  this.mine = new ReactiveVar(null);
+  this.shown = new ReactiveVar(null);
+  this.message = new ReactiveVar('');
+  this.load = () => Meteor.call('sqrlMine', (error, mine) => { if (!error) this.mine.set(mine); });
+  this.load();
+});
+
+Template.sqrlPopup.onDestroyed(function () {
+  this.cancelled = true;
+});
+
+Template.sqrlPopup.helpers({
+  mine() { return Template.instance().mine.get(); },
+  shown() { return Template.instance().shown.get(); },
+  message() { return Template.instance().message.get(); },
+});
+
+Template.sqrlPopup.events({
+  async 'click .js-sqrl-add'(event, tpl) {
+    event.preventDefault();
+    tpl.message.set('');
+    try {
+      const ended = await require('/client/lib/sqrl').runSqrlSession('associate', {
+        show: shown => tpl.shown.set(shown),
+        cancelled: () => tpl.cancelled,
+      });
+      tpl.shown.set(null);
+      if (ended === 'done') tpl.message.set(TAPi18n.__('sqrl-added'));
+      else if (ended === 'expired') tpl.message.set(TAPi18n.__('sqrl-expired'));
+      tpl.load();
+    } catch (error) {
+      tpl.shown.set(null);
+      tpl.message.set(TAPi18n.__(error && error.error === 'sqrl-needs-https' ? 'sqrl-needs-https' : 'sqrl-sign-in-failed'));
+    }
+  },
+  async 'click .js-sqrl-remove'(event, tpl) {
+    event.preventDefault();
+    await Meteor.callAsync('sqrlRemoveMine');
+    tpl.message.set('');
+    tpl.load();
+  },
+});
+
+// #4265: Member Settings / Hidden boards.
+Template.hiddenBoardsPopup.helpers({
+  hiddenBoards() {
+    const ids = (ReactiveCache.getCurrentUser()?.profile?.hiddenBoards) || [];
+    return ids.map(id => ReactiveCache.getBoard(id) || { _id: id, title: id });
+  },
+});
+
+Template.hiddenBoardsPopup.events({
+  'click .js-restore-hidden-board'(event) {
+    event.preventDefault();
+    Meteor.call('restoreHiddenBoard', event.currentTarget.dataset.id);
   },
 });

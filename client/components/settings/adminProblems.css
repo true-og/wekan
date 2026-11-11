@@ -1,0 +1,129 @@
+/* Admin Panel → Problems: the few styles that are NOT part of the shared table
+   page. Everything the reports have in common - title, status row, search +
+   pagination controls, and the table itself - now lives in tablePage.css and is
+   defined once. See docs/Features/General/Table-Page.md. */
+
+/* The menu separator and the "Reports" group title are styled with the menu itself
+   (settingBody.css): the shared left menu renders `li.left-menu-separator` and
+   `li.left-menu-heading`, not the `.admin-reports-separator` this file used to
+   target - so the rule that lived here, twice, never applied to anything. */
+
+/* Admin Panel → Problems → CPU usage: the live figure between the page title and
+   the search box. The table underneath is a history of past high-CPU periods, so
+   this line is the only place the page says what the CPU is doing right now. */
+.admin-cpu-current {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--theme-accent, #01628c);
+  border-radius: 6px;
+}
+
+.admin-cpu-label {
+  font-weight: 700;
+}
+
+.admin-cpu-percent {
+  font-size: 1.4em;
+  font-weight: 700;
+  color: var(--theme-accent, #01628c);
+}
+
+/* Sustained high CPU: warn without inventing a second colour system. */
+.admin-cpu-current.admin-cpu-high {
+  border-color: #b04632;
+}
+
+.admin-cpu-current.admin-cpu-high .admin-cpu-percent {
+  color: #b04632;
+}
+
+/* Problems / Instrumentation: one bar per area (adminProblems.jade). The rows
+   share one grid, so names, bars and numbers line up; each row is a button that
+   filters the table below, reset from the global button look (forms.css pads
+   every button 35px a side and paints it the theme colour). */
+.instrumentation-areas {
+  display: grid;
+  grid-template-columns: minmax(6em, max-content) minmax(60px, 1fr) repeat(3, max-content);
+  gap: 2px 12px;
+  margin-bottom: 16px;
+}
+.instrumentation-area-head,
+.instrumentation-area {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  align-items: center;
+}
+.instrumentation-area-head {
+  font-weight: 700;
+  font-size: 0.85em;
+  opacity: 0.7;
+}
+.setting-content .content-body .main-body button.instrumentation-area,
+button.instrumentation-area {
+  width: 100%;
+  min-height: 0;
+  height: auto;
+  margin: 0;
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: normal;
+  text-align: start;
+  cursor: pointer;
+}
+button.instrumentation-area:hover,
+button.instrumentation-area:focus-visible {
+  background: rgba(0, 0, 0, 0.06);
+}
+button.instrumentation-area.is-active {
+  border-color: var(--theme-accent, #01628c);
+  background: rgba(0, 0, 0, 0.06);
+}
+.instrumentation-area-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.instrumentation-area-bar {
+  height: 14px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.08);
+  overflow: hidden;
+}
+.instrumentation-area-fill {
+  display: flex;
+  justify-content: flex-end;
+  height: 100%;
+  background: var(--theme-accent-fill, var(--theme-accent, #01628c));
+}
+.instrumentation-area-errors {
+  height: 100%;
+  background: #b04632;
+}
+.instrumentation-area-num {
+  text-align: end;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.instrumentation-area-num.has-errors {
+  color: #b04632;
+  font-weight: 700;
+}
+
+.file-status-audit { margin-bottom: 1rem; }
+.file-status-audit-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+.file-status-audit-actions button { margin: 0; min-height: 34px; }
+.file-status-audit pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.rule-email-recovery-identifiers {
+  overflow-wrap: anywhere;
+  max-width: 32rem;
+}

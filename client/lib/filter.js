@@ -1,3 +1,7 @@
+import { FilterProviderRegistry } from '/client/lib/filterProviders';
+import { boardMovementSelector, startBoardMovementFilter } from '/client/lib/boardMovementFilter';
+import { boardTextSelector, startBoardTextFilter } from '/client/lib/boardTextFilter';
+import { dateDisplayPreferences } from '/client/lib/dateDisplay';
 import { Blaze } from 'meteor/blaze';
 import { Tracker } from 'meteor/tracker';
 import { ReactiveCache } from '/imports/reactiveCache';
@@ -19,8 +23,21 @@ import {
   now, 
   createDate, 
   fromNow, 
-  calendar 
+  calendar
 } from '/imports/lib/dateUtils';
+import {
+  tokenizeAdvancedFilter,
+  parseAdvancedFilterDate,
+  buildDateValueSelector,
+  advancedFilterCommandsToSelector,
+} from '/imports/lib/advancedFilter';
+import { weekRange } from '/models/lib/weekStart';
+import { dueDateShortcut } from '/models/lib/dueDateShortcuts';
+import { Session } from 'meteor/session';
+import { boardScopedFilterSelector } from '/models/lib/boardScopedSelection';
+import { cardDateRangeSelector, cardRecencySelector } from '/models/lib/cardDateRange';
+import { columnAgeSelector } from '/models/lib/cardListEntry';
+import { subscribeDateNowTicker } from '/client/lib/dateNowTicker';
 // Sidebar is imported late to avoid circular dependency (sidebar.js needs its
 // jade template loaded first, but router.js → filter.js would load it too early)
 let _Sidebar;
@@ -40,16 +57,97 @@ function showFilterSidebar() {
   getSidebar().setView('filter');
 }
 
+class CardDateRangeFilter {
+  constructor() {
+    this._dep = new Tracker.Dependency();
+    this.reset();
+  }
+  value() { this._dep.depend(); return this._value; }
+  set(value) {
+    if (cardDateRangeSelector(value) === null) return false;
+    this._value = { ...value };
+    this._dep.changed();
+    return true;
+  }
+  reset() {
+    this._value = { field: 'createdAt', from: '', to: '', includeMissing: false };
+    this._dep.changed();
+  }
+  _isActive() { const value = this.value(); return !!(value.from || value.to); }
+  selector() { return cardDateRangeSelector(this.value()) || {}; }
+}
+
+class CardRecencyFilter {
+  constructor() {
+    this._dep = new Tracker.Dependency();
+    this._ticker = null;
+    this.reset();
+  }
+  value() { this._dep.depend(); return this._value; }
+  set(value) {
+    const selector = cardRecencySelector(value);
+    if (selector === null) return false;
+    this._value = { createdAt: value.createdAt || '', modifiedAt: value.modifiedAt || '' };
+    if (Object.keys(selector).length) {
+      if (!this._ticker) this._ticker = subscribeDateNowTicker();
+    } else {
+      this._ticker?.unsubscribe(); this._ticker = null;
+    }
+    this._dep.changed();
+    return true;
+  }
+  reset() {
+    this._value = { createdAt: '', modifiedAt: '' };
+    this._ticker?.unsubscribe(); this._ticker = null;
+    this._dep.changed();
+  }
+  _isActive() { const value = this.value(); return !!(value.createdAt || value.modifiedAt); }
+  selector() { return cardRecencySelector(this.value(), this._ticker?.now.get() || new Date()); }
+}
+
+class ColumnAgeFilter {
+  constructor() {
+    this._dep = new Tracker.Dependency();
+    this._value = { listId: '', days: 30 };
+    this._ticker = null;
+  }
+  value() { this._dep.depend(); return this._value; }
+  set(listId, days) {
+    if (!Object.keys(columnAgeSelector(listId, days)).length) return false;
+    this._value = { listId, days };
+    if (!this._ticker) this._ticker = subscribeDateNowTicker();
+    this._dep.changed();
+    return true;
+  }
+  reset() {
+    this._value = { listId: '', days: 30 };
+    this._ticker?.unsubscribe();
+    this._ticker = null;
+    this._dep.changed();
+  }
+  _isActive() { return !!this.value().listId; }
+  selector() {
+    const { listId, days } = this.value();
+    return columnAgeSelector(listId, days, this._ticker?.now.get() || new Date());
+  }
+}
+
 class DateFilter {
   constructor() {
     this._dep = new Tracker.Dependency();
     this.subField = ''; // Prevent name mangling in Filter
     this._filter = null;
     this._filterState = null;
+    this._ticker = null;
   }
 
   _updateState(state) {
     this._filterState = state;
+    if (state === 'previousweek' || state === 'nextmonth') {
+      if (!this._ticker) this._ticker = subscribeDateNowTicker();
+    } else {
+      this._ticker?.unsubscribe(); this._ticker = null;
+    }
     showFilterSidebar();
     this._dep.changed();
   }
@@ -94,6 +192,16 @@ class DateFilter {
     this.relativeWeek(1, 'next')
   }
 
+  previousWeek() {
+    if (this._filterState === 'previousweek') this.reset();
+    else this._updateState('previousweek');
+  }
+
+  nextMonth() {
+    if (this._filterState === 'nextmonth') this.reset();
+    else this._updateState('nextmonth');
+  }
+
   // relativeDay builds a filter starting from now and including all
   // days up to today +/- offset.
   relativeDay(offset) {
@@ -119,44 +227,33 @@ class DateFilter {
   // weeks up to today +/- offset. This considers the user's preferred
   // start of week day (as defined by Meteor).
   relativeWeek(offset, week) {
-    if (this._filterState == 'thisweek') {
+    // #4881: toggle per-week so clicking the same button again clears it, but
+    // clicking the OTHER week switches to it instead of just resetting (the old
+    // code reset on either state, so you could not go straight from "this week"
+    // to "next week").
+    const targetState = week === 'next' ? 'nextweek' : 'thisweek';
+    if (this._filterState === targetState) {
       this.reset();
       return;
     }
 
-    if (this._filterState == 'nextweek') {
-      this.reset();
-      return;
-    }
-
-    // getStartDayOfWeek returns the offset from Sunday of the user's
-    // preferred starting day of the week. This date should be added
-    // to the moment start of week to get the real start of week date.
-    // The default is 1, meaning Monday.
+    // #4881: the old window came from startOf(now(), 'week'), but native
+    // dateUtils.startOf() has no 'week' case, so it returned "now" unchanged and
+    // the window started at today + startDayOfWeek — i.e. it selected NEXT
+    // week's cards for "this week" and ignored the configured start weekday.
+    // weekRange() computes the correct window that CONTAINS today for the user's
+    // configured start day of week (0=Sunday..6=Saturday, default Monday).
     const currentUser = ReactiveCache.getCurrentUser();
     const weekStartDay = currentUser ? currentUser.getStartDayOfWeek() : 1;
+    const weekOffset = week === 'next' ? 1 : 0;
+    const { start: WeekStart, end: WeekEnd } = weekRange(now(), weekStartDay, weekOffset);
 
-    if (week === 'this') {
-      // Create week start and end dates
-      var WeekStart = startOf(add(startOf(now(), 'week'), weekStartDay, 'days'), 'day');
-      var WeekEnd = endOf(add(WeekStart, 6, 'days'), 'day');
-
-      this._updateState('thisweek');
-    } else if (week === 'next') {
-      // Create next week start and end dates
-      var WeekStart = startOf(add(startOf(now(), 'week'), weekStartDay + 7, 'days'), 'day');
-      var WeekEnd = endOf(add(WeekStart, 6, 'days'), 'day');
-
-     this._updateState('nextweek');
-    }
-
-    var startDate = WeekStart;
-    var endDate = WeekEnd;
+    this._updateState(targetState);
 
     if (offset >= 0) {
-      this._filter = { $gte: startDate, $lte: endDate };
+      this._filter = { $gte: WeekStart, $lte: WeekEnd };
     } else {
-      this._filter = { $lte: startDate, $gte: endDate };
+      this._filter = { $lte: WeekStart, $gte: WeekEnd };
     }
   }
 
@@ -173,6 +270,7 @@ class DateFilter {
   reset() {
     this._filter = null;
     this._filterState = null;
+    this._ticker?.unsubscribe(); this._ticker = null;
     this._dep.changed();
   }
 
@@ -181,6 +279,8 @@ class DateFilter {
     return this._filterState == val;
   }
 
+  state() { this._dep.depend(); return this._filterState; }
+
   _isActive() {
     this._dep.depend();
     return this._filterState !== null;
@@ -188,6 +288,21 @@ class DateFilter {
 
   _getMongoSelector() {
     this._dep.depend();
+    if (this._ticker) {
+      const user = ReactiveCache.getCurrentUser();
+      return dueDateShortcut(this._filterState, this._ticker.now.get(), user ? user.getStartDayOfWeek() : 1);
+    }
+    // #6483: cards with NO due/end/received date store the field as null — that
+    // is exactly what the noDate filter matches ({dueAt: null}). A comparison
+    // filter such as Overdue/"past" is `{$lte: now}`, and `$lte` MATCHES null
+    // under FerretDB and minimongo (null sorts before dates; neither implements
+    // MongoDB's type-bracketing), so "Overdue" listed every card that has no due
+    // date at all. Require a real, non-null value for any comparison selector so
+    // only actual dates match. The noDate filter (this._filter === null) returns
+    // null unchanged and is unaffected.
+    if (this._filter && typeof this._filter === 'object') {
+      return { ...this._filter, $ne: null };
+    }
     return this._filter;
   }
 
@@ -207,6 +322,11 @@ class StringFilter {
   set(str) {
     this._filter = str;
     this._dep.changed();
+  }
+
+  value() {
+    this._dep.depend();
+    return this._filter;
   }
 
   reset() {
@@ -244,6 +364,15 @@ class SetFilter {
   isSelected(val) {
     this._dep.depend();
     return this._selectedElements.indexOf(val) > -1;
+  }
+
+  // #319: a reactive snapshot of the selected values, used to mirror the
+  // filter's state into the URL query string as the user changes it (the
+  // write direction of #4540's read-on-load `?assignee=`/`?member=`/`?label=`
+  // support). Returns a copy so callers cannot mutate internal state.
+  list() {
+    this._dep.depend();
+    return this._selectedElements.slice();
   }
 
   add(val) {
@@ -304,6 +433,50 @@ class SetFilter {
         }
       : null;
   }
+
+  // #2886: the inverse of `_getMongoSelector` — matches documents whose
+  // field does NOT contain any of the selected values, used to EXCLUDE
+  // cards that carry a given label rather than requiring one.
+  _getExcludedMongoSelector() {
+    this._dep.depend();
+    return {
+      $nin: this._selectedElements,
+    };
+  }
+}
+
+// Label combinations are a display filter, never an authorization selector.
+class LabelFilter extends SetFilter {
+  constructor() {
+    super();
+    this._mode = 'or';
+  }
+
+  mode() {
+    this._dep.depend();
+    return this._mode;
+  }
+
+  setMode(mode) {
+    if (mode !== 'and' && mode !== 'or') return;
+    this._mode = mode;
+    this._dep.changed();
+  }
+
+  reset() {
+    this._mode = 'or';
+    super.reset();
+  }
+
+  _getMongoSelector() {
+    this._dep.depend();
+    // "No label" remains an independent alternative through the existing
+    // empty selector. Requiring undefined alongside actual IDs matches none.
+    const selected = this._selectedElements.filter(id => id !== undefined);
+    return this._mode === 'and' && selected.length
+      ? { $all: selected }
+      : super._getMongoSelector();
+  }
 }
 
 // Advanced filter forms a MongoSelector from a users String.
@@ -320,6 +493,11 @@ class AdvancedFilter {
     this._dep.changed();
   }
 
+  value() {
+    this._dep.depend();
+    return this._filter;
+  }
+
   reset() {
     this._filter = '';
     this._lastValide = {};
@@ -332,55 +510,9 @@ class AdvancedFilter {
   }
 
   _filterToCommands() {
-    const commands = [];
-    let current = '';
-    let string = false;
-    let regex = false;
-    let wasString = false;
-    let ignore = false;
-    for (let i = 0; i < this._filter.length; i++) {
-      const char = this._filter.charAt(i);
-      if (ignore) {
-        ignore = false;
-        current += char;
-        continue;
-      }
-      if (char === '/') {
-        string = !string;
-        if (string) regex = true;
-        current += char;
-        continue;
-      }
-      // eslint-disable-next-line quotes
-      if (char === "'") {
-        string = !string;
-        if (string) wasString = true;
-        continue;
-      }
-      if (char === '\\' && !string) {
-        ignore = true;
-        continue;
-      }
-      if (char === ' ' && !string) {
-        commands.push({
-          cmd: current,
-          string: wasString,
-          regex,
-        });
-        wasString = false;
-        current = '';
-        continue;
-      }
-      current += char;
-    }
-    if (current !== '') {
-      commands.push({
-        cmd: current,
-        string: wasString,
-        regex,
-      });
-    }
-    return commands;
+    // #2989: tokenizing lives in /imports/lib/advancedFilter.js so slashes
+    // inside quoted values (dates like '06/04/2020') stay literal strings.
+    return tokenizeAdvancedFilter(this._filter);
   }
 
   _fieldNameToId(field) {
@@ -407,252 +539,59 @@ class AdvancedFilter {
     return value;
   }
 
+  // #2989: date custom fields store Date objects (the date picker calls
+  // card.setCustomField(id, date)), so comparing them against the typed
+  // string / parseInt() number can never match. When the field is date-typed
+  // and the value parses as a date, compare with a Date range instead.
+  // Returns the operator document for 'customFields.value', or null to fall
+  // back to the generic string/number selector.
+  _customFieldDateSelector(field, str, op) {
+    const found = ReactiveCache.getCustomField({
+      name: field,
+    });
+    if (!found || found.type !== 'date') return null;
+    // Disambiguate '06/04/2020' (both parts <= 12) with the user's date
+    // format preference: day-first formats (DD/MM/YYYY, DD.MM.YYYY) read it
+    // as 6 April, otherwise it is read month-first as 4 June.
+    let dayFirst = false;
+    try {
+      dayFirst = /^D/.test(dateDisplayPreferences().dateFormat);
+    } catch (error) {
+      dayFirst = false;
+    }
+    const range = parseAdvancedFilterDate(str, { dayFirst });
+    if (!range) return null;
+    return buildDateValueSelector(op, range);
+  }
+
+  // #3092: the command-array -> Mongo selector algorithm (sub-expressions,
+  // comparisons, and/or/not) now lives in /imports/lib/advancedFilter.js as
+  // advancedFilterCommandsToSelector(), so the "card matches advanced filter"
+  // rule trigger can reuse the exact same function server-side instead of a
+  // parallel reimplementation. Only the three lookups that need live board
+  // data stay here, bound to ReactiveCache.
+  validate(text) {
+    if (!text) return {};
+    return advancedFilterCommandsToSelector(tokenizeAdvancedFilter(text), {
+      dayFirst: /^D/.test(dateDisplayPreferences().dateFormat),
+      fieldNameToId: this._fieldNameToId.bind(this),
+      fieldValueToId: this._fieldValueToId.bind(this),
+      customFieldDateSelector: this._customFieldDateSelector.bind(this),
+    });
+  }
+
   _arrayToSelector(commands) {
     try {
-      //let changed = false;
-      this._processSubCommands(commands);
+      const selector = advancedFilterCommandsToSelector(commands, {
+        dayFirst: /^D/.test(dateDisplayPreferences().dateFormat),
+        fieldNameToId: this._fieldNameToId.bind(this),
+        fieldValueToId: this._fieldValueToId.bind(this),
+        customFieldDateSelector: this._customFieldDateSelector.bind(this),
+      });
+      this._lastValide = selector;
+      return selector;
     } catch (e) {
       return this._lastValide;
-    }
-    this._lastValide = {
-      $or: commands,
-    };
-    return {
-      $or: commands,
-    };
-  }
-
-  _processSubCommands(commands) {
-    const subcommands = [];
-    let level = 0;
-    let start = -1;
-    for (let i = 0; i < commands.length; i++) {
-      if (commands[i].cmd) {
-        switch (commands[i].cmd) {
-          case '(': {
-            level++;
-            if (start === -1) start = i;
-            continue;
-          }
-          case ')': {
-            level--;
-            commands.splice(i, 1);
-            i--;
-            continue;
-          }
-          default: {
-            if (level > 0) {
-              subcommands.push(commands[i]);
-              commands.splice(i, 1);
-              i--;
-              continue;
-            }
-          }
-        }
-      }
-    }
-    if (start !== -1) {
-      this._processSubCommands(subcommands);
-      if (subcommands.length === 1) commands.splice(start, 0, subcommands[0]);
-      else commands.splice(start, 0, subcommands);
-    }
-    this._processConditions(commands);
-    this._processLogicalOperators(commands);
-  }
-
-  _processConditions(commands) {
-    for (let i = 0; i < commands.length; i++) {
-      if (!commands[i].string && commands[i].cmd) {
-        switch (commands[i].cmd) {
-          case '=':
-          case '==':
-          case '===': {
-            const field = commands[i - 1].cmd;
-            const str = commands[i + 1].cmd;
-            if (commands[i + 1].regex) {
-              const match = str.match(new RegExp('^/(.*?)/([gimy]*)$'));
-              let regex = null;
-              if (match.length > 2) regex = new RegExp(match[1], match[2]);
-              else regex = new RegExp(match[1]);
-              commands[i] = {
-                'customFields._id': this._fieldNameToId(field),
-                'customFields.value': regex,
-              };
-            } else {
-              commands[i] = {
-                'customFields._id': this._fieldNameToId(field),
-                'customFields.value': {
-                  $in: [this._fieldValueToId(field, str), parseInt(str, 10)],
-                },
-              };
-            }
-            commands.splice(i - 1, 1);
-            commands.splice(i, 1);
-            //changed = true;
-            i--;
-            break;
-          }
-          case '!=':
-          case '!==': {
-            const field = commands[i - 1].cmd;
-            const str = commands[i + 1].cmd;
-            if (commands[i + 1].regex) {
-              const match = str.match(new RegExp('^/(.*?)/([gimy]*)$'));
-              let regex = null;
-              if (match.length > 2) regex = new RegExp(match[1], match[2]);
-              else regex = new RegExp(match[1]);
-              commands[i] = {
-                'customFields._id': this._fieldNameToId(field),
-                'customFields.value': {
-                  $not: regex,
-                },
-              };
-            } else {
-              commands[i] = {
-                'customFields._id': this._fieldNameToId(field),
-                'customFields.value': {
-                  $not: {
-                    $in: [this._fieldValueToId(field, str), parseInt(str, 10)],
-                  },
-                },
-              };
-            }
-            commands.splice(i - 1, 1);
-            commands.splice(i, 1);
-            //changed = true;
-            i--;
-            break;
-          }
-          case '>':
-          case 'gt':
-          case 'Gt':
-          case 'GT': {
-            const field = commands[i - 1].cmd;
-            const str = commands[i + 1].cmd;
-            commands[i] = {
-              'customFields._id': this._fieldNameToId(field),
-              'customFields.value': {
-                $gt: parseInt(str, 10),
-              },
-            };
-            commands.splice(i - 1, 1);
-            commands.splice(i, 1);
-            //changed = true;
-            i--;
-            break;
-          }
-          case '>=':
-          case '>==':
-          case 'gte':
-          case 'Gte':
-          case 'GTE': {
-            const field = commands[i - 1].cmd;
-            const str = commands[i + 1].cmd;
-            commands[i] = {
-              'customFields._id': this._fieldNameToId(field),
-              'customFields.value': {
-                $gte: parseInt(str, 10),
-              },
-            };
-            commands.splice(i - 1, 1);
-            commands.splice(i, 1);
-            //changed = true;
-            i--;
-            break;
-          }
-          case '<':
-          case 'lt':
-          case 'Lt':
-          case 'LT': {
-            const field = commands[i - 1].cmd;
-            const str = commands[i + 1].cmd;
-            commands[i] = {
-              'customFields._id': this._fieldNameToId(field),
-              'customFields.value': {
-                $lt: parseInt(str, 10),
-              },
-            };
-            commands.splice(i - 1, 1);
-            commands.splice(i, 1);
-            //changed = true;
-            i--;
-            break;
-          }
-          case '<=':
-          case '<==':
-          case 'lte':
-          case 'Lte':
-          case 'LTE': {
-            const field = commands[i - 1].cmd;
-            const str = commands[i + 1].cmd;
-            commands[i] = {
-              'customFields._id': this._fieldNameToId(field),
-              'customFields.value': {
-                $lte: parseInt(str, 10),
-              },
-            };
-            commands.splice(i - 1, 1);
-            commands.splice(i, 1);
-            //changed = true;
-            i--;
-            break;
-          }
-        }
-      }
-    }
-  }
-
-  _processLogicalOperators(commands) {
-    for (let i = 0; i < commands.length; i++) {
-      if (!commands[i].string && commands[i].cmd) {
-        switch (commands[i].cmd) {
-          case 'or':
-          case 'Or':
-          case 'OR':
-          case '|':
-          case '||': {
-            const op1 = commands[i - 1];
-            const op2 = commands[i + 1];
-            commands[i] = {
-              $or: [op1, op2],
-            };
-            commands.splice(i - 1, 1);
-            commands.splice(i, 1);
-            //changed = true;
-            i--;
-            break;
-          }
-          case 'and':
-          case 'And':
-          case 'AND':
-          case '&':
-          case '&&': {
-            const op1 = commands[i - 1];
-            const op2 = commands[i + 1];
-            commands[i] = {
-              $and: [op1, op2],
-            };
-            commands.splice(i - 1, 1);
-            commands.splice(i, 1);
-            //changed = true;
-            i--;
-            break;
-          }
-          case 'not':
-          case 'Not':
-          case 'NOT':
-          case '!': {
-            const op1 = commands[i + 1];
-            commands[i] = {
-              $not: op1,
-            };
-            commands.splice(i + 1, 1);
-            //changed = true;
-            i--;
-            break;
-          }
-        }
-      }
     }
   }
 
@@ -676,17 +615,42 @@ class AdvancedFilter {
 // the need to provide a list of `_fields`. We also should move methods into the
 // object prototype.
 export const Filter = {
+  providers: new FilterProviderRegistry(),
   // XXX I would like to rename this field into `labels` to be consistent with
   // the rest of the schema, but we need to set some migrations architecture
   // before changing the schema.
-  labelIds: new SetFilter(),
+  labelIds: new LabelFilter(),
+  // #2886: labels the user clicked a THIRD time — cards carrying one of
+  // these are excluded even if they also match `labelIds`. Kept as a
+  // separate SetFilter (mirroring `labelIds`'s API/shape) rather than a
+  // third value inside `labelIds` so the two remain independent reactive
+  // sets and the existing `_fields` machinery for every other filter type
+  // is untouched.
+  excludedLabelIds: new SetFilter(),
   members: new SetFilter(),
   assignees: new SetFilter(),
+  // #1871: direct subtasks use the existing parentId relationship.
+  parentId: new SetFilter(),
+  // #3681: filter cards by who created them. The card schema's author
+  // field is `userId` (see models/cards.js), not `creatorId` — the
+  // filter is keyed the same way so `_getMongoSelector()` below can map
+  // `_fields` entries straight onto card document field names, the same
+  // way `labelIds`/`members`/`assignees` already do. Same SetFilter
+  // shape/API as every other id-set filter, so no new filtering engine
+  // was needed.
+  userId: new SetFilter(),
   archive: new SetFilter(),
   hideEmpty: new SetFilter(),
   dueAt: new DateFilter(),
+  columnAge: new ColumnAgeFilter(),
+  dateRange: new CardDateRangeFilter(),
+  movementDate: new CardDateRangeFilter(),
+  dateRecency: new CardRecencyFilter(),
   title: new StringFilter(),
+  text: new StringFilter(),
   customFields: new SetFilter('_id'),
+  // #3392: filter cards by their dependency ("Red Strings") relation type.
+  cardDependencies: new SetFilter('type'),
   advanced: new AdvancedFilter(),
   lists: new AdvancedFilter(), // we need the ability to filter list by name as well
 
@@ -694,11 +658,14 @@ export const Filter = {
     'labelIds',
     'members',
     'assignees',
+    'parentId',
+    'userId',
     'archive',
     'hideEmpty',
     'dueAt',
     'title',
     'customFields',
+    'cardDependencies',
   ],
 
   // We don't filter cards that have been added after the last filter change. To
@@ -709,12 +676,28 @@ export const Filter = {
 
   isActive() {
     return (
+      this.movementDate._isActive() || this.text._isActive() || this.columnAge._isActive() || this.dateRange._isActive() || this.providers.isActive() ||
       this._fields.some(fieldName => {
         return this[fieldName]._isActive();
       }) ||
+      this.excludedLabelIds._isActive() ||
       this.advanced._isActive() ||
       this.lists._isActive()
     );
+  },
+
+  // #2886: clicking an unfiltered label filters FOR it, clicking it again
+  // inverts the filter to EXCLUDE it, and a third click clears it — a
+  // three-state cycle scoped to labels only (not members, due dates, etc.).
+  toggleLabelFilter(labelId) {
+    if (this.labelIds.isSelected(labelId)) {
+      this.labelIds.remove(labelId);
+      this.excludedLabelIds.add(labelId);
+    } else if (this.excludedLabelIds.isSelected(labelId)) {
+      this.excludedLabelIds.remove(labelId);
+    } else {
+      this.labelIds.add(labelId);
+    }
   },
 
   _getMongoSelector() {
@@ -742,6 +725,27 @@ export const Filter = {
       }
     });
 
+    // #3626: "subtasks of" these cards includes the cards whose OTHER parent
+    // is one of them, not only their primary parent.
+    if (filterSelector.parentId) {
+      const parentSelector = filterSelector.parentId;
+      delete filterSelector.parentId;
+      const either = { $or: [{ parentId: parentSelector }, { parentIds: parentSelector }] };
+      filterSelector.$and = [...(filterSelector.$and || []), either];
+    }
+
+    // #2886: merge the exclusion into the existing `labelIds` selector
+    // (rather than a `filterSelector.excludedLabelIds` key nothing reads)
+    // so a card matching `labelIds`'s $in but ALSO carrying an excluded
+    // label is still filtered out — exclusion wins over inclusion.
+    if (this.excludedLabelIds._isActive()) {
+      isFilterActive = true;
+      const excludedSelector = this.excludedLabelIds._getExcludedMongoSelector();
+      filterSelector.labelIds = filterSelector.labelIds
+        ? { ...filterSelector.labelIds, ...excludedSelector }
+        : excludedSelector;
+    }
+
     const exceptionsSelector = {
       _id: {
         $in: this._exceptions,
@@ -754,7 +758,8 @@ export const Filter = {
     if (
       this._fields.some(fieldName => {
         return this[fieldName]._isActive();
-      })
+      }) ||
+      this.excludedLabelIds._isActive()
     )
       selectors.push(filterSelector);
     if (includeEmptySelectors) selectors.push(emptySelector);
@@ -763,27 +768,36 @@ export const Filter = {
       selectors.push(this.advanced._getMongoSelector());
     }
 
-    if(isFilterActive) {
-      return {
-        $or: selectors,
-      };
-    }
-    else {
-      // we don't want there is only Filter.lists
-      // otherwise no card will be displayed ...
-      // selectors = [exceptionsSelector];
-      // will return [{"_id":{"$in":[]}}]
-      return {};
-    }
+    const combined = isFilterActive ? { $or: selectors } : {};
+    const constraints = [];
+    if (isFilterActive) constraints.push(combined);
+    if (this.columnAge._isActive()) constraints.push(this.columnAge.selector());
+    if (this.dateRange._isActive()) constraints.push(this.dateRange.selector());
+    constraints.push(...this.providers.selectors());
+    if (this.text._isActive()) constraints.push(boardTextSelector(this.text.value()));
+    if (this.movementDate._isActive()) constraints.push(boardMovementSelector(this.movementDate.value()));
+    return constraints.length > 1 ? { $and: constraints } : (constraints[0] || {});
   },
 
   mongoSelector(additionalSelector) {
     const filterSelector = this._getMongoSelector();
-    if (additionalSelector === undefined) return filterSelector;
-    else
-      return {
-        $and: [filterSelector, additionalSelector],
-      };
+    if (additionalSelector === undefined) {
+      // #2306: a call without an additional selector means "all cards
+      // matching the filter" (e.g. the filter sidebar's "To selection"
+      // button). The client cache may also hold cards from OTHER boards
+      // (a board being navigated away from, linked-board subscriptions,
+      // notifications, popup card data, ...), so scope the query to the
+      // board currently being viewed. Callers that pass an additional
+      // selector are already scoped to a list/swimlane/card of the current
+      // board.
+      return boardScopedFilterSelector(
+        filterSelector,
+        Session.get('currentBoard'),
+      );
+    }
+    return {
+      $and: [filterSelector, additionalSelector],
+    };
   },
 
   reset() {
@@ -791,6 +805,43 @@ export const Filter = {
       const filter = this[fieldName];
       filter.reset();
     });
+    this.excludedLabelIds.reset();
+    this.columnAge.reset();
+    this.text.reset();
+    this.dateRange.reset();
+    this.movementDate.reset();
+    this.providers.reset();
+    this.lists.reset();
+    this.advanced.reset();
+    this.resetExceptions();
+  },
+
+  // #1751 asked for filters to survive navigating from one board to
+  // another instead of being wiped every time - the reporter's own use
+  // case is "only show my user's cards", i.e. a `members`/`assignees`
+  // filter by user id, which means the SAME thing on every board since
+  // user ids are global. `labelIds`/`excludedLabelIds`/`customFields`/
+  // `cardDependencies`/`lists`/`advanced`, by contrast, hold ids or text
+  // that are scoped to the board the user is LEAVING (a label id from
+  // board A means nothing, or the wrong thing, on board B), so those
+  // still have to reset. `config/router.js`'s board route calls this
+  // instead of `reset()` when the target board differs from the current
+  // one, keeping the plain `reset()` behavior (e.g. the "Clear filters"
+  // sidebar button, leaving to All Boards) exactly as it was everywhere
+  // else - this only changes what happens on a board-to-board hop.
+  resetBoardScoped() {
+    this.providers.reset(true);
+    this.columnAge.reset();
+    const boardScopedFields = [
+      'labelIds',
+      'customFields',
+      'cardDependencies',
+      'parentId',
+    ];
+    boardScopedFields.forEach(fieldName => {
+      this[fieldName].reset();
+    });
+    this.excludedLabelIds.reset();
     this.lists.reset();
     this.advanced.reset();
     this.resetExceptions();
@@ -811,3 +862,16 @@ export const Filter = {
 };
 
 Blaze.registerHelper('Filter', Filter);
+
+startBoardTextFilter(Filter.text);
+
+startBoardMovementFilter(Filter.movementDate);
+
+Filter.providers.register({
+  id: 'wekan.date-recency', version: 1, scope: 'global', template: 'cardRecencyFilter', section: 'dates', legacyPreset: true,
+  data: () => ({ filter: Filter.dateRecency }),
+  isActive: () => Filter.dateRecency._isActive(), selector: () => Filter.dateRecency.selector(),
+  reset: () => Filter.dateRecency.reset(), capture: () => Filter.dateRecency.value(),
+  validate: value => cardRecencySelector(value) !== null,
+  restore: value => Filter.dateRecency.set(value),
+});

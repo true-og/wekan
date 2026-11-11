@@ -1,30 +1,47 @@
 template(name="subtasks")
-  h3.card-details-item-title
-    i.fa.fa-globe
-    | {{_ 'subtasks'}}
+  //- No title here: +cardSectionHeader draws it, with the caret and the rule.
+    Two headings for one section is what a card showed before.
   if currentUser.isBoardAdmin
     if toggleDeleteDialog.get
       .board-overlay#card-details-overlay
       +subtaskDeleteDialog(subtask = subtaskToDelete)
 
+  if currentCard.allSubtasksCount
+    a.js-toggle-hide-completed-subtasks.subtasks-hide-completed-toggle
+      i.fa(class="{{#if hideCompletedSubtasks}}fa-eye-slash{{else}}fa-eye{{/if}}")
+      | {{_ 'hideCompletedSubtasks'}} ...
+
   .card-subtasks-items
-    each subtask in currentCard.subtasks
-      +subtaskDetail(subtask = subtask)
+    each subtask in visibleSubtasks
+      +subtaskDetail(subtask = subtask parentCardId = realCardId)
 
   if canModifyCard
     +inlinedForm(autoclose=false classNames="js-add-subtask" cardId = cardId)
-      +addSubtaskItemForm
+      +addSubtaskCardForm
     else
       a.js-open-inlined-form(title="{{_ 'add-subtask'}}")
         i.fa.fa-plus
+    a.js-add-existing-subtask(title="{{_ 'add-existing-card-as-subtask'}}")
+      i.fa.fa-link
 
 template(name="subtaskDetail")
-  .js-subtasks.subtask
+  .js-subtasks.subtask(class="{{#if subtask.archived}}is-completed{{/if}}")
     +inlinedForm(classNames="js-edit-subtask-title" subtask = subtask)
       +editSubtaskItemForm(subtask = subtask)
     else
-      .subtask-title
+      .subtask-title(class="{{#if subtaskIsDone}}is-done{{/if}}")
         span
+        //- #4693: tick a subtask done (its "Mark as complete", dueComplete)
+          right here. Only for someone who may edit THAT subtask - it may be
+          on another board - and the server checks the same again.
+        if subtaskCanTick
+          a.subtask-done-toggle.js-toggle-subtask-done(role="checkbox" aria-checked="{{#if subtaskIsDone}}true{{else}}false{{/if}}" title="{{#if subtaskIsDone}}{{_ 'subtask-mark-not-done'}}{{else}}{{_ 'subtask-mark-done'}}{{/if}}")
+            .materialCheckBox(class="{{#if subtaskIsDone}}is-checked{{/if}}")
+        else
+          span.subtask-done-toggle.is-disabled(role="checkbox" aria-checked="{{#if subtaskIsDone}}true{{else}}false{{/if}}" aria-disabled="true" title="{{#if subtask.archived}}{{_ 'completed'}}{{else}}{{_ 'subtask-done-no-permission'}}{{/if}}")
+            .materialCheckBox(class="{{#if subtaskIsDone}}is-checked{{/if}}")
+        if subtask.archived
+          i.fa.fa-check-circle.subtask-completed-icon(title="{{_ 'completed'}}")
         if canModifyCard
           a.fa.fa-navicon.subtask-details-menu.js-open-subtask-details-menu(title="{{_ 'subtaskActionsPopup-title'}}")
         if canModifyCard
@@ -35,9 +52,17 @@ template(name="subtaskDetail")
           h2.title
             +viewer
                 = subtask.title
+        if subtaskStatus
+          span.subtask-status(title="{{_ 'list'}}")
+            i.fa.fa-list-ul
+            | {{ subtaskStatus }}
 
-template(name="addSubtaskItemForm")
+//- #2184: the "Add a new subtask" form, with the inherit-labels checkbox.
+template(name="addSubtaskCardForm")
   textarea.js-add-subtask-item(rows='1' autofocus dir="auto")
+  label.subtask-inherit-labels
+    input.js-add-subtask-inherit-labels(type="checkbox")
+    | {{_ 'subtask-inherit-parent-labels'}}
   .edit-controls.clearfix
     button.primary.confirm.js-submit-add-subtask-item-form(type="submit") {{_ 'save'}}
     a.fa.fa-times-thin.js-close-inlined-form(title="{{_ 'close-add-checklist-item'}}")
@@ -55,35 +80,6 @@ template(name="editSubtaskItemForm")
     if canModifyCard
       if currentUser.isBoardAdmin
         a.js-delete-subtask-item {{_ "delete"}}...
-
-template(name="subtasksItems")
-  .subtasks-items.js-subtasks-items
-    each item in subtasks.items
-      +inlinedForm(classNames="js-edit-subtask-item" item = item subtasks = subtasks)
-        +editSubtaskItemForm(type = 'item' item = item subtasks = subtasks)
-      else
-        +subtaskItemDetail(item = item subtasks = subtasks)
-    if canModifyCard
-      +inlinedForm(autoclose=false classNames="js-add-subtask-item" subtasks = subtasks dir="auto")
-        +addSubtaskItemForm
-      else
-        a.add-subtask-item.js-open-inlined-form
-          i.fa.fa-plus
-          | {{_ 'add-subtask-item'}}...
-
-template(name='subtaskItemDetail')
-  .js-subtasks-item.subtasks-item
-    if canModifyCard
-      .check-box-container
-        .check-box.materialCheckBox(class="{{#if item.isFinished}}is-checked{{/if}}")
-      .item-title.js-open-inlined-form.is-editable(class="{{#if item.isFinished }}is-checked{{/if}}")
-        +viewer
-          = item.title
-    else
-      .materialCheckBox(class="{{#if item.isFinished}}is-checked{{/if}}")
-      .item-title(class="{{#if item.isFinished }}is-checked{{/if}}")
-        +viewer
-          = item.title
 
 template(name="subtaskDeletePopup")
   p {{_ 'confirm-subtask-delete-popup'}}
@@ -103,4 +99,24 @@ template(name="subtaskActionsPopup")
         a.js-delete-subtask.delete-subtask
           i.fa.fa-trash
           | {{_ "delete"}} ...
+  //- The board's subtask SETTINGS are not here: they belong to the section, not
+    to one subtask, and they are behind the hamburger at the end of the
+    Subtasks heading. client/components/cards/cardDetails.jade
+
+template(name="addExistingSubtaskPopup")
+  form.js-add-existing-subtask-form
+    //- #1931: a card of another board the member may also write.
+    label
+      | {{_ 'subtask-from-board'}}
+      select.js-add-existing-subtask-board
+        each subtaskSourceBoards
+          option(value=_id selected=isSourceBoard) {{title}}
+    input.js-add-existing-subtask-search(type="text" placeholder="{{_ 'search'}}" autofocus dir="auto")
+    ul.pop-over-list.js-add-existing-subtask-results
+      each card in existingSubtaskCandidates
+        li
+          a.js-select-existing-subtask(data-id="{{card._id}}" title="{{card.title}}")
+            = card.title
+      if noExistingSubtaskCandidates
+        li.quiet {{_ 'add-existing-card-as-subtask-empty'}}
 

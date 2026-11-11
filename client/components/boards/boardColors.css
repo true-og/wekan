@@ -1,978 +1,697 @@
-/* ===============
-THEME - NEPHRITIS
-=================*/
+/* The Admin Panel's selected left-menu row is painted by the SAME rules as the
+   second header bar. Flat themes below share structure and publish only their
+   values; exceptional and gradient themes retain explicit rules.
+   See docs/Features/General/Theme/Change-Color.md and docs/Features/All-Boards/Left-Menu.md. */
 
-.board-color-nephritis#header,
-.board-color-nephritis.sk-spinner div,
-.board-backgrounds-list .board-color-nephritis.background-box,
-.board-list .board-color-nephritis a {
-  background-color: #27ae60;
+/* Ordinary solid-colour themes. */
+
+.board-color-nephritis {
+  --board-theme-accent: #217d49;
+  --board-theme-dark: #1c6c3f;
+  --board-theme-hover: #1f7645;
+  --board-theme-emphasis: #ae2775;
+  --board-theme-emphasis-hover: #9d2369;
+  --board-theme-emphasis-close: #8b1f5e;
+  --board-theme-checklist-bg: #d4f1dd;
+  --board-theme-selected-bg: #e7faef;
+  --board-theme-selected-hover-bg: #f8fdfa;
+  --board-theme-bright: #3dd37c;
+  --board-theme-canvas-scrollbar: #27ae60f2;
+  --board-theme-sidebar-scrollbar: #27ae60f2;
 }
-.board-color-nephritis .is-selected .minicard {
-  border-left: 3px solid #27ae60;
+
+.board-color-pomegranate {
+  --board-theme-accent: #c0392b;
+  --board-theme-dark: #9a2e22;
+  --board-theme-hover: #d24435;
+  --board-theme-emphasis: #2bb2c0;
+  --board-theme-emphasis-hover: #27a0ad;
+  --board-theme-emphasis-close: #228e9a;
+  --board-theme-checklist-bg: #f5d5d2;
+  --board-theme-selected-bg: #faeae9;
+  --board-theme-selected-hover-bg: #fdf9f8;
+  --board-theme-bright: #d7584b;
+  --board-theme-canvas-scrollbar: #c0392bf2;
+  --board-theme-sidebar-scrollbar: #c0392bf2;
 }
-.board-color-nephritis .minicard {
+
+.board-color-belize {
+  /* The default theme. The earlier blue #2980b9 gave the header's white text a ratio of 4.30 and
+     its #f2f2f2 button labels 3.84, below the 4.5 WCAG 2.1 AA (1.4.3) asks of
+     small text; this blue keeps the hue and gives 5.14 and 4.59. */
+  --board-theme-accent: #2573a7;
+  --board-theme-dark: #216694;
+  --board-theme-hover: #2e90d0;
+  --board-theme-emphasis: #b96229;
+  --board-theme-emphasis-hover: #a75825;
+  --board-theme-emphasis-close: #944e21;
+  --board-theme-checklist-bg: #d1e7f5;
+  --board-theme-selected-bg: #e8f3fa;
+  --board-theme-selected-hover-bg: #f8fbfd;
+  --board-theme-bright: #459cd6;
+  --board-theme-canvas-scrollbar: #2573a7f2;
+  --board-theme-sidebar-scrollbar: #2573a7f2;
+}
+
+.board-color-wisteria {
+  --board-theme-accent: #8e44ad;
+  --board-theme-dark: #72368a;
+  --board-theme-hover: #9c51bb;
+  --board-theme-emphasis: #63ad44;
+  --board-theme-emphasis-hover: #599c3d;
+  --board-theme-emphasis-close: #4f8a36;
+  --board-theme-checklist-bg: #e8d9f0;
+  --board-theme-selected-bg: #f4ecf7;
+  --board-theme-selected-hover-bg: #fcf9fd;
+  --board-theme-bright: #a765c2;
+  --board-theme-canvas-scrollbar: #8e44adf2;
+  --board-theme-sidebar-scrollbar: #8e44adf2;
+}
+
+.board-color-midnight {
+  --board-theme-accent: #2c3e50;
+  --board-theme-dark: #233240;
+  --board-theme-hover: #3a5169;
+  --board-theme-emphasis: #503e2c;
+  --board-theme-emphasis-hover: #483828;
+  --board-theme-emphasis-close: #403223;
+  --board-theme-checklist-bg: #d2dae2;
+  --board-theme-selected-bg: #e6ecf1;
+  --board-theme-selected-hover-bg: #f8f9fb;
+  --board-theme-bright: #476582;
+  --board-theme-canvas-scrollbar: #2c3e50f2;
+  --board-theme-sidebar-scrollbar: #2c3e50f2;
+}
+
+.board-color-pumpkin {
+  --board-theme-accent: #a75919;
+  --board-theme-dark: #904d15;
+  --board-theme-hover: #9d5417;
+  --board-theme-emphasis: #196ec2;
+  --board-theme-emphasis-hover: #1765b2;
+  --board-theme-emphasis-close: #155ca3;
+  --board-theme-checklist-bg: #f9e5d1;
+  --board-theme-selected-bg: #fdf2e9;
+  --board-theme-selected-hover-bg: #fefbf8;
+  --board-theme-bright: #eb984e;
+  --board-theme-canvas-scrollbar: #e67e22f2;
+  --board-theme-sidebar-scrollbar: #e67e22f2;
+}
+
+.board-color-moderatepink {
+  --board-theme-accent: #bd3a79;
+  --board-theme-dark: #a33268;
+  --board-theme-hover: #b23772;
+  --board-theme-emphasis: #217b54;
+  --board-theme-emphasis-hover: #1e714d;
+  --board-theme-emphasis-close: #1c6747;
+  --board-theme-checklist-bg: #f4dde8;
+  --board-theme-selected-bg: #faeef4;
+  --board-theme-selected-hover-bg: #fefafc;
+  --board-theme-bright: #d77ba7;
+  --board-theme-canvas-scrollbar: #cd5a91f2;
+  --board-theme-sidebar-scrollbar: #cd5a91f2;
+}
+
+.board-color-strongcyan {
+  --board-theme-accent: #00798d;
+  --board-theme-dark: #006879;
+  --board-theme-hover: #007285;
+  --board-theme-emphasis: #cc1e00;
+  --board-theme-emphasis-hover: #b81b00;
+  --board-theme-emphasis-close: #a31800;
+  --board-theme-checklist-bg: #ccf2f9;
+  --board-theme-selected-bg: #e0fbff;
+  --board-theme-selected-hover-bg: #f6feff;
+  --board-theme-bright: #0adbff;
+  --board-theme-canvas-scrollbar: #00aeccf2;
+  --board-theme-sidebar-scrollbar: #00aeccf2;
+}
+
+.board-color-limegreen {
+  --board-theme-accent: #277c48;
+  --board-theme-dark: #226b3e;
+  --board-theme-hover: #257544;
+  --board-theme-emphasis: #b34093;
+  --board-theme-emphasis-hover: #a53b87;
+  --board-theme-emphasis-close: #96367b;
+  --board-theme-checklist-bg: #daf4de;
+  --board-theme-selected-bg: #edf9f0;
+  --board-theme-selected-hover-bg: #fafdfb;
+  --board-theme-bright: #6fcc89;
+  --board-theme-canvas-scrollbar: #4bbf6bf2;
+  --board-theme-sidebar-scrollbar: #4bbf6bf2;
+}
+
+.board-color-corteza {
+  --board-theme-accent: #4a738a;
+  --board-theme-dark: #406377;
+  --board-theme-hover: #466c82;
+  --board-theme-emphasis: #94614f;
+  --board-theme-emphasis-hover: #885949;
+  --board-theme-emphasis-close: #7c5142;
+  --board-theme-checklist-bg: #dce6ec;
+  --board-theme-selected-bg: #eef3f6;
+  --board-theme-selected-hover-bg: #fafcfc;
+  --board-theme-bright: #76a3b6;
+  --board-theme-canvas-scrollbar: #568ba2f2;
+  --board-theme-sidebar-scrollbar: #568ba2f2;
+}
+
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+)#header,
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+)#header-quick-access,
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+).sk-spinner div,
+.board-backgrounds-list :is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+).background-box,
+.public-board-row:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+),
+.board-list li:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+),
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+) .setting-content .content-body .side-menu ul li.active,
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+) .setting-content .content-body .side-menu ul li.active:hover {
+  background-color: var(--board-theme-accent);
+}
+
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+) .is-selected .minicard {
+  border-inline-start: 3px solid var(--board-theme-accent);
+}
+
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+) .minicard {
   border-radius: 7px;
   padding: 10px 10px 4px 10px;
   box-shadow: 2px 2px 4px 0px rgba(0,0,0,0.15);
 }
-.board-color-nephritis button[type=submit].primary,
-.board-color-nephritis input[type=submit].primary,
-.board-color-nephritis .sidebar .sidebar-content .sidebar-btn {
-  background-color: #1f8b4d;
+
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+) button[type=submit].primary,
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+) input[type=submit].primary,
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+) .sidebar .sidebar-content .sidebar-btn,
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+) .selected-calendar-picker button.primary {
+  background-color: var(--board-theme-dark);
   border-radius: 7px;
 }
-.board-color-nephritis.pop-over .pop-over-list li a:not(.disabled):hover,
-.board-color-nephritis .sidebar .sidebar-content .sidebar-btn:hover,
-.board-color-nephritis .sidebar-list li a:hover {
-  background-color: #2cc66d;
+
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+).pop-over .pop-over-list li a:not(.disabled):hover,
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+) .sidebar .sidebar-content .sidebar-btn:hover,
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+) .sidebar-list li a:hover {
+  background-color: var(--board-theme-hover);
 }
-.board-color-nephritis#header ul li.current,
-.board-color-nephritis#header-quick-access ul li.current {
-  border-bottom: 2px solid #2cc66d;
+
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+)#header ul li.current,
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+)#header-quick-access ul li.current {
+  border-bottom: 4px solid var(--board-theme-bright);
 }
-.board-color-nephritis#header-quick-access {
-  background: #239d56;
+
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+)#header-quick-access {
   color: #fff;
 }
-.board-color-nephritis#header #header-main-bar .board-header-btn.emphasis {
-  background: #ae2775;
+
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+)#header #header-main-bar .board-header-btn.emphasis {
+  background: var(--board-theme-emphasis);
 }
-.board-color-nephritis#header #header-main-bar .board-header-btn.emphasis:hover,
-.board-color-nephritis#header #header-main-bar .board-header-btn.emphasis .board-header-btn-close {
-  background: #9d2369;
+
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+)#header #header-main-bar .board-header-btn.emphasis:hover,
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+)#header #header-main-bar .board-header-btn.emphasis .board-header-btn-close {
+  background: var(--board-theme-emphasis-hover);
 }
-.board-color-nephritis#header #header-main-bar .board-header-btn.emphasis:hover .board-header-btn-close {
-  background: #8b1f5e;
+
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+)#header #header-main-bar .board-header-btn.emphasis:hover .board-header-btn-close {
+  background: var(--board-theme-emphasis-close);
 }
-.board-color-nephritis .materialCheckBox.is-checked {
-  border-bottom: 2px solid #27ae60;
-  border-right: 2px solid #27ae60;
+
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+) .materialCheckBox.is-checked {
+  border-bottom: 2px solid var(--board-theme-accent);
+  border-right: 2px solid var(--board-theme-accent);
 }
-.board-color-nephritis .checklist-progress-bar {
-  background-color: #d4f1dd !important;
+
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+) .checklist-progress-bar {
+  background-color: var(--board-theme-checklist-bg) !important;
 }
-.board-color-nephritis .checklist-progress-bar .checklist-progress {
-  background-color: #27ae60 !important;
+
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+) .checklist-progress-bar .checklist-progress {
+  background-color: var(--board-theme-accent) !important;
 }
-.board-color-nephritis .is-multiselection-active .multi-selection-checkbox.is-checked + .minicard {
-  background: #e7faef;
+
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+) .is-multiselection-active .multi-selection-checkbox.is-checked + .minicard {
+  background: var(--board-theme-selected-bg);
 }
-.board-color-nephritis .is-multiselection-active .multi-selection-checkbox:not(.is-checked) + .minicard:hover:not(.minicard-composer) {
-  background: #f8fdfa;
+
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+) .is-multiselection-active .multi-selection-checkbox:not(.is-checked) + .minicard:hover:not(.minicard-composer) {
+  background: var(--board-theme-selected-hover-bg);
 }
-.board-color-nephritis .toggle-label:after {
-  background-color: #1f8b4d;
+
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+) .toggle-label:after,
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+) .toggle-switch:checked ~ .toggle-label:after {
+  background-color: var(--board-theme-dark);
 }
-.board-color-nephritis .toggle-switch:checked ~ .toggle-label {
-  background-color: #3dd37c;
+
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+) .toggle-switch:checked ~ .toggle-label {
+  background-color: var(--board-theme-bright);
 }
-.board-color-nephritis .toggle-switch:checked ~ .toggle-label:after {
-  background-color: #1f8b4d;
-}
+
 @media screen and (max-width: 800px) {
-  .board-color-nephritis.pop-over .header {
-    background: #27ae60;
+  :is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+).pop-over .header {
+    background: var(--board-theme-accent);
     color: #fff;
   }
 }
-.board-color-nephritis#header ul li.current,
-.board-color-nephritis#header-quick-access ul li.current {
-  border-bottom: 4px solid #3dd37c;
+
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+) .board-canvas {
+  scrollbar-color: var(--board-theme-canvas-scrollbar) #e4e4e400;
 }
 
-/* Transparent modern scrollbar - Nephritis*/
-.board-color-nephritis .board-canvas {
-  scrollbar-color: #27ae60f2 #e4e4e400;
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+) .sidebar .sidebar-content {
+  scrollbar-color: var(--board-theme-sidebar-scrollbar) #e4e4e400;
 }
 
-
-/* Apply scrollbar to sidebar content*/
-.board-color-nephritis .sidebar .sidebar-content {
-  scrollbar-color: #27ae60f2 #e4e4e400;
-}
-
-/* Remove margins in between columns/fix spacing */
-
-.board-color-nephritis .list {
-  border-left: none;
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+) .list {
+  border-inline-start: none;
   padding-bottom: 8px;
 }
 
-.board-color-nephritis .list-body {
- margin-top: 8px;
+:is(
+  .board-color-nephritis,
+  .board-color-pomegranate,
+  .board-color-belize,
+  .board-color-wisteria,
+  .board-color-midnight,
+  .board-color-pumpkin,
+  .board-color-moderatepink,
+  .board-color-strongcyan,
+  .board-color-limegreen,
+  .board-color-corteza
+) .list-body {
+  margin-top: 8px;
 }
-
-/* === END NEPHRITIS THEME === */
-
-/* ===============
-THEME - Pomegranate
-=================*/
-
-.board-color-pomegranate#header,
-.board-color-pomegranate.sk-spinner div,
-.board-backgrounds-list .board-color-pomegranate.background-box,
-.board-list .board-color-pomegranate a {
-  background-color: #c0392b;
-}
-.board-color-pomegranate .is-selected .minicard {
-  border-left: 3px solid #c0392b;
-}
-.board-color-pomegranate .minicard {
-  border-radius: 7px;
-  padding: 10px 10px 4px 10px;
-  box-shadow: 2px 2px 4px 0px rgba(0,0,0,0.15);
-}
-.board-color-pomegranate button[type=submit].primary,
-.board-color-pomegranate input[type=submit].primary,
-.board-color-pomegranate .sidebar .sidebar-content .sidebar-btn {
-  background-color: #9a2e22;
-  border-radius: 7px;
-}
-.board-color-pomegranate.pop-over .pop-over-list li a:not(.disabled):hover,
-.board-color-pomegranate .sidebar .sidebar-content .sidebar-btn:hover,
-.board-color-pomegranate .sidebar-list li a:hover {
-  background-color: #d24435;
-}
-.board-color-pomegranate#header ul li.current,
-.board-color-pomegranate#header-quick-access ul li.current {
-  border-bottom: 2px solid #d24435;
-}
-.board-color-pomegranate#header-quick-access {
-  background: #ad3327;
-  color: #fff;
-}
-.board-color-pomegranate#header #header-main-bar .board-header-btn.emphasis {
-  background: #2bb2c0;
-}
-.board-color-pomegranate#header #header-main-bar .board-header-btn.emphasis:hover,
-.board-color-pomegranate#header #header-main-bar .board-header-btn.emphasis .board-header-btn-close {
-  background: #27a0ad;
-}
-.board-color-pomegranate#header #header-main-bar .board-header-btn.emphasis:hover .board-header-btn-close {
-  background: #228e9a;
-}
-.board-color-pomegranate .materialCheckBox.is-checked {
-  border-bottom: 2px solid #c0392b;
-  border-right: 2px solid #c0392b;
-}
-.board-color-pomegranate .checklist-progress-bar {
-  background-color: #f5d5d2 !important;
-}
-.board-color-pomegranate .checklist-progress-bar .checklist-progress {
-  background-color: #c0392b !important;
-}
-.board-color-pomegranate .is-multiselection-active .multi-selection-checkbox.is-checked + .minicard {
-  background: #faeae9;
-}
-.board-color-pomegranate .is-multiselection-active .multi-selection-checkbox:not(.is-checked) + .minicard:hover:not(.minicard-composer) {
-  background: #fdf9f8;
-}
-.board-color-pomegranate .toggle-label:after {
-  background-color: #9a2e22;
-}
-.board-color-pomegranate .toggle-switch:checked ~ .toggle-label {
-  background-color: #d7584b;
-}
-.board-color-pomegranate .toggle-switch:checked ~ .toggle-label:after {
-  background-color: #9a2e22;
-}
-@media screen and (max-width: 800px) {
-  .board-color-pomegranate.pop-over .header {
-    background: #c0392b;
-    color: #fff;
-  }
-}
-.board-color-pomegranate#header ul li.current,
-.board-color-pomegranate#header-quick-access ul li.current {
-  border-bottom: 4px solid #d7584b;
-}
-
-/* Transparent modern scrollbar - pomegranate*/
-.board-color-pomegranate .board-canvas {
-  scrollbar-color: #c0392bf2 #e4e4e400;
-}
-
-
-/* Apply scrollbar to sidebar content*/
-.board-color-pomegranate .sidebar .sidebar-content {
-  scrollbar-color: #c0392bf2 #e4e4e400;
-}
-
-/* Remove margins in between columns/fix spacing */
-
-.board-color-pomegranate .list {
-  border-left: none;
-  padding-bottom: 8px;
-}
-
-.board-color-pomegranate .list-body {
- margin-top: 8px;
-}
-
-/* === END Pomegranate THEME === */
-
-/* ===============
-THEME - Belize
-=================*/
-
-.board-color-belize#header,
-.board-color-belize.sk-spinner div,
-.board-backgrounds-list .board-color-belize.background-box,
-.board-list .board-color-belize a {
-  background-color: #2980b9;
-}
-.board-color-belize .is-selected .minicard {
-  border-left: 3px solid #2980b9;
-}
-.board-color-belize .minicard {
-  border-radius: 7px;
-  padding: 10px 10px 4px 10px;
-  box-shadow: 2px 2px 4px 0px rgba(0,0,0,0.15);
-}
-.board-color-belize button[type=submit].primary,
-.board-color-belize input[type=submit].primary,
-.board-color-belize .sidebar .sidebar-content .sidebar-btn {
-  background-color: #216694;
-  border-radius: 7px;
-}
-.board-color-belize.pop-over .pop-over-list li a:not(.disabled):hover,
-.board-color-belize .sidebar .sidebar-content .sidebar-btn:hover,
-.board-color-belize .sidebar-list li a:hover {
-  background-color: #2e90d0;
-}
-.board-color-belize#header ul li.current,
-.board-color-belize#header-quick-access ul li.current {
-  border-bottom: 2px solid #2e90d0;
-}
-.board-color-belize#header-quick-access {
-  background: #2573a7;
-  color: #fff;
-}
-.board-color-belize#header #header-main-bar .board-header-btn.emphasis {
-  background: #b96229;
-}
-.board-color-belize#header #header-main-bar .board-header-btn.emphasis:hover,
-.board-color-belize#header #header-main-bar .board-header-btn.emphasis .board-header-btn-close {
-  background: #a75825;
-}
-.board-color-belize#header #header-main-bar .board-header-btn.emphasis:hover .board-header-btn-close {
-  background: #944e21;
-}
-.board-color-belize .materialCheckBox.is-checked {
-  border-bottom: 2px solid #2980b9;
-  border-right: 2px solid #2980b9;
-}
-.board-color-belize .checklist-progress-bar {
-  background-color: #d1e7f5 !important;
-}
-.board-color-belize .checklist-progress-bar .checklist-progress {
-  background-color: #2980b9 !important;
-}
-.board-color-belize .is-multiselection-active .multi-selection-checkbox.is-checked + .minicard {
-  background: #e8f3fa;
-}
-.board-color-belize .is-multiselection-active .multi-selection-checkbox:not(.is-checked) + .minicard:hover:not(.minicard-composer) {
-  background: #f8fbfd;
-}
-.board-color-belize .toggle-label:after {
-  background-color: #216694;
-}
-.board-color-belize .toggle-switch:checked ~ .toggle-label {
-  background-color: #459cd6;
-}
-.board-color-belize .toggle-switch:checked ~ .toggle-label:after {
-  background-color: #216694;
-}
-@media screen and (max-width: 800px) {
-  .board-color-belize.pop-over .header {
-    background: #2980b9;
-    color: #fff;
-  }
-}
-.board-color-belize#header ul li.current,
-.board-color-belize#header-quick-access ul li.current {
-  border-bottom: 4px solid #459cd6;
-}
-
-/* Transparent modern scrollbar - belize*/
-.board-color-belize .board-canvas {
-  scrollbar-color: #2573a7f2 #e4e4e400;
-}
-
-
-/* Apply scrollbar to sidebar content*/
-.board-color-belize .sidebar .sidebar-content {
-  scrollbar-color: #2980b9f2 #e4e4e400;
-}
-
-/* Remove margins in between columns/fix spacing */
-
-.board-color-belize .list {
-  border-left: none;
-  padding-bottom: 8px;
-}
-
-.board-color-belize .list-body {
- margin-top: 8px;
-}
-
-/* === END Belize THEME === */
-
-/* ===============
-THEME - Wisteria
-=================*/
-
-.board-color-wisteria#header,
-.board-color-wisteria.sk-spinner div,
-.board-backgrounds-list .board-color-wisteria.background-box,
-.board-list .board-color-wisteria a {
-  background-color: #8e44ad;
-}
-.board-color-wisteria .is-selected .minicard {
-  border-left: 3px solid #8e44ad;
-}
-.board-color-wisteria .minicard {
-  border-radius: 7px;
-  padding: 10px 10px 4px 10px;
-  box-shadow: 2px 2px 4px 0px rgba(0,0,0,0.15);
-}
-.board-color-wisteria button[type=submit].primary,
-.board-color-wisteria input[type=submit].primary,
-.board-color-wisteria .sidebar .sidebar-content .sidebar-btn {
-  background-color: #72368a;
-  border-radius: 7px;
-}
-.board-color-wisteria.pop-over .pop-over-list li a:not(.disabled):hover,
-.board-color-wisteria .sidebar .sidebar-content .sidebar-btn:hover,
-.board-color-wisteria .sidebar-list li a:hover {
-  background-color: #9c51bb;
-}
-.board-color-wisteria#header ul li.current,
-.board-color-wisteria#header-quick-access ul li.current {
-  border-bottom: 2px solid #9c51bb;
-}
-.board-color-wisteria#header-quick-access {
-  background: #803d9c;
-  color: #fff;
-}
-.board-color-wisteria#header #header-main-bar .board-header-btn.emphasis {
-  background: #63ad44;
-}
-.board-color-wisteria#header #header-main-bar .board-header-btn.emphasis:hover,
-.board-color-wisteria#header #header-main-bar .board-header-btn.emphasis .board-header-btn-close {
-  background: #599c3d;
-}
-.board-color-wisteria#header #header-main-bar .board-header-btn.emphasis:hover .board-header-btn-close {
-  background: #4f8a36;
-}
-.board-color-wisteria .materialCheckBox.is-checked {
-  border-bottom: 2px solid #8e44ad;
-  border-right: 2px solid #8e44ad;
-}
-.board-color-wisteria .checklist-progress-bar {
-  background-color: #e8d9f0 !important;
-}
-.board-color-wisteria .checklist-progress-bar .checklist-progress {
-  background-color: #8e44ad !important;
-}
-.board-color-wisteria .is-multiselection-active .multi-selection-checkbox.is-checked + .minicard {
-  background: #f4ecf7;
-}
-.board-color-wisteria .is-multiselection-active .multi-selection-checkbox:not(.is-checked) + .minicard:hover:not(.minicard-composer) {
-  background: #fcf9fd;
-}
-.board-color-wisteria .toggle-label:after {
-  background-color: #72368a;
-}
-.board-color-wisteria .toggle-switch:checked ~ .toggle-label {
-  background-color: #a765c2;
-}
-.board-color-wisteria .toggle-switch:checked ~ .toggle-label:after {
-  background-color: #72368a;
-}
-@media screen and (max-width: 800px) {
-  .board-color-wisteria.pop-over .header {
-    background: #8e44ad;
-    color: #fff;
-  }
-}
-.board-color-wisteria#header ul li.current,
-.board-color-wisteria#header-quick-access ul li.current {
-  border-bottom: 4px solid #a765c2;
-}
-
-/* Transparent modern scrollbar - wisteria*/
-.board-color-wisteria .board-canvas {
-  scrollbar-color: #8e44adf2 #e4e4e400;
-}
-
-
-/* Apply scrollbar to sidebar content*/
-.board-color-wisteria .sidebar .sidebar-content {
-  scrollbar-color: #8e44adf2 #e4e4e400;
-}
-
-/* Remove margins in between columns/fix spacing */
-
-.board-color-wisteria .list {
-  border-left: none;
-  padding-bottom: 8px;
-}
-
-.board-color-wisteria .list-body {
- margin-top: 8px;
-}
-
-/* === END Wisteria THEME === */
-
-/* ===============
-THEME - Midnight
-=================*/
-
-.board-color-midnight#header,
-.board-color-midnight.sk-spinner div,
-.board-backgrounds-list .board-color-midnight.background-box,
-.board-list .board-color-midnight a {
-  background-color: #2c3e50;
-}
-.board-color-midnight .is-selected .minicard {
-  border-left: 3px solid #2c3e50;
-}
-.board-color-midnight .minicard {
-  border-radius: 7px;
-  padding: 10px 10px 4px 10px;
-  box-shadow: 2px 2px 4px 0px rgba(0,0,0,0.15);
-}
-.board-color-midnight button[type=submit].primary,
-.board-color-midnight input[type=submit].primary,
-.board-color-midnight .sidebar .sidebar-content .sidebar-btn {
-  background-color: #233240;
-  border-radius: 7px;
-}
-.board-color-midnight.pop-over .pop-over-list li a:not(.disabled):hover,
-.board-color-midnight .sidebar .sidebar-content .sidebar-btn:hover,
-.board-color-midnight .sidebar-list li a:hover {
-  background-color: #3a5169;
-}
-.board-color-midnight#header ul li.current,
-.board-color-midnight#header-quick-access ul li.current {
-  border-bottom: 2px solid #3a5169;
-}
-.board-color-midnight#header-quick-access {
-  background: #283848;
-  color: #fff;
-}
-.board-color-midnight#header #header-main-bar .board-header-btn.emphasis {
-  background: #503e2c;
-}
-.board-color-midnight#header #header-main-bar .board-header-btn.emphasis:hover,
-.board-color-midnight#header #header-main-bar .board-header-btn.emphasis .board-header-btn-close {
-  background: #483828;
-}
-.board-color-midnight#header #header-main-bar .board-header-btn.emphasis:hover .board-header-btn-close {
-  background: #403223;
-}
-.board-color-midnight .materialCheckBox.is-checked {
-  border-bottom: 2px solid #2c3e50;
-  border-right: 2px solid #2c3e50;
-}
-.board-color-midnight .checklist-progress-bar {
-  background-color: #d2dae2 !important;
-}
-.board-color-midnight .checklist-progress-bar .checklist-progress {
-  background-color: #2c3e50 !important;
-}
-.board-color-midnight .is-multiselection-active .multi-selection-checkbox.is-checked + .minicard {
-  background: #e6ecf1;
-}
-.board-color-midnight .is-multiselection-active .multi-selection-checkbox:not(.is-checked) + .minicard:hover:not(.minicard-composer) {
-  background: #f8f9fb;
-}
-.board-color-midnight .toggle-label:after {
-  background-color: #233240;
-}
-.board-color-midnight .toggle-switch:checked ~ .toggle-label {
-  background-color: #476582;
-}
-.board-color-midnight .toggle-switch:checked ~ .toggle-label:after {
-  background-color: #233240;
-}
-@media screen and (max-width: 800px) {
-  .board-color-midnight.pop-over .header {
-    background: #2c3e50;
-    color: #fff;
-  }
-}
-.board-color-midnight#header ul li.current,
-.board-color-midnight#header-quick-access ul li.current {
-  border-bottom: 4px solid #476582;
-}
-
-/* Transparent modern scrollbar - midnight*/
-.board-color-midnight .board-canvas {
-  scrollbar-color: #2c3e50f2 #e4e4e400;
-}
-
-
-/* Apply scrollbar to sidebar content*/
-.board-color-midnight .sidebar .sidebar-content {
-  scrollbar-color: #2c3e50f2 #e4e4e400;
-}
-
-/* Remove margins in between columns/fix spacing */
-
-.board-color-midnight .list {
-  border-left: none;
-  padding-bottom: 8px;
-}
-
-.board-color-midnight .list-body {
- margin-top: 8px;
-}
-
-/* === END Midnight THEME === */
-
-/* ===============
-THEME - Pumpkin
-=================*/
-
-.board-color-pumpkin#header,
-.board-color-pumpkin.sk-spinner div,
-.board-backgrounds-list .board-color-pumpkin.background-box,
-.board-list .board-color-pumpkin a {
-  background-color: #e67e22;
-}
-.board-color-pumpkin .is-selected .minicard {
-  border-left: 3px solid #e67e22;
-}
-.board-color-pumpkin .minicard {
-  border-radius: 7px;
-  padding: 10px 10px 4px 10px;
-  box-shadow: 2px 2px 4px 0px rgba(0,0,0,0.15);
-}
-.board-color-pumpkin button[type=submit].primary,
-.board-color-pumpkin input[type=submit].primary,
-.board-color-pumpkin .sidebar .sidebar-content .sidebar-btn {
-  background-color: #be6415;
-  border-radius: 7px;
-}
-.board-color-pumpkin.pop-over .pop-over-list li a:not(.disabled):hover,
-.board-color-pumpkin .sidebar .sidebar-content .sidebar-btn:hover,
-.board-color-pumpkin .sidebar-list li a:hover {
-  background-color: #e98b38;
-}
-.board-color-pumpkin#header ul li.current,
-.board-color-pumpkin#header-quick-access ul li.current {
-  border-bottom: 2px solid #e98b38;
-}
-.board-color-pumpkin#header-quick-access {
-  background: #d57118;
-  color: #fff;
-}
-.board-color-pumpkin#header #header-main-bar .board-header-btn.emphasis {
-  background: #228ae6;
-}
-.board-color-pumpkin#header #header-main-bar .board-header-btn.emphasis:hover,
-.board-color-pumpkin#header #header-main-bar .board-header-btn.emphasis .board-header-btn-close {
-  background: #187dd5;
-}
-.board-color-pumpkin#header #header-main-bar .board-header-btn.emphasis:hover .board-header-btn-close {
-  background: #156fbe;
-}
-.board-color-pumpkin .materialCheckBox.is-checked {
-  border-bottom: 2px solid #e67e22;
-  border-right: 2px solid #e67e22;
-}
-.board-color-pumpkin .checklist-progress-bar {
-  background-color: #f9e5d1 !important;
-}
-.board-color-pumpkin .checklist-progress-bar .checklist-progress {
-  background-color: #e67e22 !important;
-}
-.board-color-pumpkin .is-multiselection-active .multi-selection-checkbox.is-checked + .minicard {
-  background: #fdf2e9;
-}
-.board-color-pumpkin .is-multiselection-active .multi-selection-checkbox:not(.is-checked) + .minicard:hover:not(.minicard-composer) {
-  background: #fefbf8;
-}
-.board-color-pumpkin .toggle-label:after {
-  background-color: #be6415;
-}
-.board-color-pumpkin .toggle-switch:checked ~ .toggle-label {
-  background-color: #eb984e;
-}
-.board-color-pumpkin .toggle-switch:checked ~ .toggle-label:after {
-  background-color: #be6415;
-}
-@media screen and (max-width: 800px) {
-  .board-color-pumpkin.pop-over .header {
-    background: #e67e22;
-    color: #fff;
-  }
-}
-.board-color-pumpkin#header ul li.current,
-.board-color-pumpkin#header-quick-access ul li.current {
-  border-bottom: 4px solid #eb984e;
-}
-
-/* Transparent modern scrollbar - pumpkin*/
-.board-color-pumpkin .board-canvas {
-  scrollbar-color: #e67e22f2 #e4e4e400;
-}
-
-
-/* Apply scrollbar to sidebar content*/
-.board-color-pumpkin .sidebar .sidebar-content {
-  scrollbar-color: #e67e22f2 #e4e4e400;
-}
-
-/* Remove margins in between columns/fix spacing */
-
-.board-color-pumpkin .list {
-  border-left: none;
-  padding-bottom: 8px;
-}
-
-.board-color-pumpkin .list-body {
- margin-top: 8px;
-}
-
-/* === END Pumpkin THEME === */
-
-/* ===============
-THEME - Moderate Pink
-=================*/
-
-.board-color-moderatepink#header,
-.board-color-moderatepink.sk-spinner div,
-.board-backgrounds-list .board-color-moderatepink.background-box,
-.board-list .board-color-moderatepink a {
-  background-color: #cd5a91;
-}
-.board-color-moderatepink .is-selected .minicard {
-  border-left: 3px solid #cd5a91;
-}
-.board-color-moderatepink .minicard {
-  border-radius: 7px;
-  padding: 10px 10px 4px 10px;
-  box-shadow: 2px 2px 4px 0px rgba(0,0,0,0.15);
-}
-.board-color-moderatepink button[type=submit].primary,
-.board-color-moderatepink input[type=submit].primary,
-.board-color-moderatepink .sidebar .sidebar-content .sidebar-btn {
-  background-color: #b53773;
-  border-radius: 7px;
-}
-.board-color-moderatepink.pop-over .pop-over-list li a:not(.disabled):hover,
-.board-color-moderatepink .sidebar .sidebar-content .sidebar-btn:hover,
-.board-color-moderatepink .sidebar-list li a:hover {
-  background-color: #d26b9c;
-}
-.board-color-moderatepink#header ul li.current,
-.board-color-moderatepink#header-quick-access ul li.current {
-  border-bottom: 2px solid #d26b9c;
-}
-.board-color-moderatepink#header-quick-access {
-  background: #c64382;
-  color: #fff;
-}
-.board-color-moderatepink#header #header-main-bar .board-header-btn.emphasis {
-  background: #5acd96;
-}
-.board-color-moderatepink#header #header-main-bar .board-header-btn.emphasis:hover,
-.board-color-moderatepink#header #header-main-bar .board-header-btn.emphasis .board-header-btn-close {
-  background: #43c688;
-}
-.board-color-moderatepink#header #header-main-bar .board-header-btn.emphasis:hover .board-header-btn-close {
-  background: #37b579;
-}
-.board-color-moderatepink .materialCheckBox.is-checked {
-  border-bottom: 2px solid #cd5a91;
-  border-right: 2px solid #cd5a91;
-}
-.board-color-moderatepink .checklist-progress-bar {
-  background-color: #f4dde8 !important;
-}
-.board-color-moderatepink .checklist-progress-bar .checklist-progress {
-  background-color: #cd5a91 !important;
-}
-.board-color-moderatepink .is-multiselection-active .multi-selection-checkbox.is-checked + .minicard {
-  background: #faeef4;
-}
-.board-color-moderatepink .is-multiselection-active .multi-selection-checkbox:not(.is-checked) + .minicard:hover:not(.minicard-composer) {
-  background: #fefafc;
-}
-.board-color-moderatepink .toggle-label:after {
-  background-color: #b53773;
-}
-.board-color-moderatepink .toggle-switch:checked ~ .toggle-label {
-  background-color: #d77ba7;
-}
-.board-color-moderatepink .toggle-switch:checked ~ .toggle-label:after {
-  background-color: #b53773;
-}
-@media screen and (max-width: 800px) {
-  .board-color-moderatepink.pop-over .header {
-    background: #cd5a91;
-    color: #fff;
-  }
-}
-.board-color-moderatepink#header ul li.current,
-.board-color-moderatepink#header-quick-access ul li.current {
-  border-bottom: 4px solid #d77ba7;
-}
-
-/* Transparent modern scrollbar - moderatepink*/
-.board-color-moderatepink .board-canvas {
-  scrollbar-color: #cd5a91f2 #e4e4e400;
-}
-
-
-/* Apply scrollbar to sidebar content*/
-.board-color-moderatepink .sidebar .sidebar-content {
-  scrollbar-color: #cd5a91f2 #e4e4e400;
-}
-
-/* Remove margins in between columns/fix spacing */
-
-.board-color-moderatepink .list {
-  border-left: none;
-  padding-bottom: 8px;
-}
-
-.board-color-moderatepink .list-body {
- margin-top: 8px;
-}
-
-/* === END Moderatepink THEME === */
-
-/* ===============
-THEME - Strong Cyan
-=================*/
-
-.board-color-strongcyan#header,
-.board-color-strongcyan.sk-spinner div,
-.board-backgrounds-list .board-color-strongcyan.background-box,
-.board-list .board-color-strongcyan a {
-  background-color: #00aecc;
-}
-.board-color-strongcyan .is-selected .minicard {
-  border-left: 3px solid #00aecc;
-}
-.board-color-strongcyan .minicard {
-  border-radius: 7px;
-  padding: 10px 10px 4px 10px;
-  box-shadow: 2px 2px 4px 0px rgba(0,0,0,0.15);
-}
-.board-color-strongcyan button[type=submit].primary,
-.board-color-strongcyan input[type=submit].primary,
-.board-color-strongcyan .sidebar .sidebar-content .sidebar-btn {
-  background-color: #008ba3;
-  border-radius: 7px;
-}
-.board-color-strongcyan.pop-over .pop-over-list li a:not(.disabled):hover,
-.board-color-strongcyan .sidebar .sidebar-content .sidebar-btn:hover,
-.board-color-strongcyan .sidebar-list li a:hover {
-  background-color: #00c8eb;
-}
-.board-color-strongcyan#header ul li.current,
-.board-color-strongcyan#header-quick-access ul li.current {
-  border-bottom: 2px solid #00c8eb;
-}
-.board-color-strongcyan#header-quick-access {
-  background: #009db8;
-  color: #fff;
-}
-.board-color-strongcyan#header #header-main-bar .board-header-btn.emphasis {
-  background: #cc1e00;
-}
-.board-color-strongcyan#header #header-main-bar .board-header-btn.emphasis:hover,
-.board-color-strongcyan#header #header-main-bar .board-header-btn.emphasis .board-header-btn-close {
-  background: #b81b00;
-}
-.board-color-strongcyan#header #header-main-bar .board-header-btn.emphasis:hover .board-header-btn-close {
-  background: #a31800;
-}
-.board-color-strongcyan .materialCheckBox.is-checked {
-  border-bottom: 2px solid #00aecc;
-  border-right: 2px solid #00aecc;
-}
-.board-color-strongcyan .checklist-progress-bar {
-  background-color: #ccf2f9 !important;
-}
-.board-color-strongcyan .checklist-progress-bar .checklist-progress {
-  background-color: #00aecc !important;
-}
-.board-color-strongcyan .is-multiselection-active .multi-selection-checkbox.is-checked + .minicard {
-  background: #e0fbff;
-}
-.board-color-strongcyan .is-multiselection-active .multi-selection-checkbox:not(.is-checked) + .minicard:hover:not(.minicard-composer) {
-  background: #f6feff;
-}
-.board-color-strongcyan .toggle-label:after {
-  background-color: #008ba3;
-}
-.board-color-strongcyan .toggle-switch:checked ~ .toggle-label {
-  background-color: #0adbff;
-}
-.board-color-strongcyan .toggle-switch:checked ~ .toggle-label:after {
-  background-color: #008ba3;
-}
-@media screen and (max-width: 800px) {
-  .board-color-strongcyan.pop-over .header {
-    background: #00aecc;
-    color: #fff;
-  }
-}
-.board-color-strongcyan#header ul li.current,
-.board-color-strongcyan#header-quick-access ul li.current {
-  border-bottom: 4px solid #0adbff;
-}
-
-/* Transparent modern scrollbar - strongcyan*/
-.board-color-strongcyan .board-canvas {
-  scrollbar-color: #00aeccf2 #e4e4e400;
-}
-
-
-/* Apply scrollbar to sidebar content*/
-.board-color-strongcyan .sidebar .sidebar-content {
- scrollbar-color: #00aeccf2 #e4e4e400;
-}
-
-/* Remove margins in between columns/fix spacing */
-
-.board-color-strongcyan .list {
-  border-left: none;
-  padding-bottom: 8px;
-}
-
-.board-color-strongcyan .list-body {
- margin-top: 8px;
-}
-
-/* === END Strongcyan THEME === */
-
-/* ===============
-THEME - Lime Green
-=================*/
-
-.board-color-limegreen#header,
-.board-color-limegreen.sk-spinner div,
-.board-backgrounds-list .board-color-limegreen.background-box,
-.board-list .board-color-limegreen a {
-  background-color: #4bbf6b;
-}
-.board-color-limegreen .is-selected .minicard {
-  border-left: 3px solid #4bbf6b;
-}
-.board-color-limegreen .minicard {
-  border-radius: 7px;
-  padding: 10px 10px 4px 10px;
-  box-shadow: 2px 2px 4px 0px rgba(0,0,0,0.15);
-}
-.board-color-limegreen button[type=submit].primary,
-.board-color-limegreen input[type=submit].primary,
-.board-color-limegreen .sidebar .sidebar-content .sidebar-btn {
-  background-color: #389d54;
-  border-radius: 7px;
-}
-.board-color-limegreen.pop-over .pop-over-list li a:not(.disabled):hover,
-.board-color-limegreen .sidebar .sidebar-content .sidebar-btn:hover,
-.board-color-limegreen .sidebar-list li a:hover {
-  background-color: #5dc57a;
-}
-.board-color-limegreen#header ul li.current,
-.board-color-limegreen#header-quick-access ul li.current {
-  border-bottom: 2px solid #5dc57a;
-}
-.board-color-limegreen#header-quick-access {
-  background: #3fb15e;
-  color: #fff;
-}
-.board-color-limegreen#header #header-main-bar .board-header-btn.emphasis {
-  background: #bf4b9f;
-}
-.board-color-limegreen#header #header-main-bar .board-header-btn.emphasis:hover,
-.board-color-limegreen#header #header-main-bar .board-header-btn.emphasis .board-header-btn-close {
-  background: #b13f91;
-}
-.board-color-limegreen#header #header-main-bar .board-header-btn.emphasis:hover .board-header-btn-close {
-  background: #9d3881;
-}
-.board-color-limegreen .materialCheckBox.is-checked {
-  border-bottom: 2px solid #4bbf6b;
-  border-right: 2px solid #4bbf6b;
-}
-.board-color-limegreen .checklist-progress-bar {
-  background-color: #daf4de !important;
-}
-.board-color-limegreen .checklist-progress-bar .checklist-progress {
-  background-color: #4bbf6b !important;
-}
-.board-color-limegreen .is-multiselection-active .multi-selection-checkbox.is-checked + .minicard {
-  background: #edf9f0;
-}
-.board-color-limegreen .is-multiselection-active .multi-selection-checkbox:not(.is-checked) + .minicard:hover:not(.minicard-composer) {
-  background: #fafdfb;
-}
-.board-color-limegreen .toggle-label:after {
-  background-color: #389d54;
-}
-.board-color-limegreen .toggle-switch:checked ~ .toggle-label {
-  background-color: #6fcc89;
-}
-.board-color-limegreen .toggle-switch:checked ~ .toggle-label:after {
-  background-color: #389d54;
-}
-@media screen and (max-width: 800px) {
-  .board-color-limegreen.pop-over .header {
-    background: #4bbf6b;
-    color: #fff;
-  }
-}
-.board-color-limegreen#header ul li.current,
-.board-color-limegreen#header-quick-access ul li.current {
-  border-bottom: 4px solid #6fcc89;
-}
-
-/* Transparent modern scrollbar - limegreen*/
-.board-color-limegreen .board-canvas {
-  scrollbar-color: #4bbf6bf2 #e4e4e400;
-}
-
-
-/* Apply scrollbar to sidebar content*/
-.board-color-limegreen .sidebar .sidebar-content {
-  scrollbar-color: #4bbf6bf2 #e4e4e400;
-}
-
-/* Remove margins in between columns/fix spacing */
-
-.board-color-limegreen .list {
-  border-left: none;
-  padding-bottom: 8px;
-}
-
-.board-color-limegreen .list-body {
- margin-top: 8px;
-}
-
-/* === END Limegreen THEME === */
 
 /* ===============
 THEME - Dark
 =================*/
 
 .board-color-dark#header,
+.board-color-dark#header-quick-access,
 .board-color-dark.sk-spinner div,
 .board-backgrounds-list .board-color-dark.background-box,
-.board-list .board-color-dark a {
+.public-board-row.board-color-dark,
+.board-list li.board-color-dark,
+.board-color-dark .setting-content .content-body .side-menu ul li.active,
+.board-color-dark .setting-content .content-body .side-menu ul li.active:hover {
   background-color: #2c3e51;
 }
 .board-color-dark .is-selected .minicard {
-  border-left: 3px solid #2c3e51;
+  border-inline-start: 3px solid #2c3e51;
 }
 .board-color-dark .minicard {
   border-radius: 7px;
@@ -982,7 +701,8 @@ THEME - Dark
 }
 .board-color-dark button[type=submit].primary,
 .board-color-dark input[type=submit].primary,
-.board-color-dark .sidebar .sidebar-content .sidebar-btn {
+.board-color-dark .sidebar .sidebar-content .sidebar-btn,
+.board-color-dark .selected-calendar-picker button.primary {
   background-color: #233241;
   border-radius: 7px;
 }
@@ -996,7 +716,6 @@ THEME - Dark
   border-bottom: 2px solid #3a516a;
 }
 .board-color-dark#header-quick-access {
-  background: #283849;
   color: #fff;
 }
 .board-color-dark#header #header-main-bar .board-header-btn.emphasis {
@@ -1078,9 +797,11 @@ THEME - Dark
 .board-color-dark .board-widget-members {
   color: #aaa;
 }
-.board-color-dark .pop-over >.header {
-  display: none;
-}
+/* This theme used to hide every popup's header outright
+   (`.board-color-dark .pop-over > .header { display: none }`), which took the
+   TITLE, the back arrow and the X with it - so on Dark, "Change Color" was an
+   untitled panel you could only leave with Escape or a click outside. No other
+   theme does that; the header is drawn here exactly as it is everywhere else. */
 .board-color-dark #header-quick-access .fa-plus {
   display: none;
 }
@@ -1161,7 +882,7 @@ THEME - Dark
 /* Remove margins in between columns/fix spacing */
 
 .board-color-dark .list {
-  border-left: none; /* Remove this property to bring back lines in-between columns if needed*/
+  border-inline-start: none; /* Remove this property to bring back lines in-between columns if needed*/
   padding: 0px 1px 8px 1px; /* Improves spacing between columns due to no borders, 8px padding at bottom to separate horizontal scrollbar/lists */
 }
 
@@ -1176,13 +897,17 @@ THEME - Relax
 =================*/
 
 .board-color-relax#header,
+.board-color-relax#header-quick-access,
 .board-color-relax.sk-spinner div,
 .board-backgrounds-list .board-color-relax.background-box,
-.board-list .board-color-relax a {
-  background-color: #27ae61;
+.public-board-row.board-color-relax,
+.board-list li.board-color-relax,
+.board-color-relax .setting-content .content-body .side-menu ul li.active,
+.board-color-relax .setting-content .content-body .side-menu ul li.active:hover {
+  background-color: #217d4a;
 }
 .board-color-relax .is-selected .minicard {
-  border-left: 3px solid #27ae61;
+  border-inline-start: 3px solid #217d4a;
 }
 .board-color-relax .minicard {
   border-radius: 7px;
@@ -1191,21 +916,21 @@ THEME - Relax
 }
 .board-color-relax button[type=submit].primary,
 .board-color-relax input[type=submit].primary,
-.board-color-relax .sidebar .sidebar-content .sidebar-btn {
-  background-color: #1f8b4e;
+.board-color-relax .sidebar .sidebar-content .sidebar-btn,
+.board-color-relax .selected-calendar-picker button.primary {
+  background-color: #1c6c40;
   border-radius: 7px;
 }
 .board-color-relax.pop-over .pop-over-list li a:not(.disabled):hover,
 .board-color-relax .sidebar .sidebar-content .sidebar-btn:hover,
 .board-color-relax .sidebar-list li a:hover {
-  background-color: #2cc66f;
+  background-color: #1f7646;
 }
 .board-color-relax#header ul li.current,
 .board-color-relax#header-quick-access ul li.current {
-  border-bottom: 2px solid #2cc66f;
+  border-bottom: 2px solid #1f7646;
 }
 .board-color-relax#header-quick-access {
-  background: #239d57;
   color: #fff;
 }
 .board-color-relax#header #header-main-bar .board-header-btn.emphasis {
@@ -1219,14 +944,14 @@ THEME - Relax
   background: #8b1f5d;
 }
 .board-color-relax .materialCheckBox.is-checked {
-  border-bottom: 2px solid #27ae61;
-  border-right: 2px solid #27ae61;
+  border-bottom: 2px solid #217d4a;
+  border-right: 2px solid #217d4a;
 }
 .board-color-relax .checklist-progress-bar {
   background-color: #d4f1dd !important;
 }
 .board-color-relax .checklist-progress-bar .checklist-progress {
-  background-color: #27ae61 !important;
+  background-color: #217d4a !important;
 }
 .board-color-relax .is-multiselection-active .multi-selection-checkbox.is-checked + .minicard {
   background: #e7faef;
@@ -1235,17 +960,17 @@ THEME - Relax
   background: #f8fdfa;
 }
 .board-color-relax .toggle-label:after {
-  background-color: #1f8b4e;
+  background-color: #1c6c40;
 }
 .board-color-relax .toggle-switch:checked ~ .toggle-label {
   background-color: #3dd37e;
 }
 .board-color-relax .toggle-switch:checked ~ .toggle-label:after {
-  background-color: #1f8b4e;
+  background-color: #1c6c40;
 }
 @media screen and (max-width: 800px) {
   .board-color-relax.pop-over .header {
-    background: #27ae61;
+    background: #217d4a;
     color: #fff;
   }
 }
@@ -1263,7 +988,7 @@ THEME - Relax
   background-color: #a7e366;
 }
 .board-color-relax .list {
-  border-left: 1px dotted #000;
+  border-inline-start: 1px dotted #000;
 }
 .board-color-relax .card-details .card-details-items ~ .js-open-inlined-form .viewer {
   background-color: #fff !important;
@@ -1297,7 +1022,7 @@ THEME - Relax
 /* Remove margins in between columns/fix spacing */
 
 .board-color-relax .list {
-  border-left: none;
+  border-inline-start: none;
  /* padding-bottom: 8px; - Removed to get rid of grey bars for relax theme */
 }
 
@@ -1308,111 +1033,521 @@ THEME - Relax
 /* === END Relax THEME === */
 
 /* ===============
-THEME - Corteza
+THEME - Apple Glass Pastel
 =================*/
 
-.board-color-corteza#header,
-.board-color-corteza.sk-spinner div,
-.board-backgrounds-list .board-color-corteza.background-box,
-.board-list .board-color-corteza a {
-  background-color: #568ba2;
+.board-color-appleglasspastel {
+  background:
+    radial-gradient(60% 50% at 85% 5%, rgba(255, 200, 220, 0.55), transparent 60%),
+    radial-gradient(55% 50% at 5% 25%, rgba(180, 215, 255, 0.55), transparent 65%),
+    radial-gradient(55% 50% at 95% 95%, rgba(200, 230, 255, 0.5), transparent 60%),
+    radial-gradient(70% 60% at 0% 100%, rgba(230, 215, 255, 0.5), transparent 65%),
+    linear-gradient(180deg, #f6f7fb 0%, #eef0f7 100%);
+  color: #111827;
 }
-.board-color-corteza .is-selected .minicard {
-  border-left: 3px solid #568ba2;
+
+/* Apple's Liquid Glass (WWDC 2025): a surface is not a colour but frosted
+   glass over what lies behind it - a translucent fill, a backdrop blur with
+   extra saturation, a rim of light along its edges (brightest on top), and a
+   diagonal sheen. The header bars are glass too: the mesh shows through them,
+   their text is dark, and blue is kept for what is active and for the one
+   primary action. tests/playwright/specs/theme-appleglasspastel-contrast.e2e.js
+   measures every text against what is really painted behind it. */
+.board-color-appleglasspastel#header,
+.board-color-appleglasspastel#header #header-main-bar,
+.board-color-appleglasspastel#header-quick-access {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.78) 0%, rgba(255, 255, 255, 0.58) 100%),
+    radial-gradient(60% 140% at 85% 0%, rgba(255, 200, 220, 0.55), transparent 60%),
+    radial-gradient(55% 140% at 5% 0%, rgba(180, 215, 255, 0.55), transparent 65%),
+    linear-gradient(180deg, #f6f7fb 0%, #eef0f7 100%);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    inset 0 -1px 0 rgba(15, 23, 42, 0.06),
+    0 8px 24px rgba(15, 23, 42, 0.06);
+  color: #0f172a;
 }
-.board-color-corteza .minicard {
-  border-radius: 7px;
-  padding: 10px 10px 4px 10px;
-  box-shadow: 2px 2px 4px 0px rgba(0,0,0,0.15);
-}
-.board-color-corteza button[type=submit].primary,
-.board-color-corteza input[type=submit].primary,
-.board-color-corteza .sidebar .sidebar-content .sidebar-btn {
-  background-color: #456f82;
-  border-radius: 7px;
-}
-.board-color-corteza.pop-over .pop-over-list li a:not(.disabled):hover,
-.board-color-corteza .sidebar .sidebar-content .sidebar-btn:hover,
-.board-color-corteza .sidebar-list li a:hover {
-  background-color: #6597ad;
-}
-.board-color-corteza#header ul li.current,
-.board-color-corteza#header-quick-access ul li.current {
-  border-bottom: 2px solid #6597ad;
-}
-.board-color-corteza#header-quick-access {
-  background: #4d7d92;
+
+.board-color-appleglasspastel.sk-spinner div,
+.board-color-appleglasspastel .setting-content .content-body .side-menu ul li.active,
+.board-color-appleglasspastel .setting-content .content-body .side-menu ul li.active:hover {
+  background: #2563eb;
   color: #fff;
 }
-.board-color-corteza#header #header-main-bar .board-header-btn.emphasis {
-  background: #a26d56;
-}
-.board-color-corteza#header #header-main-bar .board-header-btn.emphasis:hover,
-.board-color-corteza#header #header-main-bar .board-header-btn.emphasis .board-header-btn-close {
-  background: #92624d;
-}
-.board-color-corteza#header #header-main-bar .board-header-btn.emphasis:hover .board-header-btn-close {
-  background: #825745;
-}
-.board-color-corteza .materialCheckBox.is-checked {
-  border-bottom: 2px solid #568ba2;
-  border-right: 2px solid #568ba2;
-}
-.board-color-corteza .checklist-progress-bar {
-  background-color: #dce6ec !important;
-}
-.board-color-corteza .checklist-progress-bar .checklist-progress {
-  background-color: #568ba2 !important;
-}
-.board-color-corteza .is-multiselection-active .multi-selection-checkbox.is-checked + .minicard {
-  background: #eef3f6;
-}
-.board-color-corteza .is-multiselection-active .multi-selection-checkbox:not(.is-checked) + .minicard:hover:not(.minicard-composer) {
-  background: #fafcfc;
-}
-.board-color-corteza .toggle-label:after {
-  background-color: #456f82;
-}
-.board-color-corteza .toggle-switch:checked ~ .toggle-label {
-  background-color: #76a3b6;
-}
-.board-color-corteza .toggle-switch:checked ~ .toggle-label:after {
-  background-color: #456f82;
-}
-@media screen and (max-width: 800px) {
-  .board-color-corteza.pop-over .header {
-    background: #568ba2;
-    color: #fff;
-  }
-}
-.board-color-corteza#header ul li.current,
-.board-color-corteza#header-quick-access ul li.current {
-  border-bottom: 4px solid #76a3b6;
+
+.board-backgrounds-list .board-color-appleglasspastel.background-box,
+.public-board-row.board-color-appleglasspastel,
+.board-list li.board-color-appleglasspastel {
+  background:
+    radial-gradient(80% 70% at 80% 0%, rgba(255, 200, 220, 0.7), transparent 62%),
+    radial-gradient(70% 80% at 0% 15%, rgba(180, 215, 255, 0.75), transparent 66%),
+    radial-gradient(75% 70% at 100% 100%, rgba(230, 215, 255, 0.7), transparent 62%),
+    linear-gradient(180deg, #f6f7fb 0%, #eef0f7 100%);
+  color: #111827 !important;
 }
 
-/* Transparent modern scrollbar - corteza*/
-.board-color-corteza .board-canvas {
-    scrollbar-color: #568ba2f2 #e4e4e400;
+/* THE LIGHT TILES' TEXT. A board tile writes its title in #f6f6f6
+   (`.board-list .board-list-item`, boardsList.css), which is right on the
+   fifteen dark themes and invisible on a light one: Apple Glass Pastel's tile
+   is a pastel wash from #f6f7fb, so its title and description were white on
+   near-white and only the tile's shape said a board was there. The colour on
+   the tile itself does not reach them - `.board-list .board-list-item` sets a
+   colour of its own on the child, so there is nothing to inherit - which is why
+   each child is named here.
+   EVERY light-tiled theme belongs in this one block: a new one added without it
+   is a board nobody can read in the overview, and tests/boardTileTheme.cjs
+   fails until it is listed. */
+.board-list li.board-color-appleglasspastel .board-list-item,
+.board-list li.board-color-appleglasspastel .board-list-item-name,
+.board-list li.board-color-appleglasspastel .board-list-item-desc,
+.board-list li.board-color-appleglasspastel .board-list-item-sub-name,
+.board-list li.board-color-appleglasspastel .board-list-item-archived-at,
+.public-board-row.board-color-appleglasspastel td {
+  color: #111827;
+}
+.board-list li.board-color-cleanlight .board-list-item,
+.board-list li.board-color-cleanlight .board-list-item-name,
+.board-list li.board-color-cleanlight .board-list-item-desc,
+.board-list li.board-color-cleanlight .board-list-item-sub-name,
+.board-list li.board-color-cleanlight .board-list-item-archived-at,
+.public-board-row.board-color-cleanlight td {
+  color: rgba(10, 10, 20, 0.85);
+}
+/* The count pill and the star sit on that same light tile: a mid-grey pill and
+   a white star are the same problem in a smaller shape. */
+.board-list li.board-color-appleglasspastel .board-list-card-count,
+.board-list li.board-color-cleanlight .board-list-card-count {
+  background: rgba(0, 0, 0, 0.12);
+  color: #111827;
+}
+.board-list li.board-color-appleglasspastel .is-not-star-active,
+.board-list li.board-color-cleanlight .is-not-star-active {
+  color: rgba(10, 10, 20, 0.55);
 }
 
-
-/* Apply scrollbar to sidebar content*/
-.board-color-corteza .sidebar .sidebar-content {
-  scrollbar-color: #568ba2f2 #e4e4e400;
+.board-color-appleglasspastel#header-quick-access {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.7);
 }
 
-/* Remove margins in between columns/fix spacing */
+.board-color-appleglasspastel .boards-left-menu .menu-item.active a,
+.board-color-appleglasspastel .boards-left-menu .menu-item.active a:hover {
+  background: #2563eb;
+}
 
-.board-color-corteza .list {
-  border-left: none;
+.board-color-appleglasspastel#header ul li.current,
+.board-color-appleglasspastel#header-quick-access ul li.current {
+  border-bottom: 3px solid #2563eb;
+}
+
+.board-color-appleglasspastel#header-quick-access #header-new-board-icon,
+.board-color-appleglasspastel#header-quick-access #header-user-bar,
+.board-color-appleglasspastel#header-quick-access ul li,
+.board-color-appleglasspastel#header-quick-access a,
+.board-color-appleglasspastel#header .board-header-btn,
+.board-color-appleglasspastel#header .board-header-btn i {
+  color: #0f172a;
+}
+
+/* Everything the header CSS paints white for the blue bars (header.css) is
+   dark on the glass: the buttons, their icons, the house, the username. Only
+   what still sits on blue - the emphasis button, the active desktop/mobile
+   toggle - keeps its white. */
+.board-color-appleglasspastel#header-quick-access .board-header-btn,
+.board-color-appleglasspastel#header-quick-access i.fa,
+.board-color-appleglasspastel#header-quick-access .home-icon .header-home-link,
+.board-color-appleglasspastel#header-quick-access ul li a,
+.board-color-appleglasspastel#header-quick-access #header-user-bar .header-user-bar-name,
+.board-color-appleglasspastel#header #header-main-bar .board-header-btn,
+.board-color-appleglasspastel#header #header-main-bar .board-header-btn i.fa,
+.board-color-appleglasspastel#header #header-main-bar h1 a i.fa {
+  color: #0f172a;
+}
+
+.board-color-appleglasspastel#header-quick-access .mobile-mode-toggle .board-header-btn {
+  color: #0f172a !important;
+}
+
+/* The stock WeKan logo is white, made for the blue bar; on glass it is drawn
+   dark. A custom logo is the instance's own and is left as it is. */
+.board-color-appleglasspastel#header-quick-access div.header-logo img {
+  filter: brightness(0.2);
+}
+
+.board-color-appleglasspastel#header ul li:hover,
+.board-color-appleglasspastel#header-quick-access ul li:hover,
+.board-color-appleglasspastel .board-header-btn:hover {
+  background: rgba(37, 99, 235, 0.10);
+  border-radius: 10px;
+}
+
+.board-color-appleglasspastel#header #header-main-bar .board-header-btn.emphasis,
+.board-color-appleglasspastel#header #header-main-bar .board-header-btn.emphasis i {
+  color: #fff;
+}
+
+.board-color-appleglasspastel#header #header-main-bar .board-header-btn.emphasis {
+  background: #1e3a8a;
+  box-shadow: 0 4px 16px rgba(37, 99, 235, 0.12), 0 1px 2px rgba(0,0,0,0.04);
+}
+
+.board-color-appleglasspastel#header #header-main-bar .board-header-btn.emphasis:hover,
+.board-color-appleglasspastel#header #header-main-bar .board-header-btn.emphasis .board-header-btn-close {
+  background: #1d4ed8;
+}
+
+.board-color-appleglasspastel#header #header-main-bar .board-header-btn.emphasis:hover .board-header-btn-close {
+  background: #1e3a8a;
+}
+
+.board-color-appleglasspastel.board-wrapper {
+  background:
+    radial-gradient(60% 50% at 85% 5%, rgba(255, 200, 220, 0.55), transparent 60%),
+    radial-gradient(55% 50% at 5% 25%, rgba(180, 215, 255, 0.55), transparent 65%),
+    radial-gradient(55% 50% at 95% 95%, rgba(200, 230, 255, 0.5), transparent 60%),
+    radial-gradient(70% 60% at 0% 100%, rgba(230, 215, 255, 0.5), transparent 65%),
+    linear-gradient(180deg, #f6f7fb 0%, #eef0f7 100%);
+}
+
+.board-color-appleglasspastel .board-canvas {
+  scrollbar-color: rgba(37, 99, 235, 0.35) rgba(255, 255, 255, 0);
+  scrollbar-width: thin;
+}
+
+.board-color-appleglasspastel .swimlane {
+  background: transparent;
+}
+
+.board-color-appleglasspastel .swimlane .swimlane-header-wrap {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.35) 0%, rgba(255, 255, 255, 0) 100%),
+    rgba(255, 255, 255, 0.55);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.55);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+}
+
+.board-color-appleglasspastel .swimlane-header {
+  color: #0f172a;
+  font-weight: 600;
+}
+
+.board-color-appleglasspastel .list {
+  /* Sheen over the frosted fill: light falling from the top left. */
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.5) 0%, rgba(255, 255, 255, 0.08) 30%, rgba(255, 255, 255, 0) 60%),
+    rgba(255, 255, 255, 0.65);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  border-inline-start: none;
+  border-radius: 22px;
+  /* The rim: a bright top edge, softer sides and bottom, and a soft drop. */
+  box-shadow:
+    0 8px 30px rgba(0, 0, 0, 0.06),
+    inset 0 1px 1px rgba(255, 255, 255, 0.9),
+    inset 0 -1px 1px rgba(255, 255, 255, 0.35),
+    inset 1px 0 1px rgba(255, 255, 255, 0.3),
+    inset -1px 0 1px rgba(255, 255, 255, 0.3);
+  color: #111827;
+  margin: 10px 0;
   padding-bottom: 8px;
 }
 
-.board-color-corteza .list-body {
- margin-top: 8px;
+/* list.css paints every list header #e4e4e4 with !important, so the glass
+   has to say it the same way. */
+.board-color-appleglasspastel .list-header {
+  background: rgba(255, 255, 255, 0.4) !important;
+  border-bottom: 1px solid rgba(229, 231, 235, 0.75) !important;
+  border-radius: 22px 22px 0 0;
 }
 
-/* === END Corteza THEME === */
+.board-color-appleglasspastel .list-header .list-header-name,
+.board-color-appleglasspastel .list-header .viewer,
+.board-color-appleglasspastel .minicard-title {
+  color: #0f172a;
+}
+
+.board-color-appleglasspastel .list-body {
+  margin-top: 8px;
+  padding: 11px;
+  scrollbar-color: rgba(37, 99, 235, 0.35) rgba(255, 255, 255, 0);
+  scrollbar-width: thin;
+}
+
+.board-color-appleglasspastel .minicard,
+.board-color-appleglasspastel .card-details,
+.board-color-appleglasspastel.pop-over,
+.board-color-appleglasspastel .sidebar {
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.55) 0%, rgba(255, 255, 255, 0.1) 32%, rgba(255, 255, 255, 0) 60%),
+    rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  box-shadow:
+    0 2px 8px rgba(0, 0, 0, 0.04),
+    0 12px 32px rgba(15, 23, 42, 0.06),
+    inset 0 1px 1px rgba(255, 255, 255, 0.95),
+    inset 0 -1px 1px rgba(255, 255, 255, 0.4);
+  color: #111827;
+}
+
+.board-color-appleglasspastel.pop-over {
+  border-radius: 18px;
+}
+
+.board-color-appleglasspastel .minicard {
+  border-radius: 14px;
+  padding: 10px 10px 4px 10px;
+}
+
+.board-color-appleglasspastel .minicard:hover:not(.minicard-composer),
+.board-color-appleglasspastel .is-selected .minicard,
+.board-color-appleglasspastel .draggable-hover-card .minicard {
+  background: rgba(239, 246, 255, 0.88);
+}
+
+.board-color-appleglasspastel .is-selected .minicard {
+  border-inline-start: 3px solid #2563eb;
+}
+
+.board-color-appleglasspastel .card-details {
+  border-radius: 22px;
+}
+
+.board-color-appleglasspastel .card-details .card-details-header {
+  background: rgba(239, 246, 255, 0.78);
+  border-bottom: 1px solid rgba(229, 231, 235, 0.75);
+  color: #0f172a;
+}
+
+.board-color-appleglasspastel .card-details-item-title,
+.board-color-appleglasspastel .card-details-left .viewer p,
+.board-color-appleglasspastel .activity-desc .activity-member {
+  color: #111827;
+}
+
+/* Quiet text - the forecast's "Not enough finished cards", empty-field hints,
+   activity lines. #6b7280 was 4.51:1 on a plain #f7f7f7 and 4.4:1 on the
+   blue-tinted card header, on the edge of the 4.5:1 ordinary text needs;
+   #4b5563 is 7.05:1 and 6.95:1 there. */
+.board-color-appleglasspastel .quiet,
+.board-color-appleglasspastel .quiet a,
+.board-color-appleglasspastel .activity-desc,
+.board-color-appleglasspastel .sidebar-list-item-description {
+  color: #4b5563;
+}
+
+.board-color-appleglasspastel .list.list-composer,
+.board-color-appleglasspastel .list-body .open-minicard-composer,
+.board-color-appleglasspastel .list.list-composer .open-list-composer {
+  background: rgba(255, 255, 255, 0.45);
+  border-radius: 12px;
+  color: #4b5563;
+  opacity: 1;
+}
+
+/* The sidebar's section headings and Board Settings were the default #808080,
+   3.8:1 on glass. */
+.board-color-appleglasspastel .sidebar .sidebar-content h3,
+.board-color-appleglasspastel .sidebar .sidebar-content h3 i.fa,
+.board-color-appleglasspastel .sidebar .board-header-btn,
+.board-color-appleglasspastel .sidebar .board-header-btn i.fa {
+  color: #374151;
+}
+
+/* The icons. WeKan draws its control icons #a6a6a6, 2.4:1 on white glass -
+   below the 3:1 a graphic that says what a control does needs (WCAG 1.4.11).
+   An icon given its own colour (a dependency, a status) keeps it, and one on a
+   blue button stays white. */
+.board-color-appleglasspastel .board-canvas .fa:not([style*="color"]),
+.board-color-appleglasspastel .card-details .fa:not([style*="color"]),
+.board-color-appleglasspastel .sidebar .fa:not([style*="color"]),
+.board-color-appleglasspastel.pop-over .fa:not([style*="color"]),
+.board-color-appleglasspastel#header-quick-access .fa,
+.board-color-appleglasspastel#header .fa {
+  color: #4b5563;
+}
+
+.board-color-appleglasspastel#header-quick-access .fa,
+.board-color-appleglasspastel#header .fa {
+  color: #0f172a;
+}
+
+.board-color-appleglasspastel button .fa,
+.board-color-appleglasspastel .primary .fa,
+.board-color-appleglasspastel#header #header-main-bar .board-header-btn.emphasis .fa {
+  color: inherit;
+}
+
+.board-color-appleglasspastel .list-body .open-minicard-composer:hover,
+.board-color-appleglasspastel .list.list-composer .open-list-composer:hover,
+.board-color-appleglasspastel.pop-over .pop-over-list li a:not(.disabled):hover,
+.board-color-appleglasspastel .sidebar .sidebar-content .sidebar-btn:hover,
+.board-color-appleglasspastel .sidebar-list li a:hover {
+  background: rgba(219, 234, 254, 0.78);
+  color: #1e3a8a;
+}
+
+/* popup.css makes a hovered menu row white on the accent with !important; on
+   this theme the row turns pale blue, so its text and icon turn navy the same
+   way. */
+.board-color-appleglasspastel.pop-over .pop-over-list li > a:not(.disabled):hover,
+.board-color-appleglasspastel.pop-over .pop-over-list li > a:not(.disabled):hover i,
+.board-color-appleglasspastel.pop-over .pop-over-list li > a:not(.disabled):hover i.fa {
+  color: #1e3a8a !important;
+}
+
+@media screen and (max-width: 800px) {
+  .board-color-appleglasspastel.pop-over .header a,
+  .board-color-appleglasspastel.pop-over .header .fa,
+  .board-color-appleglasspastel.pop-over .header .close-btn i.fa {
+    color: #0f172a;
+  }
+}
+
+/* The sidebar hamburger is forced white with !important by the accessibility
+   style boardBody.js injects, which assumes a blue bar. */
+.board-color-appleglasspastel#header-quick-access .js-toggle-page-sidebar .fa-bars {
+  color: #0f172a !important;
+}
+
+.board-color-appleglasspastel button[type=submit].primary,
+.board-color-appleglasspastel input[type=submit].primary,
+.board-color-appleglasspastel button.primary,
+.board-color-appleglasspastel input.primary,
+.board-color-appleglasspastel .sidebar .sidebar-content .sidebar-btn,
+.board-color-appleglasspastel .selected-calendar-picker button.primary {
+  /* Tinted glass: the blue with a highlight across its upper half. */
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.28) 0%, rgba(255, 255, 255, 0) 55%),
+    #2563eb;
+  border: 0;
+  border-radius: 999px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.45),
+    0 4px 16px rgba(37, 99, 235, 0.25),
+    0 1px 2px rgba(0, 0, 0, 0.04);
+  color: #fff;
+}
+
+.board-color-appleglasspastel button[type="submit"].primary:hover,
+.board-color-appleglasspastel input[type="submit"].primary:hover,
+.board-color-appleglasspastel button.primary:hover,
+.board-color-appleglasspastel input.primary:hover,
+.board-color-appleglasspastel .selected-calendar-picker button.primary:hover {
+  background: #1d4ed8;
+  color: #fff;
+}
+
+.board-color-appleglasspastel input[type="email"],
+.board-color-appleglasspastel input[type="password"],
+.board-color-appleglasspastel input[type="text"],
+.board-color-appleglasspastel textarea,
+.board-color-appleglasspastel select {
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(229, 231, 235, 0.9);
+  border-radius: 12px;
+  color: #111827;
+}
+
+.board-color-appleglasspastel input:focus,
+.board-color-appleglasspastel textarea:focus,
+.board-color-appleglasspastel select:focus {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+.board-color-appleglasspastel .materialCheckBox.is-checked {
+  border-bottom: 2px solid #2563eb;
+  border-right: 2px solid #2563eb;
+}
+
+.board-color-appleglasspastel .checklist-progress-bar {
+  background-color: #dbeafe !important;
+}
+
+.board-color-appleglasspastel .checklist-progress-bar .checklist-progress {
+  background-color: #2563eb !important;
+}
+
+.board-color-appleglasspastel .is-multiselection-active .multi-selection-checkbox.is-checked + .minicard {
+  background: #eff6ff;
+}
+
+.board-color-appleglasspastel .is-multiselection-active .multi-selection-checkbox:not(.is-checked) + .minicard:hover:not(.minicard-composer) {
+  background: rgba(255, 255, 255, 0.88);
+}
+
+.board-color-appleglasspastel .toggle-label:after {
+  background-color: #2563eb;
+}
+
+.board-color-appleglasspastel .toggle-switch:checked ~ .toggle-label {
+  background-color: #93c5fd;
+}
+
+.board-color-appleglasspastel .toggle-switch:checked ~ .toggle-label:after {
+  background-color: #2563eb;
+}
+
+.board-color-appleglasspastel .card-date.current,
+.board-color-appleglasspastel .minicard .current {
+  background: #1f7d38;
+  color: #fff !important;
+}
+
+.board-color-appleglasspastel .card-date.due,
+.board-color-appleglasspastel .minicard .due {
+  background: #dc3545;
+  color: #fff !important;
+}
+
+.board-color-appleglasspastel .sidebar .sidebar-content {
+  scrollbar-color: rgba(37, 99, 235, 0.35) rgba(255, 255, 255, 0);
+}
+
+@media screen and (max-width: 800px) {
+  .board-color-appleglasspastel.pop-over .header {
+    background: rgba(255, 255, 255, 0.6);
+    border-bottom: 1px solid rgba(229, 231, 235, 0.75);
+    color: #0f172a;
+  }
+}
+
+/* Reduce transparency (macOS, iOS, Windows), and a browser with no
+   backdrop-filter: the glass turns nearly opaque, so text never depends on
+   what happens to lie behind it. */
+@media (prefers-reduced-transparency: reduce) {
+  .board-color-appleglasspastel#header,
+  .board-color-appleglasspastel#header #header-main-bar,
+  .board-color-appleglasspastel#header-quick-access,
+  .board-color-appleglasspastel .list,
+  .board-color-appleglasspastel .minicard,
+  .board-color-appleglasspastel .card-details,
+  .board-color-appleglasspastel.pop-over,
+  .board-color-appleglasspastel .sidebar,
+  .board-color-appleglasspastel .swimlane .swimlane-header-wrap {
+    background: rgba(255, 255, 255, 0.96);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .board-color-appleglasspastel .list,
+  .board-color-appleglasspastel .minicard,
+  .board-color-appleglasspastel .card-details,
+  .board-color-appleglasspastel.pop-over,
+  .board-color-appleglasspastel .sidebar {
+    background: rgba(255, 255, 255, 0.92);
+  }
+}
+
+/* === END Apple Glass Pastel THEME === */
 
 /* ===============
 THEME - Clear Blue
@@ -1420,11 +1555,12 @@ THEME - Clear Blue
 
 .board-color-clearblue.sk-spinner div,
 .board-backgrounds-list .board-color-clearblue.background-box,
-.board-list .board-color-clearblue a {
-  background: linear-gradient(180deg, #499bea 0%, #00aecc 100%);
+.public-board-row.board-color-clearblue,
+.board-list li.board-color-clearblue {
+  background: linear-gradient(180deg, #499bea 0%, #00798d 100%);
 }
 .board-color-clearblue .is-selected .minicard {
-  border-left: 3px solid #499bea;
+  border-inline-start: 3px solid #499bea;
 }
 .board-color-clearblue.pop-over .pop-over-list li a:not(.disabled):hover,
 .board-color-clearblue .sidebar .sidebar-content .sidebar-btn:hover,
@@ -1433,30 +1569,57 @@ THEME - Clear Blue
 }
 .board-color-clearblue#header ul li.current,
 .board-color-clearblue#header-quick-access ul li.current {
-  border-bottom: 4px solid #00c8eb;
+  border-bottom: 4px solid #007285;
 }
 .board-color-clearblue#header-quick-access {
-  background: #2d8ce7;
   color: #fff;
 }
+/* Half-white was right when this bar was a thin SECONDARY strip above the
+   coloured main bar - the username and the board links in it were background
+   furniture. This bar is the header now, so its text is the header's text:
+   full white, like every other theme's, and like the page title beside it.
+   No other theme dims these. docs/Features/General/Theme/Change-Color.md */
 .board-color-clearblue#header-quick-access #header-new-board-icon,
 .board-color-clearblue#header-quick-access #header-user-bar,
 .board-color-clearblue#header-quick-access ul li {
-  color: rgba(255,255,255,0.5);
+  color: #fff;
 }
-.board-color-clearblue#header {
-  background-color: #00aecc;
-  border-bottom: 1px solid #008ba3;
+.board-color-clearblue#header,
+.board-color-clearblue#header-quick-access,
+.board-color-clearblue .setting-content .content-body .side-menu ul li.active,
+.board-color-clearblue .setting-content .content-body .side-menu ul li.active:hover {
+  background-color: #00798d;
+  border-bottom: 1px solid #006879;
   border-top: 1px solid #00687a;
 }
-.board-color-clearblue#header #header-main-bar {
-  background: linear-gradient(180deg, #499bea 0%, #00aecc 100%);
+/* clearblue's bar is a colour SLIDE, and the slide has to be on the bar that is
+   actually on screen. It was only ever on `#header #header-main-bar` - the
+   inner element of the SECOND bar - because that is where the theme used to
+   live. The first bar got the flat `background-color: #00798d` from the rule
+   above instead, which is exactly strongcyan's colour: picking clearblue
+   painted the header strongcyan.
+   `#header-quick-access` has no inner bar of its own, so the slide goes
+   directly on it.
+
+   The All Boards left menu's selected row is named here too. Every other theme
+   paints that row through `--theme-accent`, which is one colour and is exactly
+   right for them; a slide is not a colour, so the variable cannot carry it and
+   clearblue's row came out flat #00798d while the Admin Panel's row beside it
+   slid. The Admin Panel's row has always been named in this rule; this is the
+   All Boards row joining it. docs/Features/General/Theme/Change-Color.md */
+.board-color-clearblue#header #header-main-bar,
+.board-color-clearblue#header-quick-access,
+.board-color-clearblue .setting-content .content-body .side-menu ul li.active,
+.board-color-clearblue .setting-content .content-body .side-menu ul li.active:hover,
+.board-color-clearblue .boards-left-menu .menu-item.active a,
+.board-color-clearblue .boards-left-menu .menu-item.active a:hover {
+  background: linear-gradient(180deg, #499bea 0%, #00798d 100%);
 }
 .board-color-clearblue#header #header-main-bar p {
   margin-bottom: 6px;
 }
 .board-color-clearblue#header #header-main-bar .board-header-btn.emphasis {
-  background: #00c8eb;
+  background: #007285;
 }
 .board-color-clearblue#header #header-main-bar .board-header-btn.emphasis:hover,
 .board-color-clearblue#header #header-main-bar .board-header-btn.emphasis .board-header-btn-close {
@@ -1488,15 +1651,15 @@ THEME - Clear Blue
   background-color: #197ddc;
 }
 .board-color-clearblue.board-wrapper {
-  background: linear-gradient(135deg, #499bea 0%, #00aecc 100%);
+  background: linear-gradient(135deg, #499bea 0%, #00798d 100%);
 }
 .board-color-clearblue .swimlane {
   background: none;
 }
 .board-color-clearblue .swimlane .list:first-child {
   min-width: 20px;
-  margin-left: 10px; /* Added 10px margin left to stop lists being butted up against the edge of the screen */
-  border-left: none;
+  margin-inline-start: 10px; /* Added 10px margin left to stop lists being butted up against the edge of the screen */
+  border-inline-start: none;
 }
 .board-color-clearblue .swimlane .list:nth-child {
   flex: 0 0 265px;
@@ -1513,8 +1676,8 @@ THEME - Clear Blue
   flex: unset;
   padding-bottom: 16px;
   min-width: 20px;
-  margin-left: 0px;
-  border-left: none;
+  margin-inline-start: 0px;
+  border-inline-start: none;
 }
 .board-color-clearblue .list.list-composer .open-list-composer {
   border-radius: 7px;
@@ -1550,7 +1713,7 @@ THEME - Clear Blue
 .board-color-clearblue .card-details {
   border-radius: 0 0 14px 14px;
   box-shadow: 0 0 7px 0 rgba(0,0,0,0.5);
-  margin-left: -10px;
+  margin-inline-start: -10px;
 }
 .board-color-clearblue .list-body .open-minicard-composer {
   border-radius: 7px;
@@ -1562,7 +1725,8 @@ THEME - Clear Blue
   color: rgba(0,0,0,0.6);
 }
 .board-color-clearblue button[type=submit].primary,
-.board-color-clearblue input[type=submit].primary {
+.board-color-clearblue input[type=submit].primary,
+.board-color-clearblue .selected-calendar-picker button.primary {
   box-shadow: none;
   background-color: rgba(255,255,255,0.5);
   color: rgba(0,0,0,0.55);
@@ -1570,7 +1734,8 @@ THEME - Clear Blue
   border: 0;
 }
 .board-color-clearblue button[type="submit"].primary:hover,
-.board-color-clearblue input[type="submit"].primary:hover {
+.board-color-clearblue input[type="submit"].primary:hover,
+.board-color-clearblue .selected-calendar-picker button.primary:hover {
   background-color: rgba(255,255,255,0.7);
   color: rgba(0,0,0,0.8);
   box-shadow: 0 1px 2px rgba(0,0,0,0.2);
@@ -1578,13 +1743,13 @@ THEME - Clear Blue
 }
 .board-color-clearblue .quiet,
 .board-color-clearblue .quiet a {
-  color: rgba(0,0,0,0.4);
+  color: rgba(0,0,0,0.68);
 }
 .board-color-clearblue .list-header .list-header-watch-icon {
   color: rgba(0,0,0,0.5);
   position: absolute;
   margin-top: -34px;
-  margin-left: -11px;
+  margin-inline-start: -11px;
 }
 .board-color-clearblue a.fa,
 .board-color-clearblue a i.fa {
@@ -1605,7 +1770,7 @@ THEME - Clear Blue
 }
 .board-color-clearblue .sidebar-shadow {
   box-shadow: none;
-  border-left: 9px solid #00aecc;
+  border-inline-start: 9px solid #00798d;
 }
 .board-color-clearblue .is-open .sidebar-shadow {
   box-shadow: -10px 0 8px rgba(0,0,0,0.3);
@@ -1646,7 +1811,7 @@ THEME - Clear Blue
   vertical-align: middle;
 }
 .board-color-clearblue .swimlane-header-wrap .primary.confirm {
-  margin-right: 0;
+  margin-inline-end: 0;
 }
 .board-color-clearblue .swimlane-header-wrap .fa.fa-times-thin {
   margin-top: 2px;
@@ -1671,13 +1836,13 @@ THEME - Clear Blue
 
 /* Apply scrollbar to sidebar content*/
 .board-color-clearblue .sidebar .sidebar-content {
-   scrollbar-color: #00aecc #ffffff00;
+   scrollbar-color: #00798d #ffffff00;
 }
 
 /* Remove margins in between columns/fix spacing */
 
 .board-color-clearblue .list {
-  border-left: none;
+  border-inline-start: none;
   padding-bottom: 8px;
 }
 
@@ -1692,13 +1857,17 @@ THEME - Natural
 =================*/
 
 .board-color-natural#header,
+.board-color-natural#header-quick-access,
 .board-color-natural.sk-spinner div,
 .board-backgrounds-list .board-color-natural.background-box,
-.board-list .board-color-natural a {
+.public-board-row.board-color-natural,
+.board-list li.board-color-natural,
+.board-color-natural .setting-content .content-body .side-menu ul li.active,
+.board-color-natural .setting-content .content-body .side-menu ul li.active:hover {
   background-color: #596557;
 }
 .board-color-natural .is-selected .minicard {
-  border-left: 3px solid #596557;
+  border-inline-start: 3px solid #596557;
 }
 .board-color-natural .minicard {
   border-radius: 7px;
@@ -1707,7 +1876,8 @@ THEME - Natural
 }
 .board-color-natural button[type=submit].primary,
 .board-color-natural input[type=submit].primary,
-.board-color-natural .sidebar .sidebar-content .sidebar-btn {
+.board-color-natural .sidebar .sidebar-content .sidebar-btn,
+.board-color-natural .selected-calendar-picker button.primary {
   background-color: #475146;
   border-radius: 7px;
 }
@@ -1721,7 +1891,6 @@ THEME - Natural
   border-bottom: 2px solid #687666;
 }
 .board-color-natural#header-quick-access {
-  background: #505b4e;
   color: #fff;
 }
 .board-color-natural#header #header-main-bar .board-header-btn.emphasis {
@@ -1769,9 +1938,12 @@ THEME - Natural
 .board-color-natural#header-quick-access ul li.current {
   border-bottom: 4px solid #778875;
 }
-.board-color-natural#header-quick-access {
-  background-color: #2d392b;
-}
+/* The first bar keeps this theme's OWN colour. `#2d392b` was here because the
+   quick-access bar used to be a thin dark strip ABOVE the coloured main bar;
+   the main bar is gone and this one carries the theme, so the darker shade
+   painted Natural near-black instead of its green-grey. The shared
+   `#header, #header-quick-access` rule above provides the colour.
+   docs/Features/General/Theme/Change-Color.md */
 .board-color-natural.board-wrapper {
   background-color: #dedede;
 }
@@ -1793,7 +1965,7 @@ THEME - Natural
 /* Remove margins in between columns/fix spacing */
 
 .board-color-natural .list {
-  border-left: none;
+  border-inline-start: none;
   padding-bottom: 8px;
 }
 
@@ -1808,13 +1980,17 @@ THEME - Modern
 =================*/
 
 .board-color-modern#header,
+.board-color-modern#header-quick-access,
 .board-color-modern.sk-spinner div,
 .board-backgrounds-list .board-color-modern.background-box,
-.board-list .board-color-modern a {
-  background-color: #2a80b8;
+.public-board-row.board-color-modern,
+.board-list li.board-color-modern,
+.board-color-modern .setting-content .content-body .side-menu ul li.active,
+.board-color-modern .setting-content .content-body .side-menu ul li.active:hover {
+  background-color: #2372a4;
 }
 .board-color-modern .is-selected .minicard {
-  border-left: 3px solid #2a80b8;
+  border-inline-start: 3px solid #2372a4;
 }
 .board-color-modern .minicard {
   border-radius: 7px;
@@ -1823,42 +1999,42 @@ THEME - Modern
 }
 .board-color-modern button[type=submit].primary,
 .board-color-modern input[type=submit].primary,
-.board-color-modern .sidebar .sidebar-content .sidebar-btn {
-  background-color: #226693;
+.board-color-modern .sidebar .sidebar-content .sidebar-btn,
+.board-color-modern .selected-calendar-picker button.primary {
+  background-color: #1e628d;
   border-radius: 7px;
 }
 .board-color-modern.pop-over .pop-over-list li a:not(.disabled):hover,
 .board-color-modern .sidebar .sidebar-content .sidebar-btn:hover,
 .board-color-modern .sidebar-list li a:hover {
-  background-color: #2f90cf;
+  background-color: #216b9a;
 }
 .board-color-modern#header ul li.current,
 .board-color-modern#header-quick-access ul li.current {
-  border-bottom: 2px solid #2f90cf;
+  border-bottom: 2px solid #216b9a;
 }
 .board-color-modern#header-quick-access {
-  background: #2673a6;
   color: #fff;
 }
 .board-color-modern#header #header-main-bar .board-header-btn.emphasis {
-  background: #b8622a;
+  background: #a45b23;
 }
 .board-color-modern#header #header-main-bar .board-header-btn.emphasis:hover,
 .board-color-modern#header #header-main-bar .board-header-btn.emphasis .board-header-btn-close {
-  background: #a65826;
+  background: #975420;
 }
 .board-color-modern#header #header-main-bar .board-header-btn.emphasis:hover .board-header-btn-close {
-  background: #934e22;
+  background: #8a4c1d;
 }
 .board-color-modern .materialCheckBox.is-checked {
-  border-bottom: 2px solid #2a80b8;
-  border-right: 2px solid #2a80b8;
+  border-bottom: 2px solid #2372a4;
+  border-right: 2px solid #2372a4;
 }
 .board-color-modern .checklist-progress-bar {
   background-color: #d1e7f5 !important;
 }
 .board-color-modern .checklist-progress-bar .checklist-progress {
-  background-color: #2a80b8 !important;
+  background-color: #2372a4 !important;
 }
 .board-color-modern .is-multiselection-active .multi-selection-checkbox.is-checked + .minicard {
   background: #e8f3fa;
@@ -1867,17 +2043,17 @@ THEME - Modern
   background: #f8fbfd;
 }
 .board-color-modern .toggle-label:after {
-  background-color: #226693;
+  background-color: #1e628d;
 }
 .board-color-modern .toggle-switch:checked ~ .toggle-label {
   background-color: #469cd5;
 }
 .board-color-modern .toggle-switch:checked ~ .toggle-label:after {
-  background-color: #226693;
+  background-color: #1e628d;
 }
 @media screen and (max-width: 800px) {
   .board-color-modern.pop-over .header {
-    background: #2a80b8;
+    background: #2372a4;
     color: #fff;
   }
 }
@@ -1888,11 +2064,10 @@ THEME - Modern
 .board-color-modern body {
   background: #f5f5f5;
 }
-.board-color-modern#header-quick-access {
-  padding: 10px;
-  font-size: 14px;
-  background: #333 !important;
-}
+/* Same as Natural: `#333 !important` was the thin dark strip's colour, and it
+   painted Modern charcoal instead of its blue. The padding and font-size were
+   the strip's too - this bar sizes itself like every other theme's now.
+   docs/Features/General/Theme/Change-Color.md */
 .board-color-modern#header-quick-access ul {
   overflow: visible;
 }
@@ -1904,7 +2079,7 @@ THEME - Modern
   display: none;
 }
 .board-color-modern#header-quick-access ul li:nth-child(3) {
-  margin-right: 10px;
+  margin-inline-end: 10px;
 }
 .board-color-modern#header-quick-access ul li a {
   padding: 5px 10px;
@@ -1952,7 +2127,7 @@ THEME - Modern
 }
 .board-color-modern .list {
   background: transparent;
-  border-left: 0;
+  border-inline-start: 0;
   margin: 10px 0;
   padding: 0px;
   border-radius: 5px;
@@ -1964,8 +2139,8 @@ THEME - Modern
 }
 .board-color-modern .swimlane .list:first-child {
   min-width: 20px;
-  margin-left: 0px;
-  border-left: none;
+  margin-inline-start: 0px;
+  border-inline-start: none;
 }
 .board-color-modern .swimlane .list:nth-child {
   flex: 0 0 265px;
@@ -1998,20 +2173,22 @@ THEME - Modern
   line-height: 1.5em;
 }
 .board-color-modern .minicard .minicard-cover {
-  background-size: cover;
   margin: -15px -15px 10px;
+  height: 100px;
+}
+.board-color-modern .minicard .minicard-cover-image {
   height: 100px;
 }
 .board-color-modern .card-label-orange {
   color: #fff;
 }
 .board-color-modern .card-date {
-  font-size: 12px;
+  font-size: calc(12px * var(--wekan-ui-font-scale, 1));
   padding: 3px 5px;
 }
 .board-color-modern .header-title {
   /* font-family: Poppins; */
-  font-size: 16px;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1));
   color: #333;
 }
 .board-color-modern .pop-over {
@@ -2027,23 +2204,29 @@ THEME - Modern
 }
 .board-color-modern .pop-over .header .header-title {
   /* font-family: Poppins; */
-  font-size: 16px;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1));
   color: #333;
 }
 .board-color-modern .pop-over .header .close-btn {
-  font-size: 20px;
+  font-size: calc(20px * var(--wekan-ui-font-scale, 1));
   top: 6px;
-  right: 8px;
+  inset-inline-end: 8px;
 }
 .board-color-modern .pop-over .content-container .content {
+  /* Padding only. This carried `width: 260px`, which pinned EVERY popup on this
+     theme to one narrow column: the Change Color picker's swatches ran down the
+     popup one per row, and the same would happen to Export board, Show on Card
+     and Show on Minicard - the popups that ask for width by name
+     (`WIDE_POPUP_WIDTHS`, client/lib/popupOffset.js, mirrored in popup.css).
+     How wide a popup is belongs to the popup, not to the theme; a theme decides
+     what it looks like. */
   padding: 5px 20px 20px;
-  width: 260px;
 }
 .board-color-modern .pop-over-list li > a {
   border-radius: 5px;
 }
 .board-color-modern .pop-over-list li > a > i {
-  margin-right: 5px;
+  margin-inline-end: 5px;
 }
 .board-color-modern .pop-over-list li>a .sub-name {
   margin-bottom: 8px;
@@ -2065,7 +2248,7 @@ THEME - Modern
   font-weight: bold;
 }
 .board-color-modern .board-color-modern section#notifications-drawer .header .close {
-  font-size: 20px;
+  font-size: calc(20px * var(--wekan-ui-font-scale, 1));
   top: 14px;
 }
 .board-color-modern section#notifications-drawer .header .toggle-read {
@@ -2086,7 +2269,7 @@ THEME - Modern
 /* Remove margins in between columns/fix spacing */
 
 .board-color-modern .list {
-  border-left: none;
+  border-inline-start: none;
   padding-bottom: 8px;
 }
 
@@ -2101,13 +2284,17 @@ THEME - Modern Dark
 =================*/
 
 .board-color-moderndark#header,
+.board-color-moderndark#header-quick-access,
 .board-color-moderndark.sk-spinner div,
 .board-backgrounds-list .board-color-moderndark.background-box,
-.board-list .board-color-moderndark a {
+.public-board-row.board-color-moderndark,
+.board-list li.board-color-moderndark,
+.board-color-moderndark .setting-content .content-body .side-menu ul li.active,
+.board-color-moderndark .setting-content .content-body .side-menu ul li.active:hover {
   background-color: #2a2a2a;
 }
 .board-color-moderndark .is-selected .minicard {
-  border-left: 3px solid #2a2a2a;
+  border-inline-start: 3px solid #2a2a2a;
 }
 .board-color-moderndark .minicard {
   border-radius: 7px;
@@ -2116,7 +2303,8 @@ THEME - Modern Dark
 }
 .board-color-moderndark button[type=submit].primary,
 .board-color-moderndark input[type=submit].primary,
-.board-color-moderndark .sidebar .sidebar-content .sidebar-btn {
+.board-color-moderndark .sidebar .sidebar-content .sidebar-btn,
+.board-color-moderndark .selected-calendar-picker button.primary {
   background-color: #222;
   border-radius: 7px;
 }
@@ -2130,7 +2318,6 @@ THEME - Modern Dark
   border-bottom: 2px solid #3f3f3f;
 }
 .board-color-moderndark#header-quick-access {
-  background: #262626;
   color: #fff;
 }
 @media screen and (min-width: 801px) {
@@ -2193,8 +2380,9 @@ THEME - Modern Dark
   opacity: 0.6;
 }
 .board-color-moderndark button[type=submit].primary,
-.board-color-moderndark .board-color-modern input[type=submit].primary {
-  background-color: #777;
+.board-color-moderndark .board-color-modern input[type=submit].primary,
+.board-color-moderndark .selected-calendar-picker button.primary {
+  background-color: #6e6e6e;
   border-radius: 7px;
 }
 .board-color-moderndark .toggle-switch:checked~.toggle-label {
@@ -2210,19 +2398,20 @@ THEME - Modern Dark
 .board-color-moderndark textarea {
   border-radius: 7px;
 }
-.board-color-moderndark#header {
+.board-color-moderndark#header,
+.board-color-moderndark .setting-content .content-body .side-menu ul li.active,
+.board-color-moderndark .setting-content .content-body .side-menu ul li.active:hover {
   background-color: #262626;
   border-bottom: 1px solid #555;
   border-top: 1px solid #555;
 }
-.board-color-moderndark#header-quick-access,
 .board-color-moderndark .background-box,
 .board-color-moderndark #header {
   background-color: #333;
 }
 .board-color-moderndark#header-quick-access {
   padding: 4px;
-  font-size: 14px;
+  font-size: calc(14px * var(--wekan-ui-font-scale, 1));
 }
 @media screen and (max-width: 800px) {
   .board-color-moderndark#header-quick-access {
@@ -2235,7 +2424,9 @@ THEME - Modern Dark
 .board-color-moderndark#header-quick-access ul.header-quick-access-list {
   margin: -5px 0 -5px 0;
 }
-.board-color-moderndark#header #header-main-bar {
+.board-color-moderndark#header #header-main-bar,
+.board-color-moderndark .setting-content .content-body .side-menu ul li.active,
+.board-color-moderndark .setting-content .content-body .side-menu ul li.active:hover {
   padding-top: 3px;
   padding-bottom: 3px;
 }
@@ -2250,7 +2441,7 @@ THEME - Modern Dark
   display: none;
 }
 .board-color-moderndark#header-quick-access ul li:nth-child(3) {
-  margin-right: 10px;
+  margin-inline-end: 10px;
 }
 .board-color-moderndark#header-quick-access ul li a {
   padding: 5px 10px;
@@ -2275,14 +2466,14 @@ THEME - Modern Dark
 }
 .board-color-moderndark .swimlane .swimlane-header-wrap .swimlane-header-menu {
   padding: 6px;
-  font-size: 16px;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1));
 }
 .board-color-moderndark .swimlane .swimlane-header-wrap .swimlane-header-plus-icon {
-  font-size: 16px;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1));
 }
 .board-color-moderndark .swimlane {
   background: #2a2a2a;
-  line-height: 18px;
+  line-height: calc(18px * var(--wekan-ui-font-scale, 1));
   max-height: 100%;
 }
 .board-color-moderndark .swimlane .list {
@@ -2293,8 +2484,8 @@ THEME - Modern Dark
 .board-color-moderndark .swimlane .list:first-child {
   color: #eee;
   min-width: 20px;
-  margin-left: 0px;
-  border-left: none;
+  margin-inline-start: 0px;
+  border-inline-start: none;
 }
 .board-color-moderndark .swimlane .list-composer .list-header-add .inlined-form .edit-controls .quiet,
 .board-color-moderndark .swimlane .list-composer .list-header-add .inlined-form .edit-controls .quiet a.js-list-template {
@@ -2315,11 +2506,11 @@ THEME - Modern Dark
   background: #6a6a6a;
 }
 .board-color-moderndark .list-header .viewer {
-  padding-left: 10px;
+  padding-inline-start: 10px;
 }
 .board-color-moderndark .list-header .list-header-name,
 .board-color-moderndark .minicard {
-  line-height: 14px;
+  line-height: calc(14px * var(--wekan-ui-font-scale, 1));
   color: #eee;
 }
 @media screen and (max-width: 800px) {
@@ -2333,7 +2524,7 @@ THEME - Modern Dark
 }
 @media screen and (min-width: 801px) {
   .board-color-moderndark .list-header .list-header-name {
-    float: left;
+    float: inline-start;
   }
   .board-color-moderndark .list-header .list-header-menu {
     padding: 0 10px 10px;
@@ -2399,18 +2590,18 @@ THEME - Modern Dark
   margin: 8px 0 4px;
 }
 .board-color-moderndark .minicard .card-label {
-  font-size: 11px;
+  font-size: calc(11px * var(--wekan-ui-font-scale, 1));
   font-weight: 400;
   padding: 1px 6px 0;
   border-radius: 2px;
-  line-height: 18px;
+  line-height: calc(18px * var(--wekan-ui-font-scale, 1));
 }
 .board-color-moderndark .minicard .badges {
   color: #bbb;
 }
 .board-color-moderndark .minicard .date {
   margin-bottom: 10px;
-  font-size: 11px;
+  font-size: calc(11px * var(--wekan-ui-font-scale, 1));
 }
 .board-color-moderndark .card-date {
   color: #444;
@@ -2445,7 +2636,7 @@ THEME - Modern Dark
     padding: 0px 20px;
   }
   .board-color-moderndark .card-details .card-details-header .card-details-menu-mobile-web {
-    margin-right: 0;
+    margin-inline-end: 0;
   }
   .board-color-moderndark .pop-over > .content-wrapper > .popup-container-depth-0 > .content {
     width: calc(100% - 20px);
@@ -2455,7 +2646,7 @@ THEME - Modern Dark
   .board-color-moderndark .card-details {
     position: fixed;
     top: 82px;
-    left: calc(50% - 384px);
+    inset-inline-start: calc(50% - 384px);
     width: 768px;
     max-height: calc(100% - 60px);
   }
@@ -2499,7 +2690,7 @@ THEME - Modern Dark
   background-color: rgba(255,255,255,0.1);
   padding: 4px 8px;
   border-radius: 2px;
-  font-size: 13px;
+  font-size: calc(13px * var(--wekan-ui-font-scale, 1));
   margin-top: 5px;
 }
 .board-color-moderndark .card-details .checklist-item:hover {
@@ -2530,7 +2721,7 @@ THEME - Modern Dark
 .board-color-moderndark .sidebar {
   background-color: #222;
   box-shadow: -10px 0 5px -10px #444;
-  border-left: 1px solid #333;
+  border-inline-start: 1px solid #333;
   color: #ccc;
 }
 .board-color-moderndark .activities .activity .activity-desc .activity-comment {
@@ -2558,7 +2749,7 @@ THEME - Modern Dark
 }
 .pop-over.board-color-moderndark .header-title {
   /* font-family: Poppins; */
-  font-size: 16px;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1));
   color: #ccc;
 }
 .pop-over.board-color-moderndark .pop-over-list li > a:hover {
@@ -2581,7 +2772,7 @@ THEME - Modern Dark
 /* Remove margins in between columns/fix spacing */
 
 .board-color-moderndark .list {
-  border-left: none;
+  border-inline-start: none;
   padding-bottom: 8px;
 }
 
@@ -2597,13 +2788,17 @@ THEME - Exodark
 =================*/
 
 .board-color-exodark#header,
+.board-color-exodark#header-quick-access,
 .board-color-exodark.sk-spinner div,
 .board-backgrounds-list .board-color-exodark.background-box,
-.board-list .board-color-exodark a {
+.public-board-row.board-color-exodark,
+.board-list li.board-color-exodark,
+.board-color-exodark .setting-content .content-body .side-menu ul li.active,
+.board-color-exodark .setting-content .content-body .side-menu ul li.active:hover {
   background-color: #222;
 }
 .board-color-exodark .is-selected .minicard {
-  border-left: 3px solid #222;
+  border-inline-start: 3px solid #222;
 }
 .board-color-exodark .minicard {
   border-radius: 7px;
@@ -2612,7 +2807,8 @@ THEME - Exodark
 }
 .board-color-exodark button[type=submit].primary,
 .board-color-exodark input[type=submit].primary,
-.board-color-exodark .sidebar .sidebar-content .sidebar-btn {
+.board-color-exodark .sidebar .sidebar-content .sidebar-btn,
+.board-color-exodark .selected-calendar-picker button.primary {
   background-color: #1b1b1b;
   border-radius: 7px;
 }
@@ -2626,7 +2822,6 @@ THEME - Exodark
   border-bottom: 2px solid #383838;
 }
 .board-color-exodark#header-quick-access {
-  background: #1f1f1f;
   color: #fff;
 }
 .board-color-exodark#header #header-main-bar .board-header-btn.emphasis {
@@ -2698,8 +2893,8 @@ THEME - Exodark
 }
 .board-color-exodark .swimlane .list:first-child {
   min-width: 20px;
-  margin-left: 10px; /*Added 10px margin to prevent butting up against edge of screen */
-  border-left: none;
+  margin-inline-start: 10px; /*Added 10px margin to prevent butting up against edge of screen */
+  border-inline-start: none;
 }
 .board-color-exodark .swimlane .list:nth-child {
   flex: 0 0 265px;
@@ -2820,7 +3015,15 @@ THEME - Exodark
 .pop-over.board-color-exodark {
   background: #2b2b2b;
   color: #fff;
+  --wekan-quiet-text: #b4b4b4;
+  /* Card Settings opens in this popup: dark sections for its white text. */
+  --card-settings-section-bg: rgba(255, 255, 255, 0.08);
+  --card-settings-helper-bg: #3a3a46;
+  --card-settings-notch-bg: #2c3340;
 }
+/* The popup's own links keep the light popup's black otherwise: black on
+   #2b2b2b was 1.48:1 (#6863). */
+
 .pop-over.board-color-exodark .header {
   background: #2b2b2b;
   color: #fff;
@@ -2853,15 +3056,15 @@ THEME - Clean Dark
 .board-color-cleandark#header ul li,
 .board-color-cleandark#header-quick-access ul li {
   color: rgba(255, 255, 255, 50%);
-  font-size: 16px;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 400;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
 }
 
 .board-color-cleandark#header-main-bar h1 {
-  font-size:  16px;
+  font-size:  calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 500;
-  line-height: 24px !important;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1)) !important;
   color: rgba(255, 255, 255, 1);
 }
 
@@ -2871,9 +3074,9 @@ THEME - Clean Dark
 }
 
 .board-color-cleandark .swimlane-header {
-  font-size:  16px;
+  font-size:  calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 500;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
   color: rgba(255, 255, 255, 1);
 }
 
@@ -2893,9 +3096,9 @@ THEME - Clean Dark
 .board-color-cleandark .sidebar .tab-item {
   border-radius: 16px;
   padding: 4px 12px 4px 12px;
-  font-size: 16px;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 400;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
   color: rgba(255, 255, 255, 0.85);
   background: rgba(57, 57, 71, 1);
 }
@@ -2919,9 +3122,9 @@ THEME - Clean Dark
 }
 
 .board-color-cleandark .card-details-item a {
-  font-size:  16px;
+  font-size:  calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 400;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
   color: rgba(255, 255, 255, 0.5);
 }
 
@@ -2960,10 +3163,10 @@ THEME - Clean Dark
   background: #009B64;
   width: min-content;
   color: #FFFFFF;
-  padding-left: 8px;
-  padding-right: 8px;
+  padding-inline-start: 8px;
+  padding-inline-end: 8px;
   border-radius: 8px;
-  margin-left: 4px;
+  margin-inline-start: 4px;
 }
 
 .board-color-cleandark .card-details hr {
@@ -2971,9 +3174,9 @@ THEME - Clean Dark
 }
 
 .board-color-cleandark .card-details-canvas {
-  font-size:  16px;
+  font-size:  calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 400;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
   color: rgba(255, 255, 255, 0.85);
 }
 
@@ -2985,9 +3188,9 @@ THEME - Clean Dark
 
 .board-color-cleandark.pop-over .pop-over-list,
 .board-color-cleandark.pop-over .content {
-  font-size: 16px;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 400;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
   color: rgba(255, 255, 255, 1);
 }
 
@@ -3026,17 +3229,17 @@ THEME - Clean Dark
 }
 
 .board-color-cleandark .full-name {
-  font-size: 16px;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 500;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
 
   color: rgba(255, 255, 255, 0.85);
 }
 
 .board-color-cleandark .username {
-  font-size: 16px;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 400;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
 
   color: rgba(255, 255, 255, 0.7);
 }
@@ -3086,9 +3289,9 @@ THEME - Clean Dark
 }
 
 .board-color-cleandark .activity-desc {
-  font-size:  16px;
+  font-size:  calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 400;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
   color: rgba(255, 255, 255, 0.5);
 }
 
@@ -3109,10 +3312,11 @@ THEME - Clean Dark
 }
 
 .board-color-cleandark button[type=submit].primary,
-.board-color-cleandark input[type=submit].primary {
-  font-size: 16px;
+.board-color-cleandark input[type=submit].primary,
+.board-color-cleandark .selected-calendar-picker button.primary {
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 400;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
   border-radius: 12px;
   padding: 6px 12px 6px 12px;
   background: #FFFFFF;
@@ -3120,9 +3324,9 @@ THEME - Clean Dark
 }
 
 .board-color-cleandark textarea {
-  font-size:  16px;
+  font-size:  calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 400;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
   color: rgba(255, 255, 255, 1);
   background: rgba(57, 57, 71, 1) !important;
   border: none !important;
@@ -3134,9 +3338,9 @@ THEME - Clean Dark
 }
 
 .board-color-cleandark input {
-  font-size:  16px;
+  font-size:  calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 400;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
   color: rgba(255, 255, 255, 0.85) !important;
   background: rgba(57, 57, 71, 1) !important;
   border-radius: 12px !important;
@@ -3148,9 +3352,9 @@ THEME - Clean Dark
 }
 
 .board-color-cleandark select {
-  font-size:  16px;
+  font-size:  calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 400;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
   color: rgba(255, 255, 255, 0.85);
   background: rgba(57, 57, 71, 1);
   border-radius: 12px;
@@ -3162,9 +3366,9 @@ THEME - Clean Dark
   border-radius: 12px;
   border: none;
   background: #FFFFFF;
-  font-size: 16px;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 400;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
   color: rgba(10, 10, 20, 0.85);
 }
 
@@ -3177,9 +3381,9 @@ THEME - Clean Dark
   border-radius: 12px;
   border: none;
   background: #cc003a;
-  font-size: 16px;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 400;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
   color: #FFFFFF;
 }
 
@@ -3258,7 +3462,7 @@ THEME - Clean Dark
   align-items: center;
   padding-bottom: 4px;
   padding-top: 4px;
-  margin-right: 10px;
+  margin-inline-end: 10px;
 }
 
 .board-color-cleandark#header-quick-access ul.header-quick-access-list {
@@ -3280,7 +3484,7 @@ THEME - Clean Dark
 /* Remove margins in between columns/fix spacing */
 
 .board-color-cleandark .list {
-  border-left: none;
+  border-inline-start: none;
   padding-bottom: 8px;
 }
 
@@ -3322,35 +3526,44 @@ THEME - Clean Light
 
 .board-color-cleanlight#header ul li,
 .board-color-cleanlight#header-quick-access ul li {
-  color: rgba(10, 10, 20, 0.5) !important;
-  font-size: 16px;
+  /* 0.85, the shade the rest of this theme's text uses. It was 0.5, which put
+     the top bar's buttons at one darkness and the two icons that are not in a
+     `ul li` - the house and the bell - at another, and left the labels paler
+     than the board title beside them. One bar, one shade. */
+  color: rgba(10, 10, 20, 0.85) !important;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 400;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
 }
 
 .board-color-cleanlight#header ul li:hover,
 .board-color-cleanlight#header-quick-access ul li:hover {
   background: rgba(190, 190, 190, 1) !important;
   border-radius: 8px;
-  color: rgba(10, 10, 20, 0.5) !important;
+  color: rgba(10, 10, 20, 0.85) !important;
 }
 
 .board-color-cleanlight #header-main-bar h1 {
-  font-size:  16px;
+  font-size:  calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 500;
-  line-height: 24px !important;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1)) !important;
   color: rgba(10, 10, 20, 1) !important;
 }
 
 .board-color-cleanlight#header ul li.current,
 .board-color-cleanlight#header-quick-access ul li.current {
-  color: rgba(10, 10, 20, 0.85) !important;
+  /* The current entry used to be told apart by being darker than its
+     neighbours - 0.85 against their 0.5. They are 0.85 now, so it is told apart
+     by being full black and heavier instead, which is a difference that still
+     reads when everything around it is dark. */
+  color: rgba(10, 10, 20, 1) !important;
+  font-weight: 500;
 }
 
 .board-color-cleanlight .swimlane-header {
-  font-size:  16px;
+  font-size:  calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 500;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
   color: rgba(10, 10, 20, 1);
 }
 
@@ -3371,7 +3584,7 @@ THEME - Clean Light
 .board-color-cleanlight .list,
 .board-color-cleandark .list {
   background: none !important;
-  border-left: none !important;
+  border-inline-start: none !important;
 }
 
 .board-color-cleanlight .list .list-header,
@@ -3380,7 +3593,7 @@ THEME - Clean Light
   display: flex !important;
   justify-content: space-between;
   align-items: center;
-  font-size: 16px;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1));
   background: none !important;
   background-color: transparent !important;
 }
@@ -3407,7 +3620,7 @@ THEME - Clean Light
 
 .board-color-cleanlight .list .list-header .list-header-menu .js-open-list-menu ,
 .board-color-cleandark .list .list-header .list-header-menu .js-open-list-menu {
-  font-size: 16px !important;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1)) !important;
 }
 
 .board-color-cleanlight .list .list-header .list-header-menu a,
@@ -3421,7 +3634,7 @@ THEME - Clean Light
   background: #FF6D00;
   padding: 8px;
   border-radius: 12px;
-  font-size: 16px !important;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1)) !important;
 }
 
 .board-color-cleanlight .list .list-header .list-header-menu .list-header-plus-top:hover,
@@ -3445,11 +3658,11 @@ THEME - Clean Light
   border-radius: 12px;
   margin-top: 18px;
   padding: 8px;
-  margin-right: 8px;
+  margin-inline-end: 8px;
   display: flex;
   align-items: center;
   justify-content: center;
-  margin-left: 10px;
+  margin-inline-start: 10px;
 }
 
 .board-color-cleanlight .list-header-add:hover {
@@ -3479,7 +3692,7 @@ THEME - Clean Light
 .board-color-cleandark .card-label {
   border-radius: 18px;
   margin-top: 6px;
-  margin-right: 8px;
+  margin-inline-end: 8px;
   border: none;
   padding: 4px 12px;
 }
@@ -3516,7 +3729,7 @@ THEME - Clean Light
 .board-color-cleandark .swimlane .swimlane-header-wrap .swimlane-header,
 .board-color-cleanlight .swimlane .swimlane-header-wrap .swimlane-header-menu .fa,
 .board-color-cleandark .swimlane .swimlane-header-wrap .swimlane-header-menu .fa {
-  font-size: 16px !important;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1)) !important;
 }
 
 .board-color-cleanlight .swimlane .swimlane-header-wrap {
@@ -3529,14 +3742,14 @@ THEME - Clean Light
 
 .board-color-cleanlight .swimlane .swimlane-header-wrap .swimlane-header-plus-icon,
 .board-color-cleandark .swimlane .swimlane-header-wrap .swimlane-header-plus-icon {
-  margin-left: 14px;
+  margin-inline-start: 14px;
 }
 
 .board-color-cleanlight .swimlane .swimlane-header-wrap .list-composer,
 .board-color-cleandark .swimlane .swimlane-header-wrap .list-composer {
   display: flex;
   gap: 12px;
-  margin-left: 20px;
+  margin-inline-start: 20px;
 }
 
 .board-color-cleanlight .swimlane .swimlane-header-wrap .swimlane-header .viewer p,
@@ -3561,9 +3774,9 @@ THEME - Clean Light
 .board-color-cleanlight .sidebar .tab-item {
   border-radius: 16px;
   padding: 4px 12px 4px 12px;
-  font-size: 16px;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 400;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
   color: rgba(10, 10, 20, 0.85);
   background: rgba(234, 234, 237, 1);
 }
@@ -3586,17 +3799,17 @@ THEME - Clean Light
 }
 
 .board-color-cleanlight .card-details-item a {
-  font-size:  16px;
+  font-size:  calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 400;
-  line-height: 24px;
-  color: rgba(10, 10, 20, 0.5);
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
+  color: rgba(10, 10, 20, 0.7);
 }
 
 .board-color-cleanlight .card-details-header,
 .board-color-cleandark .card-details-header {
-  font-size: 24px !important;
+  font-size: calc(24px * var(--wekan-ui-font-scale, 1)) !important;
   font-weight: 600;
-  line-height: 28px;
+  line-height: calc(28px * var(--wekan-ui-font-scale, 1));
   border-bottom: none !important;
   padding: 12px 20px !important;
 }
@@ -3613,7 +3826,7 @@ THEME - Clean Light
 
 .board-color-cleanlight .card-details-header .card-details-title,
 .board-color-cleandark .card-details-header .card-details-title {
-  font-size: 24px !important;
+  font-size: calc(24px * var(--wekan-ui-font-scale, 1)) !important;
 }
 
 .board-color-cleanlight .card-details .card-details-item-title,
@@ -3622,9 +3835,9 @@ THEME - Clean Light
   gap: 8px;
   align-items: center;
 
-  font-size:  16px;
+  font-size:  calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 500;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
 }
 
 .board-color-cleanlight .card-details .card-details-item-title {
@@ -3670,10 +3883,10 @@ THEME - Clean Light
   background: #009B64;
   width: min-content;
   color: #FFFFFF;
-  padding-left: 8px;
-  padding-right: 8px;
+  padding-inline-start: 8px;
+  padding-inline-end: 8px;
   border-radius: 8px;
-  margin-left: 4px;
+  margin-inline-start: 4px;
 }
 
 .board-color-cleanlight .card-details hr {
@@ -3681,9 +3894,9 @@ THEME - Clean Light
 }
 
 .board-color-cleanlight .card-details-canvas {
-  font-size:  16px;
+  font-size:  calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 400;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
   color: rgba(10, 10, 20, 0.5);
 }
 
@@ -3699,9 +3912,9 @@ THEME - Clean Light
   border-bottom: none;
   background: inherit;
 
-  font-size:  16px;
+  font-size:  calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 500;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
 }
 
 .board-color-cleanlight.pop-over .header {
@@ -3715,9 +3928,9 @@ THEME - Clean Light
 
 .board-color-cleanlight.pop-over .pop-over-list,
 .board-color-cleanlight.pop-over .content {
-  font-size: 16px;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 400;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
   color: rgba(10, 10, 20, 0.8);
 }
 
@@ -3757,17 +3970,17 @@ THEME - Clean Light
 }
 
 .board-color-cleanlight .full-name {
-  font-size: 16px;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 500;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
 
   color: rgba(10, 10, 20, 0.85) !important;
 }
 
 .board-color-cleanlight .username {
-  font-size: 16px;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 400;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
 
   color: rgba(10, 10, 20, 0.5) !important;
 }
@@ -3823,9 +4036,9 @@ THEME - Clean Light
 }
 
 .board-color-cleanlight .activity-desc {
-  font-size:  16px;
+  font-size:  calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 400;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
   color: rgba(10, 10, 20, 0.5);
 }
 
@@ -3842,10 +4055,11 @@ THEME - Clean Light
 }
 
 .board-color-cleanlight button[type=submit].primary,
-.board-color-cleanlight input[type=submit].primary {
-  font-size: 16px;
+.board-color-cleanlight input[type=submit].primary,
+.board-color-cleanlight .selected-calendar-picker button.primary {
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 400;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
   border-radius: 12px;
   padding: 6px 12px 6px 12px;
   background: rgba(23, 23, 28, 1);
@@ -3853,9 +4067,9 @@ THEME - Clean Light
 }
 
 .board-color-cleanlight input.primary {
-  font-size: 16px;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 400;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
   border-radius: 12px;
   padding: 6px 12px 6px 12px;
   background: rgba(23, 23, 28, 1) !important;
@@ -3867,9 +4081,9 @@ THEME - Clean Light
 }
 
 .board-color-cleanlight textarea {
-  font-size:  16px;
+  font-size:  calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 400;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
   color: rgba(10, 10, 20, 0.85);
   background: rgba(234, 234, 237, 1);
   border: none !important;
@@ -3887,9 +4101,9 @@ THEME - Clean Light
 }
 
 .board-color-cleanlight input {
-  font-size:  16px;
+  font-size:  calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 400;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
   color: rgba(10, 10, 20, 0.85) !important;
   background: rgba(234, 234, 237, 1) !important;
   border-radius: 12px !important;
@@ -3907,9 +4121,9 @@ THEME - Clean Light
 }
 
 .board-color-cleanlight select {
-  font-size:  16px;
+  font-size:  calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 400;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
   color: rgba(10, 10, 20, 0.85);
   background: rgba(234, 234, 237, 1);
   border-radius: 12px;
@@ -3921,9 +4135,9 @@ THEME - Clean Light
   border-radius: 12px;
   border: none;
   background: rgba(23, 23, 28, 1);
-  font-size: 16px;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 400;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
   color: rgba(255, 255, 255, 0.85);
 }
 
@@ -3936,9 +4150,9 @@ THEME - Clean Light
   border-radius: 12px;
   border: none;
   background: #cc003a;
-  font-size: 16px;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 400;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
   color: #FFFFFF;
 }
 
@@ -4029,6 +4243,67 @@ THEME - Clean Light
   color: rgba(10, 10, 20, 0.85);
 }
 
+/* EVERY icon in the top bar, in the one shade the bar's text uses.
+   header.css paints them white by id - `#header-quick-access i.fa` - which is
+   right on the fifteen dark themes and invisible on this one's #F1F1F3. The
+   buttons inside a `ul li` escaped that by a more specific `color: inherit`
+   and so took the theme's text colour, while the house
+   (`.home-icon .header-home-link`) and the bell
+   (`#notifications .notifications-drawer-toggle`, notifications.css) are in no
+   `ul li` and stayed white - a bell whose own LABEL was readable beside a bell
+   that was not there, which is how this was noticed.
+   The theme class sits on the bar element itself, so these selectors carry one
+   class more than the rules they override and no !important is needed. */
+.board-color-cleanlight#header i.fa,
+.board-color-cleanlight#header-quick-access i.fa,
+.board-color-cleanlight#header .home-icon .header-home-link,
+.board-color-cleanlight#header-quick-access .home-icon .header-home-link,
+.board-color-cleanlight#header #notifications .notifications-drawer-toggle,
+.board-color-cleanlight#header-quick-access #notifications .notifications-drawer-toggle {
+  color: rgba(10, 10, 20, 0.85);
+}
+/* The dividers between the bar's groups, drawn white too - `background:
+   rgba(255, 255, 255, 0.4)` in the first bar and a white `border-inline-start`
+   in the second - so on this theme the seam that separates the page's controls
+   from your own account was not there at all.
+   They keep the DIVIDER's own weight rather than the 0.85 the labels use: a
+   hairline as dark as the text beside it stops being a seam and becomes a
+   stroke, so this is the same 0.3 the dark themes draw, in ink instead of
+   white. */
+.board-color-cleanlight#header-quick-access .separator {
+  background: rgba(10, 10, 20, 0.3);
+}
+.board-color-cleanlight#header #header-main-bar .separator {
+  border-inline-start-color: rgba(10, 10, 20, 0.3);
+}
+
+/* Except the bell that has something to report: that one is a white glyph on
+   the red `.alert` circle, and dark ink on red is the opposite fix. */
+.board-color-cleanlight#header #notifications .notifications-drawer-toggle.alert,
+.board-color-cleanlight#header #notifications .notifications-drawer-toggle.alert i.fa,
+.board-color-cleanlight#header-quick-access #notifications .notifications-drawer-toggle.alert,
+.board-color-cleanlight#header-quick-access #notifications .notifications-drawer-toggle.alert i.fa {
+  color: #fff;
+}
+/* And their hover, which was a white veil on a near-white bar. */
+.board-color-cleanlight#header .home-icon .header-home-link:hover,
+.board-color-cleanlight#header-quick-access .home-icon .header-home-link:hover {
+  background-color: rgba(10, 10, 20, 0.08);
+}
+/* Hovering an icon LIGHTENS it by default - `#header-quick-access i.fa:hover`
+   goes to #ccc - which on a dark bar means "brighter, so you know you are on
+   it" and on this one means the house fades towards the bar it sits on. Here it
+   goes the other way: full black, which is the same message read the right way
+   round for a light bar. */
+.board-color-cleanlight#header i.fa:hover,
+.board-color-cleanlight#header-quick-access i.fa:hover,
+.board-color-cleanlight#header .home-icon .header-home-link:hover,
+.board-color-cleanlight#header-quick-access .home-icon .header-home-link:hover,
+.board-color-cleanlight#header .home-icon .header-home-link:hover i.fa,
+.board-color-cleanlight#header-quick-access .home-icon .header-home-link:hover i.fa {
+  color: rgba(10, 10, 20, 1);
+}
+
 .board-color-cleanlight#header-quick-access ul.header-quick-access-list li a .viewer,
 .board-color-cleandark#header-quick-access ul.header-quick-access-list li a .viewer {
   max-width: 400px;
@@ -4050,7 +4325,7 @@ THEME - Clean Light
   align-items: center;
   padding-bottom: 4px;
   padding-top: 4px;
-  margin-right: 10px;
+  margin-inline-end: 10px;
 }
 
 .board-color-cleanlight#header-quick-access ul.header-quick-access-list {
@@ -4059,15 +4334,36 @@ THEME - Clean Light
 }
 
 .board-color-cleanlight #header-main-bar,
-.board-color-cleanlight#header {
+.board-color-cleanlight#header,
+.board-color-cleanlight .setting-content .content-body .side-menu ul li.active,
+.board-color-cleanlight .setting-content .content-body .side-menu ul li.active:hover {
   background: #F1F1F3 !important;
   color: rgba(10, 10, 20, 0.85) !important;
 }
 
+/* A board tile in All Boards and a row on the Public Boards page, the same
+   colour as this theme's header bar. Every other theme paints its tile from its
+   own rule above; these two had none, so their boards fell back to the default
+   grey. The text that goes on this one is set with the other LIGHT tiles, in
+   the Apple Glass Pastel section - one block holds them all. */
+.board-list li.board-color-cleanlight,
+.public-board-row.board-color-cleanlight {
+  background: #F1F1F3;
+}
+
 .board-color-cleandark #header-main-bar,
-.board-color-cleandark#header {
+.board-color-cleandark#header,
+.board-color-cleandark#header-quick-access,
+.board-color-cleandark .setting-content .content-body .side-menu ul li.active,
+.board-color-cleandark .setting-content .content-body .side-menu ul li.active:hover {
   background: #2E2E39 !important;
   color: #FFFFFF;
+}
+
+/* And this theme's tile, and its row on the Public Boards page, the same way. */
+.board-list li.board-color-cleandark,
+.public-board-row.board-color-cleandark {
+  background: #2E2E39;
 }
 
 .board-color-cleanlight .list-body .open-minicard-composer,
@@ -4078,9 +4374,9 @@ THEME - Clean Light
 .board-color-cleanlight .minicard,
 .board-color-cleandark .minicard {
   border-radius: 12px;
-  font-size: 16px;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 400;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
   padding: 12px;
 }
 
@@ -4096,16 +4392,16 @@ THEME - Clean Light
 
 .board-color-cleanlight .minicard .minicard-details-menu,
 .board-color-cleandark .minicard .minicard-details-menu {
-  font-size: 16px !important;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1)) !important;
 }
 
 .board-color-cleanlight .minicard .date,
 .board-color-cleandark .minicard .date,
 .board-color-cleanlight .minicard .end-date,
 .board-color-cleandark .minicard .end-date {
-  font-size: 16px;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 400;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
   margin-bottom: 10px;
 }
 
@@ -4116,9 +4412,9 @@ THEME - Clean Light
 .board-color-cleanlight .card-details .card-date,
 .board-color-cleandark .card-details .card-date {
   padding: 4px 8px 4px 8px;
-  font-size: 16px;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1));
   font-weight: 400;
-  line-height: 24px;
+  line-height: calc(24px * var(--wekan-ui-font-scale, 1));
   color: rgba(255, 255, 255, 1);
 }
 
@@ -4238,12 +4534,12 @@ THEME - Clean Light
 
 .board-color-cleanlight .card-details-item-customfield:has(.checklist-item) div,
 .board-color-cleandark .card-details-item-customfield:has(.checklist-item) div {
-  padding-right: 0 !important;
+  padding-inline-end: 0 !important;
 }
 
 .board-color-cleanlight .card-details .card-details-items .card-details-item.custom-fields,
 .board-color-cleanlight .card-details .card-details-items .card-details-item.custom-fields {
-  margin-left: auto;
+  margin-inline-start: auto;
   flex-grow: 0;
   border-radius: 12px;
 }
@@ -4290,11 +4586,11 @@ THEME - Clean Light
 
 .board-color-cleanlight .pop-over-list li > a i,
 .board-color-cleandark .pop-over-list li > a i {
-  margin-right: 6px !important;
+  margin-inline-end: 6px !important;
 }
 
 .board-color-cleanlight .pop-over .quiet {
-  margin-left: 100px !important;
+  margin-inline-start: 100px !important;
 }
 
 .board-color-cleandark .minicard:hover:not(.minicard-composer),
@@ -4316,7 +4612,7 @@ THEME - Clean Light
 /* Remove margins in between columns/fix spacing */
 
 .board-color-cleanlight .list {
-  border-left: none;
+  border-inline-start: none;
   padding-bottom: 8px;
 }
 
@@ -4325,3 +4621,1578 @@ THEME - Clean Light
 }
 
 /* === END CleanDark/Light THEME === */
+
+/* ===============
+THEME - cleargreen
+
+A colour SLIDE, like clearblue: #8ad59f down to #277c48.
+The base is limegreen's own colour, so the flat theme and the slide theme are
+the same colour family and a reader picking either gets what they expected.
+
+The rest of the palette is arithmetic on that base, the same arithmetic
+clearblue uses on its own: the border under the bar is base x 0.8, the one
+above it base x 0.6, the current tab base x 1.15, a selected minicard the
+base mixed toward white. Derived rather than hand-picked so a sixth slide
+theme is one line in the generator and not a page of guessed hexes.
+docs/Features/General/Theme/Change-Color.md
+=================*/
+
+
+.board-color-cleargreen.sk-spinner div,
+.board-backgrounds-list .board-color-cleargreen.background-box,
+.public-board-row.board-color-cleargreen,
+.board-list li.board-color-cleargreen {
+  background: linear-gradient(180deg, #8ad59f 0%, #277c48 100%);
+}
+.board-color-cleargreen .is-selected .minicard {
+  border-inline-start: 3px solid #8ad59f;
+}
+.board-color-cleargreen.pop-over .pop-over-list li a:not(.disabled):hover,
+.board-color-cleargreen .sidebar .sidebar-content .sidebar-btn:hover,
+.board-color-cleargreen .sidebar-list li a:hover {
+  background-color: #97daa9;
+}
+.board-color-cleargreen#header ul li.current,
+.board-color-cleargreen#header-quick-access ul li.current {
+  border-bottom: 4px solid #56dc7b;
+}
+.board-color-cleargreen#header-quick-access {
+  color: #fff;
+}
+
+.board-color-cleargreen#header-quick-access #header-new-board-icon,
+.board-color-cleargreen#header-quick-access #header-user-bar,
+.board-color-cleargreen#header-quick-access ul li {
+  color: #fff;
+}
+.board-color-cleargreen#header,
+.board-color-cleargreen#header-quick-access,
+.board-color-cleargreen .setting-content .content-body .side-menu ul li.active,
+.board-color-cleargreen .setting-content .content-body .side-menu ul li.active:hover {
+  background-color: #277c48;
+  border-bottom: 1px solid #3c9956;
+  border-top: 1px solid #2d7340;
+}
+
+.board-color-cleargreen#header #header-main-bar,
+.board-color-cleargreen#header-quick-access,
+.board-color-cleargreen .setting-content .content-body .side-menu ul li.active,
+.board-color-cleargreen .setting-content .content-body .side-menu ul li.active:hover,
+.board-color-cleargreen .boards-left-menu .menu-item.active a,
+.board-color-cleargreen .boards-left-menu .menu-item.active a:hover {
+  background: linear-gradient(180deg, #8ad59f 0%, #277c48 100%);
+}
+.board-color-cleargreen#header #header-main-bar p {
+  margin-bottom: 6px;
+}
+.board-color-cleargreen#header #header-main-bar .board-header-btn.emphasis {
+  background: #56dc7b;
+}
+.board-color-cleargreen#header #header-main-bar .board-header-btn.emphasis:hover,
+.board-color-cleargreen#header #header-main-bar .board-header-btn.emphasis .board-header-btn-close {
+  background: rgba(0,0,0,0.2);
+}
+.board-color-cleargreen#header #header-main-bar .board-header-btn.emphasis:hover .board-header-btn-close {
+  background: rgba(0,0,0,0.2);
+}
+.board-color-cleargreen .materialCheckBox.is-checked {
+  border-bottom: 2px solid #8ad59f;
+  border-right: 2px solid #8ad59f;
+}
+.board-color-cleargreen .checklist-progress-bar {
+  background-color: #e9f7ed !important;
+}
+.board-color-cleargreen .checklist-progress-bar .checklist-progress {
+  background-color: #8ad59f !important;
+}
+.board-color-cleargreen .is-multiselection-active .multi-selection-checkbox.is-checked + .minicard {
+  background: #f1faf3;
+}
+.board-color-cleargreen .is-multiselection-active .multi-selection-checkbox:not(.is-checked) + .minicard:hover:not(.minicard-composer) {
+  background: #fafdfb;
+}
+.board-color-cleargreen .toggle-switch:checked ~ .toggle-label {
+  background-color: #a9e0b8;
+}
+.board-color-cleargreen .toggle-switch:checked ~ .toggle-label:after {
+  background-color: #42a85e;
+}
+.board-color-cleargreen.board-wrapper {
+  background: linear-gradient(135deg, #8ad59f 0%, #277c48 100%);
+}
+.board-color-cleargreen .swimlane {
+  background: none;
+}
+.board-color-cleargreen .swimlane .list:first-child {
+  min-width: 20px;
+  margin-inline-start: 10px; /* Added 10px margin left to stop lists being butted up against the edge of the screen */
+  border-inline-start: none;
+}
+.board-color-cleargreen .swimlane .list:nth-child {
+  flex: 0 0 265px;
+}
+.board-color-cleargreen .list {
+  background: rgba(255,255,255,0.35);
+  margin: 10px 0;
+  border: 0;
+  border-radius: 14px;
+}
+.board-color-cleargreen .list.list-composer {
+  background: rgba(255,255,255,0.1);
+  height: min-content;
+  flex: unset;
+  padding-bottom: 16px;
+  min-width: 20px;
+  margin-inline-start: 0px;
+  border-inline-start: none;
+}
+.board-color-cleargreen .list.list-composer .open-list-composer {
+  border-radius: 7px;
+  color: rgba(0,0,0,0.3);
+  padding: 7px 10px;
+  display: block;
+}
+.board-color-cleargreen .list.list-composer .open-list-composer:hover i,
+.board-color-cleargreen .list.list-composer .open-list-composer:hover {
+  box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+  background: rgba(255,255,255,0.7);
+  color: rgba(0,0,0,0.6);
+}
+.board-color-cleargreen .list-header {
+  background-color: rgb(255 255 255 / 68%);
+  border-radius: 14px 14px 0 0;
+}
+.board-color-cleargreen .list-header:not([class*="list-header-"]) {
+  border-bottom: 6px solid rgba(255,255,255,0);
+}
+.board-color-cleargreen .list-header .list-header-name {
+  color: rgba(0,0,0,0.6);
+}
+.board-color-cleargreen .list-body {
+  padding: 11px;
+}
+.board-color-cleargreen .minicard {
+  border-radius: 7px;
+  padding: 10px 10px 4px 10px;
+  box-shadow: 2px 2px 4px 0px rgba(0,0,0,0.15);
+  color: #222;
+}
+.board-color-cleargreen .card-details {
+  border-radius: 0 0 14px 14px;
+  box-shadow: 0 0 7px 0 rgba(0,0,0,0.5);
+  margin-inline-start: -10px;
+}
+.board-color-cleargreen .list-body .open-minicard-composer {
+  border-radius: 7px;
+  color: rgba(0,0,0,0.3);
+  margin-bottom: 11px;
+}
+.board-color-cleargreen .list-body .open-minicard-composer:hover {
+  background: rgba(255,255,255,0.7);
+  color: rgba(0,0,0,0.6);
+}
+.board-color-cleargreen button[type=submit].primary,
+.board-color-cleargreen input[type=submit].primary,
+.board-color-cleargreen .selected-calendar-picker button.primary {
+  box-shadow: none;
+  background-color: rgba(255,255,255,0.5);
+  color: rgba(0,0,0,0.55);
+  border-radius: 7px;
+  border: 0;
+}
+.board-color-cleargreen button[type="submit"].primary:hover,
+.board-color-cleargreen input[type="submit"].primary:hover,
+.board-color-cleargreen .selected-calendar-picker button.primary:hover {
+  background-color: rgba(255,255,255,0.7);
+  color: rgba(0,0,0,0.8);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+  border-radius: 7px;
+}
+.board-color-cleargreen .quiet,
+.board-color-cleargreen .quiet a {
+  color: rgba(0,0,0,0.68);
+}
+.board-color-cleargreen .list-header .list-header-watch-icon {
+  color: rgba(0,0,0,0.5);
+  position: absolute;
+  margin-top: -34px;
+  margin-inline-start: -11px;
+}
+.board-color-cleargreen a.fa,
+.board-color-cleargreen a i.fa {
+  color: rgba(0,0,0,0.3);
+}
+.board-color-cleargreen a:not(.disabled).is-active.fa,
+.board-color-cleargreen a:not(.disabled).is-active i.fa,
+.board-color-cleargreen a:not(.disabled):hover.fa,
+.board-color-cleargreen a:not(.disabled):hover i.fa {
+  color: rgba(0,0,0,0.6);
+  border-radius: 7px;
+}
+.board-color-cleargreen input[type="email"],
+.board-color-cleargreen input[type="password"],
+.board-color-cleargreen input[type="text"] {
+  border: 0;
+  border-radius: 7px;
+}
+.board-color-cleargreen .sidebar-shadow {
+  box-shadow: none;
+  border-inline-start: 9px solid #277c48;
+}
+.board-color-cleargreen .is-open .sidebar-shadow {
+  box-shadow: -10px 0 8px rgba(0,0,0,0.3);
+}
+.board-color-cleargreen .list.ui-sortable-helper {
+  transform: rotate(0deg);
+}
+.board-color-cleargreen .minicard-wrapper.placeholder {
+  background: rgba(0,0,0,0.1);
+}
+.board-color-cleargreen .minicard-wrapper.ui-sortable-helper {
+  transform: rotate(0deg);
+  opacity: 0.8;
+}
+.board-color-cleargreen .list-body .open-minicard-composer {
+  color: rgba(0,0,0,0.3);
+}
+.board-color-cleargreen .swimlane.ui-sortable-helper {
+  transform: rotate(0deg);
+}
+.board-color-cleargreen .swimlane .swimlane-header-wrap {
+  background: linear-gradient(0deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.25) 100%);
+}
+.board-color-cleargreen .swimlane-header-wrap .inlined-form {
+  width: 100%;
+}
+.board-color-cleargreen .swimlane-header-wrap .list-composer {
+  text-align: center;
+  margin: 5px;
+}
+.board-color-cleargreen .swimlane-header-wrap .list-name-input.full-line {
+  margin: 0;
+  display: inline-block;
+  width: 270px;
+}
+.board-color-cleargreen .swimlane-header-wrap .edit-controls {
+  display: inline-block;
+  vertical-align: middle;
+}
+.board-color-cleargreen .swimlane-header-wrap .primary.confirm {
+  margin-inline-end: 0;
+}
+.board-color-cleargreen .swimlane-header-wrap .fa.fa-times-thin {
+  margin-top: 2px;
+}
+.board-color-cleargreen .list.ui-sortable-helper,
+.board-color-cleargreen .list.ui-sortable-helper .list-header.ui-sortable-handle,
+.board-color-cleargreen .list.ui-sortable-helper .viewer {
+  cursor: -webkit-grabbing;
+  cursor: grabbing;
+}
+
+/* Transparent modern scrollbar - cleargreen*/
+.board-color-cleargreen .board-canvas {
+  scrollbar-color: #ffffffdb #ffffff00;
+  scrollbar-width: thin;
+}
+
+.board-color-cleargreen .list-body {
+  scrollbar-width: thin;
+}
+
+/* Apply scrollbar to sidebar content*/
+.board-color-cleargreen .sidebar .sidebar-content {
+   scrollbar-color: #277c48 #ffffff00;
+}
+
+/* Remove margins in between columns/fix spacing */
+
+.board-color-cleargreen .list {
+  border-inline-start: none;
+  padding-bottom: 8px;
+}
+
+.board-color-cleargreen .list-body {
+ margin-top: 8px;
+}
+
+/* === END cleargreen THEME === */
+
+/* ===============
+THEME - clearorange
+
+A colour SLIDE, like clearblue: #efab6f down to #a75919.
+The base is pumpkin's own colour, so the flat theme and the slide theme are
+the same colour family and a reader picking either gets what they expected.
+
+The rest of the palette is arithmetic on that base, the same arithmetic
+clearblue uses on its own: the border under the bar is base x 0.8, the one
+above it base x 0.6, the current tab base x 1.15, a selected minicard the
+base mixed toward white. Derived rather than hand-picked so a sixth slide
+theme is one line in the generator and not a page of guessed hexes.
+docs/Features/General/Theme/Change-Color.md
+=================*/
+
+
+.board-color-clearorange.sk-spinner div,
+.board-backgrounds-list .board-color-clearorange.background-box,
+.public-board-row.board-color-clearorange,
+.board-list li.board-color-clearorange {
+  background: linear-gradient(180deg, #efab6f 0%, #a75919 100%);
+}
+.board-color-clearorange .is-selected .minicard {
+  border-inline-start: 3px solid #efab6f;
+}
+.board-color-clearorange.pop-over .pop-over-list li a:not(.disabled):hover,
+.board-color-clearorange .sidebar .sidebar-content .sidebar-btn:hover,
+.board-color-clearorange .sidebar-list li a:hover {
+  background-color: #f1b47f;
+}
+.board-color-clearorange#header ul li.current,
+.board-color-clearorange#header-quick-access ul li.current {
+  border-bottom: 4px solid #ff9127;
+}
+.board-color-clearorange#header-quick-access {
+  color: #fff;
+}
+
+.board-color-clearorange#header-quick-access #header-new-board-icon,
+.board-color-clearorange#header-quick-access #header-user-bar,
+.board-color-clearorange#header-quick-access ul li {
+  color: #fff;
+}
+.board-color-clearorange#header,
+.board-color-clearorange#header-quick-access,
+.board-color-clearorange .setting-content .content-body .side-menu ul li.active,
+.board-color-clearorange .setting-content .content-body .side-menu ul li.active:hover {
+  background-color: #a75919;
+  border-bottom: 1px solid #b8651b;
+  border-top: 1px solid #8a4c14;
+}
+
+.board-color-clearorange#header #header-main-bar,
+.board-color-clearorange#header-quick-access,
+.board-color-clearorange .setting-content .content-body .side-menu ul li.active,
+.board-color-clearorange .setting-content .content-body .side-menu ul li.active:hover,
+.board-color-clearorange .boards-left-menu .menu-item.active a,
+.board-color-clearorange .boards-left-menu .menu-item.active a:hover {
+  background: linear-gradient(180deg, #efab6f 0%, #a75919 100%);
+}
+.board-color-clearorange#header #header-main-bar p {
+  margin-bottom: 6px;
+}
+.board-color-clearorange#header #header-main-bar .board-header-btn.emphasis {
+  background: #ff9127;
+}
+.board-color-clearorange#header #header-main-bar .board-header-btn.emphasis:hover,
+.board-color-clearorange#header #header-main-bar .board-header-btn.emphasis .board-header-btn-close {
+  background: rgba(0,0,0,0.2);
+}
+.board-color-clearorange#header #header-main-bar .board-header-btn.emphasis:hover .board-header-btn-close {
+  background: rgba(0,0,0,0.2);
+}
+.board-color-clearorange .materialCheckBox.is-checked {
+  border-bottom: 2px solid #efab6f;
+  border-right: 2px solid #efab6f;
+}
+.board-color-clearorange .checklist-progress-bar {
+  background-color: #fcf0e4 !important;
+}
+.board-color-clearorange .checklist-progress-bar .checklist-progress {
+  background-color: #efab6f !important;
+}
+.board-color-clearorange .is-multiselection-active .multi-selection-checkbox.is-checked + .minicard {
+  background: #fdf5ed;
+}
+.board-color-clearorange .is-multiselection-active .multi-selection-checkbox:not(.is-checked) + .minicard:hover:not(.minicard-composer) {
+  background: #fefbf8;
+}
+.board-color-clearorange .toggle-switch:checked ~ .toggle-label {
+  background-color: #f3c195;
+}
+.board-color-clearorange .toggle-switch:checked ~ .toggle-label:after {
+  background-color: #ca6f1e;
+}
+.board-color-clearorange.board-wrapper {
+  background: linear-gradient(135deg, #efab6f 0%, #a75919 100%);
+}
+.board-color-clearorange .swimlane {
+  background: none;
+}
+.board-color-clearorange .swimlane .list:first-child {
+  min-width: 20px;
+  margin-inline-start: 10px; /* Added 10px margin left to stop lists being butted up against the edge of the screen */
+  border-inline-start: none;
+}
+.board-color-clearorange .swimlane .list:nth-child {
+  flex: 0 0 265px;
+}
+.board-color-clearorange .list {
+  background: rgba(255,255,255,0.35);
+  margin: 10px 0;
+  border: 0;
+  border-radius: 14px;
+}
+.board-color-clearorange .list.list-composer {
+  background: rgba(255,255,255,0.1);
+  height: min-content;
+  flex: unset;
+  padding-bottom: 16px;
+  min-width: 20px;
+  margin-inline-start: 0px;
+  border-inline-start: none;
+}
+.board-color-clearorange .list.list-composer .open-list-composer {
+  border-radius: 7px;
+  color: rgba(0,0,0,0.3);
+  padding: 7px 10px;
+  display: block;
+}
+.board-color-clearorange .list.list-composer .open-list-composer:hover i,
+.board-color-clearorange .list.list-composer .open-list-composer:hover {
+  box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+  background: rgba(255,255,255,0.7);
+  color: rgba(0,0,0,0.6);
+}
+.board-color-clearorange .list-header {
+  background-color: rgb(255 255 255 / 68%);
+  border-radius: 14px 14px 0 0;
+}
+.board-color-clearorange .list-header:not([class*="list-header-"]) {
+  border-bottom: 6px solid rgba(255,255,255,0);
+}
+.board-color-clearorange .list-header .list-header-name {
+  color: rgba(0,0,0,0.6);
+}
+.board-color-clearorange .list-body {
+  padding: 11px;
+}
+.board-color-clearorange .minicard {
+  border-radius: 7px;
+  padding: 10px 10px 4px 10px;
+  box-shadow: 2px 2px 4px 0px rgba(0,0,0,0.15);
+  color: #222;
+}
+.board-color-clearorange .card-details {
+  border-radius: 0 0 14px 14px;
+  box-shadow: 0 0 7px 0 rgba(0,0,0,0.5);
+  margin-inline-start: -10px;
+}
+.board-color-clearorange .list-body .open-minicard-composer {
+  border-radius: 7px;
+  color: rgba(0,0,0,0.3);
+  margin-bottom: 11px;
+}
+.board-color-clearorange .list-body .open-minicard-composer:hover {
+  background: rgba(255,255,255,0.7);
+  color: rgba(0,0,0,0.6);
+}
+.board-color-clearorange button[type=submit].primary,
+.board-color-clearorange input[type=submit].primary,
+.board-color-clearorange .selected-calendar-picker button.primary {
+  box-shadow: none;
+  background-color: rgba(255,255,255,0.5);
+  color: rgba(0,0,0,0.55);
+  border-radius: 7px;
+  border: 0;
+}
+.board-color-clearorange button[type="submit"].primary:hover,
+.board-color-clearorange input[type="submit"].primary:hover,
+.board-color-clearorange .selected-calendar-picker button.primary:hover {
+  background-color: rgba(255,255,255,0.7);
+  color: rgba(0,0,0,0.8);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+  border-radius: 7px;
+}
+.board-color-clearorange .quiet,
+.board-color-clearorange .quiet a {
+  color: rgba(0,0,0,0.68);
+}
+.board-color-clearorange .list-header .list-header-watch-icon {
+  color: rgba(0,0,0,0.5);
+  position: absolute;
+  margin-top: -34px;
+  margin-inline-start: -11px;
+}
+.board-color-clearorange a.fa,
+.board-color-clearorange a i.fa {
+  color: rgba(0,0,0,0.3);
+}
+.board-color-clearorange a:not(.disabled).is-active.fa,
+.board-color-clearorange a:not(.disabled).is-active i.fa,
+.board-color-clearorange a:not(.disabled):hover.fa,
+.board-color-clearorange a:not(.disabled):hover i.fa {
+  color: rgba(0,0,0,0.6);
+  border-radius: 7px;
+}
+.board-color-clearorange input[type="email"],
+.board-color-clearorange input[type="password"],
+.board-color-clearorange input[type="text"] {
+  border: 0;
+  border-radius: 7px;
+}
+.board-color-clearorange .sidebar-shadow {
+  box-shadow: none;
+  border-inline-start: 9px solid #a75919;
+}
+.board-color-clearorange .is-open .sidebar-shadow {
+  box-shadow: -10px 0 8px rgba(0,0,0,0.3);
+}
+.board-color-clearorange .list.ui-sortable-helper {
+  transform: rotate(0deg);
+}
+.board-color-clearorange .minicard-wrapper.placeholder {
+  background: rgba(0,0,0,0.1);
+}
+.board-color-clearorange .minicard-wrapper.ui-sortable-helper {
+  transform: rotate(0deg);
+  opacity: 0.8;
+}
+.board-color-clearorange .list-body .open-minicard-composer {
+  color: rgba(0,0,0,0.3);
+}
+.board-color-clearorange .swimlane.ui-sortable-helper {
+  transform: rotate(0deg);
+}
+.board-color-clearorange .swimlane .swimlane-header-wrap {
+  background: linear-gradient(0deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.25) 100%);
+}
+.board-color-clearorange .swimlane-header-wrap .inlined-form {
+  width: 100%;
+}
+.board-color-clearorange .swimlane-header-wrap .list-composer {
+  text-align: center;
+  margin: 5px;
+}
+.board-color-clearorange .swimlane-header-wrap .list-name-input.full-line {
+  margin: 0;
+  display: inline-block;
+  width: 270px;
+}
+.board-color-clearorange .swimlane-header-wrap .edit-controls {
+  display: inline-block;
+  vertical-align: middle;
+}
+.board-color-clearorange .swimlane-header-wrap .primary.confirm {
+  margin-inline-end: 0;
+}
+.board-color-clearorange .swimlane-header-wrap .fa.fa-times-thin {
+  margin-top: 2px;
+}
+.board-color-clearorange .list.ui-sortable-helper,
+.board-color-clearorange .list.ui-sortable-helper .list-header.ui-sortable-handle,
+.board-color-clearorange .list.ui-sortable-helper .viewer {
+  cursor: -webkit-grabbing;
+  cursor: grabbing;
+}
+
+/* Transparent modern scrollbar - clearorange*/
+.board-color-clearorange .board-canvas {
+  scrollbar-color: #ffffffdb #ffffff00;
+  scrollbar-width: thin;
+}
+
+.board-color-clearorange .list-body {
+  scrollbar-width: thin;
+}
+
+/* Apply scrollbar to sidebar content*/
+.board-color-clearorange .sidebar .sidebar-content {
+   scrollbar-color: #a75919 #ffffff00;
+}
+
+/* Remove margins in between columns/fix spacing */
+
+.board-color-clearorange .list {
+  border-inline-start: none;
+  padding-bottom: 8px;
+}
+
+.board-color-clearorange .list-body {
+ margin-top: 8px;
+}
+
+/* === END clearorange THEME === */
+
+/* ===============
+THEME - clearpink
+
+A colour SLIDE, like clearblue: #df94b8 down to #bd3a79.
+The base is moderatepink's own colour, so the flat theme and the slide theme are
+the same colour family and a reader picking either gets what they expected.
+
+The rest of the palette is arithmetic on that base, the same arithmetic
+clearblue uses on its own: the border under the bar is base x 0.8, the one
+above it base x 0.6, the current tab base x 1.15, a selected minicard the
+base mixed toward white. Derived rather than hand-picked so a sixth slide
+theme is one line in the generator and not a page of guessed hexes.
+docs/Features/General/Theme/Change-Color.md
+=================*/
+
+
+.board-color-clearpink.sk-spinner div,
+.board-backgrounds-list .board-color-clearpink.background-box,
+.public-board-row.board-color-clearpink,
+.board-list li.board-color-clearpink {
+  background: linear-gradient(180deg, #df94b8 0%, #bd3a79 100%);
+}
+.board-color-clearpink .is-selected .minicard {
+  border-inline-start: 3px solid #df94b8;
+}
+.board-color-clearpink.pop-over .pop-over-list li a:not(.disabled):hover,
+.board-color-clearpink .sidebar .sidebar-content .sidebar-btn:hover,
+.board-color-clearpink .sidebar-list li a:hover {
+  background-color: #e29fbf;
+}
+.board-color-clearpink#header ul li.current,
+.board-color-clearpink#header-quick-access ul li.current {
+  border-bottom: 4px solid #ec67a7;
+}
+.board-color-clearpink#header-quick-access {
+  color: #fff;
+}
+
+.board-color-clearpink#header-quick-access #header-new-board-icon,
+.board-color-clearpink#header-quick-access #header-user-bar,
+.board-color-clearpink#header-quick-access ul li {
+  color: #fff;
+}
+.board-color-clearpink#header,
+.board-color-clearpink#header-quick-access,
+.board-color-clearpink .setting-content .content-body .side-menu ul li.active,
+.board-color-clearpink .setting-content .content-body .side-menu ul li.active:hover {
+  background-color: #bd3a79;
+  border-bottom: 1px solid #a44874;
+  border-top: 1px solid #7b3657;
+}
+
+.board-color-clearpink#header #header-main-bar,
+.board-color-clearpink#header-quick-access,
+.board-color-clearpink .setting-content .content-body .side-menu ul li.active,
+.board-color-clearpink .setting-content .content-body .side-menu ul li.active:hover,
+.board-color-clearpink .boards-left-menu .menu-item.active a,
+.board-color-clearpink .boards-left-menu .menu-item.active a:hover {
+  background: linear-gradient(180deg, #df94b8 0%, #bd3a79 100%);
+}
+.board-color-clearpink#header #header-main-bar p {
+  margin-bottom: 6px;
+}
+.board-color-clearpink#header #header-main-bar .board-header-btn.emphasis {
+  background: #ec67a7;
+}
+.board-color-clearpink#header #header-main-bar .board-header-btn.emphasis:hover,
+.board-color-clearpink#header #header-main-bar .board-header-btn.emphasis .board-header-btn-close {
+  background: rgba(0,0,0,0.2);
+}
+.board-color-clearpink#header #header-main-bar .board-header-btn.emphasis:hover .board-header-btn-close {
+  background: rgba(0,0,0,0.2);
+}
+.board-color-clearpink .materialCheckBox.is-checked {
+  border-bottom: 2px solid #df94b8;
+  border-right: 2px solid #df94b8;
+}
+.board-color-clearpink .checklist-progress-bar {
+  background-color: #f9ebf2 !important;
+}
+.board-color-clearpink .checklist-progress-bar .checklist-progress {
+  background-color: #df94b8 !important;
+}
+.board-color-clearpink .is-multiselection-active .multi-selection-checkbox.is-checked + .minicard {
+  background: #fbf2f6;
+}
+.board-color-clearpink .is-multiselection-active .multi-selection-checkbox:not(.is-checked) + .minicard:hover:not(.minicard-composer) {
+  background: #fefafc;
+}
+.board-color-clearpink .toggle-switch:checked ~ .toggle-label {
+  background-color: #e7b0ca;
+}
+.board-color-clearpink .toggle-switch:checked ~ .toggle-label:after {
+  background-color: #b44f80;
+}
+.board-color-clearpink.board-wrapper {
+  background: linear-gradient(135deg, #df94b8 0%, #bd3a79 100%);
+}
+.board-color-clearpink .swimlane {
+  background: none;
+}
+.board-color-clearpink .swimlane .list:first-child {
+  min-width: 20px;
+  margin-inline-start: 10px; /* Added 10px margin left to stop lists being butted up against the edge of the screen */
+  border-inline-start: none;
+}
+.board-color-clearpink .swimlane .list:nth-child {
+  flex: 0 0 265px;
+}
+.board-color-clearpink .list {
+  background: rgba(255,255,255,0.35);
+  margin: 10px 0;
+  border: 0;
+  border-radius: 14px;
+}
+.board-color-clearpink .list.list-composer {
+  background: rgba(255,255,255,0.1);
+  height: min-content;
+  flex: unset;
+  padding-bottom: 16px;
+  min-width: 20px;
+  margin-inline-start: 0px;
+  border-inline-start: none;
+}
+.board-color-clearpink .list.list-composer .open-list-composer {
+  border-radius: 7px;
+  color: rgba(0,0,0,0.3);
+  padding: 7px 10px;
+  display: block;
+}
+.board-color-clearpink .list.list-composer .open-list-composer:hover i,
+.board-color-clearpink .list.list-composer .open-list-composer:hover {
+  box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+  background: rgba(255,255,255,0.7);
+  color: rgba(0,0,0,0.6);
+}
+.board-color-clearpink .list-header {
+  background-color: rgb(255 255 255 / 68%);
+  border-radius: 14px 14px 0 0;
+}
+.board-color-clearpink .list-header:not([class*="list-header-"]) {
+  border-bottom: 6px solid rgba(255,255,255,0);
+}
+.board-color-clearpink .list-header .list-header-name {
+  color: rgba(0,0,0,0.6);
+}
+.board-color-clearpink .list-body {
+  padding: 11px;
+}
+.board-color-clearpink .minicard {
+  border-radius: 7px;
+  padding: 10px 10px 4px 10px;
+  box-shadow: 2px 2px 4px 0px rgba(0,0,0,0.15);
+  color: #222;
+}
+.board-color-clearpink .card-details {
+  border-radius: 0 0 14px 14px;
+  box-shadow: 0 0 7px 0 rgba(0,0,0,0.5);
+  margin-inline-start: -10px;
+}
+.board-color-clearpink .list-body .open-minicard-composer {
+  border-radius: 7px;
+  color: rgba(0,0,0,0.3);
+  margin-bottom: 11px;
+}
+.board-color-clearpink .list-body .open-minicard-composer:hover {
+  background: rgba(255,255,255,0.7);
+  color: rgba(0,0,0,0.6);
+}
+.board-color-clearpink button[type=submit].primary,
+.board-color-clearpink input[type=submit].primary,
+.board-color-clearpink .selected-calendar-picker button.primary {
+  box-shadow: none;
+  background-color: rgba(255,255,255,0.5);
+  color: rgba(0,0,0,0.55);
+  border-radius: 7px;
+  border: 0;
+}
+.board-color-clearpink button[type="submit"].primary:hover,
+.board-color-clearpink input[type="submit"].primary:hover,
+.board-color-clearpink .selected-calendar-picker button.primary:hover {
+  background-color: rgba(255,255,255,0.7);
+  color: rgba(0,0,0,0.8);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+  border-radius: 7px;
+}
+.board-color-clearpink .quiet,
+.board-color-clearpink .quiet a {
+  color: rgba(0,0,0,0.68);
+}
+.board-color-clearpink .list-header .list-header-watch-icon {
+  color: rgba(0,0,0,0.5);
+  position: absolute;
+  margin-top: -34px;
+  margin-inline-start: -11px;
+}
+.board-color-clearpink a.fa,
+.board-color-clearpink a i.fa {
+  color: rgba(0,0,0,0.3);
+}
+.board-color-clearpink a:not(.disabled).is-active.fa,
+.board-color-clearpink a:not(.disabled).is-active i.fa,
+.board-color-clearpink a:not(.disabled):hover.fa,
+.board-color-clearpink a:not(.disabled):hover i.fa {
+  color: rgba(0,0,0,0.6);
+  border-radius: 7px;
+}
+.board-color-clearpink input[type="email"],
+.board-color-clearpink input[type="password"],
+.board-color-clearpink input[type="text"] {
+  border: 0;
+  border-radius: 7px;
+}
+.board-color-clearpink .sidebar-shadow {
+  box-shadow: none;
+  border-inline-start: 9px solid #bd3a79;
+}
+.board-color-clearpink .is-open .sidebar-shadow {
+  box-shadow: -10px 0 8px rgba(0,0,0,0.3);
+}
+.board-color-clearpink .list.ui-sortable-helper {
+  transform: rotate(0deg);
+}
+.board-color-clearpink .minicard-wrapper.placeholder {
+  background: rgba(0,0,0,0.1);
+}
+.board-color-clearpink .minicard-wrapper.ui-sortable-helper {
+  transform: rotate(0deg);
+  opacity: 0.8;
+}
+.board-color-clearpink .list-body .open-minicard-composer {
+  color: rgba(0,0,0,0.3);
+}
+.board-color-clearpink .swimlane.ui-sortable-helper {
+  transform: rotate(0deg);
+}
+.board-color-clearpink .swimlane .swimlane-header-wrap {
+  background: linear-gradient(0deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.25) 100%);
+}
+.board-color-clearpink .swimlane-header-wrap .inlined-form {
+  width: 100%;
+}
+.board-color-clearpink .swimlane-header-wrap .list-composer {
+  text-align: center;
+  margin: 5px;
+}
+.board-color-clearpink .swimlane-header-wrap .list-name-input.full-line {
+  margin: 0;
+  display: inline-block;
+  width: 270px;
+}
+.board-color-clearpink .swimlane-header-wrap .edit-controls {
+  display: inline-block;
+  vertical-align: middle;
+}
+.board-color-clearpink .swimlane-header-wrap .primary.confirm {
+  margin-inline-end: 0;
+}
+.board-color-clearpink .swimlane-header-wrap .fa.fa-times-thin {
+  margin-top: 2px;
+}
+.board-color-clearpink .list.ui-sortable-helper,
+.board-color-clearpink .list.ui-sortable-helper .list-header.ui-sortable-handle,
+.board-color-clearpink .list.ui-sortable-helper .viewer {
+  cursor: -webkit-grabbing;
+  cursor: grabbing;
+}
+
+/* Transparent modern scrollbar - clearpink*/
+.board-color-clearpink .board-canvas {
+  scrollbar-color: #ffffffdb #ffffff00;
+  scrollbar-width: thin;
+}
+
+.board-color-clearpink .list-body {
+  scrollbar-width: thin;
+}
+
+/* Apply scrollbar to sidebar content*/
+.board-color-clearpink .sidebar .sidebar-content {
+   scrollbar-color: #bd3a79 #ffffff00;
+}
+
+/* Remove margins in between columns/fix spacing */
+
+.board-color-clearpink .list {
+  border-inline-start: none;
+  padding-bottom: 8px;
+}
+
+.board-color-clearpink .list-body {
+ margin-top: 8px;
+}
+
+/* === END clearpink THEME === */
+
+/* ===============
+THEME - clearpurple
+
+A colour SLIDE, like clearblue: #b685ca down to #8e44ad.
+The base is wisteria's own colour, so the flat theme and the slide theme are
+the same colour family and a reader picking either gets what they expected.
+
+The rest of the palette is arithmetic on that base, the same arithmetic
+clearblue uses on its own: the border under the bar is base x 0.8, the one
+above it base x 0.6, the current tab base x 1.15, a selected minicard the
+base mixed toward white. Derived rather than hand-picked so a sixth slide
+theme is one line in the generator and not a page of guessed hexes.
+docs/Features/General/Theme/Change-Color.md
+=================*/
+
+
+.board-color-clearpurple.sk-spinner div,
+.board-backgrounds-list .board-color-clearpurple.background-box,
+.public-board-row.board-color-clearpurple,
+.board-list li.board-color-clearpurple {
+  background: linear-gradient(180deg, #b685ca 0%, #8e44ad 100%);
+}
+.board-color-clearpurple .is-selected .minicard {
+  border-inline-start: 3px solid #b685ca;
+}
+.board-color-clearpurple.pop-over .pop-over-list li a:not(.disabled):hover,
+.board-color-clearpurple .sidebar .sidebar-content .sidebar-btn:hover,
+.board-color-clearpurple .sidebar-list li a:hover {
+  background-color: #bd93cf;
+}
+.board-color-clearpurple#header ul li.current,
+.board-color-clearpurple#header-quick-access ul li.current {
+  border-bottom: 4px solid #a34ec7;
+}
+.board-color-clearpurple#header-quick-access {
+  color: #fff;
+}
+
+.board-color-clearpurple#header-quick-access #header-new-board-icon,
+.board-color-clearpurple#header-quick-access #header-user-bar,
+.board-color-clearpurple#header-quick-access ul li {
+  color: #fff;
+}
+.board-color-clearpurple#header,
+.board-color-clearpurple#header-quick-access,
+.board-color-clearpurple .setting-content .content-body .side-menu ul li.active,
+.board-color-clearpurple .setting-content .content-body .side-menu ul li.active:hover {
+  background-color: #8e44ad;
+  border-bottom: 1px solid #72368a;
+  border-top: 1px solid #552968;
+}
+
+.board-color-clearpurple#header #header-main-bar,
+.board-color-clearpurple#header-quick-access,
+.board-color-clearpurple .setting-content .content-body .side-menu ul li.active,
+.board-color-clearpurple .setting-content .content-body .side-menu ul li.active:hover,
+.board-color-clearpurple .boards-left-menu .menu-item.active a,
+.board-color-clearpurple .boards-left-menu .menu-item.active a:hover {
+  background: linear-gradient(180deg, #b685ca 0%, #8e44ad 100%);
+}
+.board-color-clearpurple#header #header-main-bar p {
+  margin-bottom: 6px;
+}
+.board-color-clearpurple#header #header-main-bar .board-header-btn.emphasis {
+  background: #a34ec7;
+}
+.board-color-clearpurple#header #header-main-bar .board-header-btn.emphasis:hover,
+.board-color-clearpurple#header #header-main-bar .board-header-btn.emphasis .board-header-btn-close {
+  background: rgba(0,0,0,0.2);
+}
+.board-color-clearpurple#header #header-main-bar .board-header-btn.emphasis:hover .board-header-btn-close {
+  background: rgba(0,0,0,0.2);
+}
+.board-color-clearpurple .materialCheckBox.is-checked {
+  border-bottom: 2px solid #b685ca;
+  border-right: 2px solid #b685ca;
+}
+.board-color-clearpurple .checklist-progress-bar {
+  background-color: #f1e9f5 !important;
+}
+.board-color-clearpurple .checklist-progress-bar .checklist-progress {
+  background-color: #b685ca !important;
+}
+.board-color-clearpurple .is-multiselection-active .multi-selection-checkbox.is-checked + .minicard {
+  background: #f6f0f8;
+}
+.board-color-clearpurple .is-multiselection-active .multi-selection-checkbox:not(.is-checked) + .minicard:hover:not(.minicard-composer) {
+  background: #fcf9fd;
+}
+.board-color-clearpurple .toggle-switch:checked ~ .toggle-label {
+  background-color: #c9a5d8;
+}
+.board-color-clearpurple .toggle-switch:checked ~ .toggle-label:after {
+  background-color: #7d3c98;
+}
+.board-color-clearpurple.board-wrapper {
+  background: linear-gradient(135deg, #b685ca 0%, #8e44ad 100%);
+}
+.board-color-clearpurple .swimlane {
+  background: none;
+}
+.board-color-clearpurple .swimlane .list:first-child {
+  min-width: 20px;
+  margin-inline-start: 10px; /* Added 10px margin left to stop lists being butted up against the edge of the screen */
+  border-inline-start: none;
+}
+.board-color-clearpurple .swimlane .list:nth-child {
+  flex: 0 0 265px;
+}
+.board-color-clearpurple .list {
+  background: rgba(255,255,255,0.35);
+  margin: 10px 0;
+  border: 0;
+  border-radius: 14px;
+}
+.board-color-clearpurple .list.list-composer {
+  background: rgba(255,255,255,0.1);
+  height: min-content;
+  flex: unset;
+  padding-bottom: 16px;
+  min-width: 20px;
+  margin-inline-start: 0px;
+  border-inline-start: none;
+}
+.board-color-clearpurple .list.list-composer .open-list-composer {
+  border-radius: 7px;
+  color: rgba(0,0,0,0.3);
+  padding: 7px 10px;
+  display: block;
+}
+.board-color-clearpurple .list.list-composer .open-list-composer:hover i,
+.board-color-clearpurple .list.list-composer .open-list-composer:hover {
+  box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+  background: rgba(255,255,255,0.7);
+  color: rgba(0,0,0,0.6);
+}
+.board-color-clearpurple .list-header {
+  background-color: rgb(255 255 255 / 68%);
+  border-radius: 14px 14px 0 0;
+}
+.board-color-clearpurple .list-header:not([class*="list-header-"]) {
+  border-bottom: 6px solid rgba(255,255,255,0);
+}
+.board-color-clearpurple .list-header .list-header-name {
+  color: rgba(0,0,0,0.6);
+}
+.board-color-clearpurple .list-body {
+  padding: 11px;
+}
+.board-color-clearpurple .minicard {
+  border-radius: 7px;
+  padding: 10px 10px 4px 10px;
+  box-shadow: 2px 2px 4px 0px rgba(0,0,0,0.15);
+  color: #222;
+}
+.board-color-clearpurple .card-details {
+  border-radius: 0 0 14px 14px;
+  box-shadow: 0 0 7px 0 rgba(0,0,0,0.5);
+  margin-inline-start: -10px;
+}
+.board-color-clearpurple .list-body .open-minicard-composer {
+  border-radius: 7px;
+  color: rgba(0,0,0,0.3);
+  margin-bottom: 11px;
+}
+.board-color-clearpurple .list-body .open-minicard-composer:hover {
+  background: rgba(255,255,255,0.7);
+  color: rgba(0,0,0,0.6);
+}
+.board-color-clearpurple button[type=submit].primary,
+.board-color-clearpurple input[type=submit].primary,
+.board-color-clearpurple .selected-calendar-picker button.primary {
+  box-shadow: none;
+  background-color: rgba(255,255,255,0.5);
+  color: rgba(0,0,0,0.55);
+  border-radius: 7px;
+  border: 0;
+}
+.board-color-clearpurple button[type="submit"].primary:hover,
+.board-color-clearpurple input[type="submit"].primary:hover,
+.board-color-clearpurple .selected-calendar-picker button.primary:hover {
+  background-color: rgba(255,255,255,0.7);
+  color: rgba(0,0,0,0.8);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+  border-radius: 7px;
+}
+.board-color-clearpurple .quiet,
+.board-color-clearpurple .quiet a {
+  color: rgba(0,0,0,0.68);
+}
+.board-color-clearpurple .list-header .list-header-watch-icon {
+  color: rgba(0,0,0,0.5);
+  position: absolute;
+  margin-top: -34px;
+  margin-inline-start: -11px;
+}
+.board-color-clearpurple a.fa,
+.board-color-clearpurple a i.fa {
+  color: rgba(0,0,0,0.3);
+}
+.board-color-clearpurple a:not(.disabled).is-active.fa,
+.board-color-clearpurple a:not(.disabled).is-active i.fa,
+.board-color-clearpurple a:not(.disabled):hover.fa,
+.board-color-clearpurple a:not(.disabled):hover i.fa {
+  color: rgba(0,0,0,0.6);
+  border-radius: 7px;
+}
+.board-color-clearpurple input[type="email"],
+.board-color-clearpurple input[type="password"],
+.board-color-clearpurple input[type="text"] {
+  border: 0;
+  border-radius: 7px;
+}
+.board-color-clearpurple .sidebar-shadow {
+  box-shadow: none;
+  border-inline-start: 9px solid #8e44ad;
+}
+.board-color-clearpurple .is-open .sidebar-shadow {
+  box-shadow: -10px 0 8px rgba(0,0,0,0.3);
+}
+.board-color-clearpurple .list.ui-sortable-helper {
+  transform: rotate(0deg);
+}
+.board-color-clearpurple .minicard-wrapper.placeholder {
+  background: rgba(0,0,0,0.1);
+}
+.board-color-clearpurple .minicard-wrapper.ui-sortable-helper {
+  transform: rotate(0deg);
+  opacity: 0.8;
+}
+.board-color-clearpurple .list-body .open-minicard-composer {
+  color: rgba(0,0,0,0.3);
+}
+.board-color-clearpurple .swimlane.ui-sortable-helper {
+  transform: rotate(0deg);
+}
+.board-color-clearpurple .swimlane .swimlane-header-wrap {
+  background: linear-gradient(0deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.25) 100%);
+}
+.board-color-clearpurple .swimlane-header-wrap .inlined-form {
+  width: 100%;
+}
+.board-color-clearpurple .swimlane-header-wrap .list-composer {
+  text-align: center;
+  margin: 5px;
+}
+.board-color-clearpurple .swimlane-header-wrap .list-name-input.full-line {
+  margin: 0;
+  display: inline-block;
+  width: 270px;
+}
+.board-color-clearpurple .swimlane-header-wrap .edit-controls {
+  display: inline-block;
+  vertical-align: middle;
+}
+.board-color-clearpurple .swimlane-header-wrap .primary.confirm {
+  margin-inline-end: 0;
+}
+.board-color-clearpurple .swimlane-header-wrap .fa.fa-times-thin {
+  margin-top: 2px;
+}
+.board-color-clearpurple .list.ui-sortable-helper,
+.board-color-clearpurple .list.ui-sortable-helper .list-header.ui-sortable-handle,
+.board-color-clearpurple .list.ui-sortable-helper .viewer {
+  cursor: -webkit-grabbing;
+  cursor: grabbing;
+}
+
+/* Transparent modern scrollbar - clearpurple*/
+.board-color-clearpurple .board-canvas {
+  scrollbar-color: #ffffffdb #ffffff00;
+  scrollbar-width: thin;
+}
+
+.board-color-clearpurple .list-body {
+  scrollbar-width: thin;
+}
+
+/* Apply scrollbar to sidebar content*/
+.board-color-clearpurple .sidebar .sidebar-content {
+   scrollbar-color: #8e44ad #ffffff00;
+}
+
+/* Remove margins in between columns/fix spacing */
+
+.board-color-clearpurple .list {
+  border-inline-start: none;
+  padding-bottom: 8px;
+}
+
+.board-color-clearpurple .list-body {
+ margin-top: 8px;
+}
+
+/* === END clearpurple THEME === */
+
+/* ===============
+THEME - clearred
+
+A colour SLIDE, like clearblue: #d67e75 down to #c0392b.
+The base is pomegranate's own colour, so the flat theme and the slide theme are
+the same colour family and a reader picking either gets what they expected.
+
+The rest of the palette is arithmetic on that base, the same arithmetic
+clearblue uses on its own: the border under the bar is base x 0.8, the one
+above it base x 0.6, the current tab base x 1.15, a selected minicard the
+base mixed toward white. Derived rather than hand-picked so a sixth slide
+theme is one line in the generator and not a page of guessed hexes.
+docs/Features/General/Theme/Change-Color.md
+=================*/
+
+
+.board-color-clearred.sk-spinner div,
+.board-backgrounds-list .board-color-clearred.background-box,
+.public-board-row.board-color-clearred,
+.board-list li.board-color-clearred {
+  background: linear-gradient(180deg, #d67e75 0%, #c0392b 100%);
+}
+.board-color-clearred .is-selected .minicard {
+  border-inline-start: 3px solid #d67e75;
+}
+.board-color-clearred.pop-over .pop-over-list li a:not(.disabled):hover,
+.board-color-clearred .sidebar .sidebar-content .sidebar-btn:hover,
+.board-color-clearred .sidebar-list li a:hover {
+  background-color: #da8c84;
+}
+.board-color-clearred#header ul li.current,
+.board-color-clearred#header-quick-access ul li.current {
+  border-bottom: 4px solid #dd4231;
+}
+.board-color-clearred#header-quick-access {
+  color: #fff;
+}
+
+.board-color-clearred#header-quick-access #header-new-board-icon,
+.board-color-clearred#header-quick-access #header-user-bar,
+.board-color-clearred#header-quick-access ul li {
+  color: #fff;
+}
+.board-color-clearred#header,
+.board-color-clearred#header-quick-access,
+.board-color-clearred .setting-content .content-body .side-menu ul li.active,
+.board-color-clearred .setting-content .content-body .side-menu ul li.active:hover {
+  background-color: #c0392b;
+  border-bottom: 1px solid #9a2e22;
+  border-top: 1px solid #73221a;
+}
+
+.board-color-clearred#header #header-main-bar,
+.board-color-clearred#header-quick-access,
+.board-color-clearred .setting-content .content-body .side-menu ul li.active,
+.board-color-clearred .setting-content .content-body .side-menu ul li.active:hover,
+.board-color-clearred .boards-left-menu .menu-item.active a,
+.board-color-clearred .boards-left-menu .menu-item.active a:hover {
+  background: linear-gradient(180deg, #d67e75 0%, #c0392b 100%);
+}
+.board-color-clearred#header #header-main-bar p {
+  margin-bottom: 6px;
+}
+.board-color-clearred#header #header-main-bar .board-header-btn.emphasis {
+  background: #dd4231;
+}
+.board-color-clearred#header #header-main-bar .board-header-btn.emphasis:hover,
+.board-color-clearred#header #header-main-bar .board-header-btn.emphasis .board-header-btn-close {
+  background: rgba(0,0,0,0.2);
+}
+.board-color-clearred#header #header-main-bar .board-header-btn.emphasis:hover .board-header-btn-close {
+  background: rgba(0,0,0,0.2);
+}
+.board-color-clearred .materialCheckBox.is-checked {
+  border-bottom: 2px solid #d67e75;
+  border-right: 2px solid #d67e75;
+}
+.board-color-clearred .checklist-progress-bar {
+  background-color: #f7e7e6 !important;
+}
+.board-color-clearred .checklist-progress-bar .checklist-progress {
+  background-color: #d67e75 !important;
+}
+.board-color-clearred .is-multiselection-active .multi-selection-checkbox.is-checked + .minicard {
+  background: #faefee;
+}
+.board-color-clearred .is-multiselection-active .multi-selection-checkbox:not(.is-checked) + .minicard:hover:not(.minicard-composer) {
+  background: #fdf9f9;
+}
+.board-color-clearred .toggle-switch:checked ~ .toggle-label {
+  background-color: #e1a099;
+}
+.board-color-clearred .toggle-switch:checked ~ .toggle-label:after {
+  background-color: #a93226;
+}
+.board-color-clearred.board-wrapper {
+  background: linear-gradient(135deg, #d67e75 0%, #c0392b 100%);
+}
+.board-color-clearred .swimlane {
+  background: none;
+}
+.board-color-clearred .swimlane .list:first-child {
+  min-width: 20px;
+  margin-inline-start: 10px; /* Added 10px margin left to stop lists being butted up against the edge of the screen */
+  border-inline-start: none;
+}
+.board-color-clearred .swimlane .list:nth-child {
+  flex: 0 0 265px;
+}
+.board-color-clearred .list {
+  background: rgba(255,255,255,0.35);
+  margin: 10px 0;
+  border: 0;
+  border-radius: 14px;
+}
+.board-color-clearred .list.list-composer {
+  background: rgba(255,255,255,0.1);
+  height: min-content;
+  flex: unset;
+  padding-bottom: 16px;
+  min-width: 20px;
+  margin-inline-start: 0px;
+  border-inline-start: none;
+}
+.board-color-clearred .list.list-composer .open-list-composer {
+  border-radius: 7px;
+  color: rgba(0,0,0,0.3);
+  padding: 7px 10px;
+  display: block;
+}
+.board-color-clearred .list.list-composer .open-list-composer:hover i,
+.board-color-clearred .list.list-composer .open-list-composer:hover {
+  box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+  background: rgba(255,255,255,0.7);
+  color: rgba(0,0,0,0.6);
+}
+.board-color-clearred .list-header {
+  background-color: rgb(255 255 255 / 68%);
+  border-radius: 14px 14px 0 0;
+}
+.board-color-clearred .list-header:not([class*="list-header-"]) {
+  border-bottom: 6px solid rgba(255,255,255,0);
+}
+.board-color-clearred .list-header .list-header-name {
+  color: rgba(0,0,0,0.6);
+}
+.board-color-clearred .list-body {
+  padding: 11px;
+}
+.board-color-clearred .minicard {
+  border-radius: 7px;
+  padding: 10px 10px 4px 10px;
+  box-shadow: 2px 2px 4px 0px rgba(0,0,0,0.15);
+  color: #222;
+}
+.board-color-clearred .card-details {
+  border-radius: 0 0 14px 14px;
+  box-shadow: 0 0 7px 0 rgba(0,0,0,0.5);
+  margin-inline-start: -10px;
+}
+.board-color-clearred .list-body .open-minicard-composer {
+  border-radius: 7px;
+  color: rgba(0,0,0,0.3);
+  margin-bottom: 11px;
+}
+.board-color-clearred .list-body .open-minicard-composer:hover {
+  background: rgba(255,255,255,0.7);
+  color: rgba(0,0,0,0.6);
+}
+.board-color-clearred button[type=submit].primary,
+.board-color-clearred input[type=submit].primary,
+.board-color-clearred .selected-calendar-picker button.primary {
+  box-shadow: none;
+  background-color: rgba(255,255,255,0.5);
+  color: rgba(0,0,0,0.55);
+  border-radius: 7px;
+  border: 0;
+}
+.board-color-clearred button[type="submit"].primary:hover,
+.board-color-clearred input[type="submit"].primary:hover,
+.board-color-clearred .selected-calendar-picker button.primary:hover {
+  background-color: rgba(255,255,255,0.7);
+  color: rgba(0,0,0,0.8);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+  border-radius: 7px;
+}
+.board-color-clearred .quiet,
+.board-color-clearred .quiet a {
+  color: rgba(0,0,0,0.68);
+}
+.board-color-clearred .list-header .list-header-watch-icon {
+  color: rgba(0,0,0,0.5);
+  position: absolute;
+  margin-top: -34px;
+  margin-inline-start: -11px;
+}
+.board-color-clearred a.fa,
+.board-color-clearred a i.fa {
+  color: rgba(0,0,0,0.3);
+}
+.board-color-clearred a:not(.disabled).is-active.fa,
+.board-color-clearred a:not(.disabled).is-active i.fa,
+.board-color-clearred a:not(.disabled):hover.fa,
+.board-color-clearred a:not(.disabled):hover i.fa {
+  color: rgba(0,0,0,0.6);
+  border-radius: 7px;
+}
+.board-color-clearred input[type="email"],
+.board-color-clearred input[type="password"],
+.board-color-clearred input[type="text"] {
+  border: 0;
+  border-radius: 7px;
+}
+.board-color-clearred .sidebar-shadow {
+  box-shadow: none;
+  border-inline-start: 9px solid #c0392b;
+}
+.board-color-clearred .is-open .sidebar-shadow {
+  box-shadow: -10px 0 8px rgba(0,0,0,0.3);
+}
+.board-color-clearred .list.ui-sortable-helper {
+  transform: rotate(0deg);
+}
+.board-color-clearred .minicard-wrapper.placeholder {
+  background: rgba(0,0,0,0.1);
+}
+.board-color-clearred .minicard-wrapper.ui-sortable-helper {
+  transform: rotate(0deg);
+  opacity: 0.8;
+}
+.board-color-clearred .list-body .open-minicard-composer {
+  color: rgba(0,0,0,0.3);
+}
+.board-color-clearred .swimlane.ui-sortable-helper {
+  transform: rotate(0deg);
+}
+.board-color-clearred .swimlane .swimlane-header-wrap {
+  background: linear-gradient(0deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.25) 100%);
+}
+.board-color-clearred .swimlane-header-wrap .inlined-form {
+  width: 100%;
+}
+.board-color-clearred .swimlane-header-wrap .list-composer {
+  text-align: center;
+  margin: 5px;
+}
+.board-color-clearred .swimlane-header-wrap .list-name-input.full-line {
+  margin: 0;
+  display: inline-block;
+  width: 270px;
+}
+.board-color-clearred .swimlane-header-wrap .edit-controls {
+  display: inline-block;
+  vertical-align: middle;
+}
+.board-color-clearred .swimlane-header-wrap .primary.confirm {
+  margin-inline-end: 0;
+}
+.board-color-clearred .swimlane-header-wrap .fa.fa-times-thin {
+  margin-top: 2px;
+}
+.board-color-clearred .list.ui-sortable-helper,
+.board-color-clearred .list.ui-sortable-helper .list-header.ui-sortable-handle,
+.board-color-clearred .list.ui-sortable-helper .viewer {
+  cursor: -webkit-grabbing;
+  cursor: grabbing;
+}
+
+/* Transparent modern scrollbar - clearred*/
+.board-color-clearred .board-canvas {
+  scrollbar-color: #ffffffdb #ffffff00;
+  scrollbar-width: thin;
+}
+
+.board-color-clearred .list-body {
+  scrollbar-width: thin;
+}
+
+/* Apply scrollbar to sidebar content*/
+.board-color-clearred .sidebar .sidebar-content {
+   scrollbar-color: #c0392b #ffffff00;
+}
+
+/* Remove margins in between columns/fix spacing */
+
+.board-color-clearred .list {
+  border-inline-start: none;
+  padding-bottom: 8px;
+}
+
+.board-color-clearred .list-body {
+ margin-top: 8px;
+}
+
+/* === END clearred THEME === */
+
+/* The quiet text colour (#595959 on the light themes' greys, WCAG 1.4.3) is a
+   variable, so the themes whose popups and sidebars are DARK can have a light
+   one: a dark grey on a dark surface was nearly invisible (#6863). cleandark and
+   moderndark are those; dark and exodark keep light popups and sidebars, where
+   the dark grey is right. Popups carry the theme class themselves, so the
+   variable reaches them. */
+:is(
+  .board-color-cleandark,
+  .board-color-moderndark
+) {
+  --wekan-quiet-text: #b4b4b4;
+  /* Card Settings: its sections are light grey blocks (cardAddFields.css), and
+     these themes' text on them is white (1.07:1 in cleandark). */
+  --card-settings-section-bg: rgba(255, 255, 255, 0.08);
+  --card-settings-helper-bg: #3a3a46;
+  --card-settings-notch-bg: #2c3340;
+}
+/* moderndark's surfaces are lighter greys (#545454): the quiet text needs more. */
+.board-color-moderndark {
+  --wekan-quiet-text: #dcdcdc;
+}
+/* The board sidebar's "Keyboard shortcuts" row is outside .sidebar-content, so
+   the white of its buttons does not reach it, and sidebar.css makes it black:
+   black on these sidebars was 1.34:1. */
+:is(
+  .board-color-cleandark,
+  .board-color-moderndark
+) .sidebar .sidebar-shortcuts {
+  color: #fff;
+}
+/* moderndark: grey (#808080) on its near-black sidebar was 4.02. */
+.board-color-moderndark :is(.js-open-board-menu, h3[data-fold], .activity-title) {
+  color: var(--wekan-quiet-text);
+}
+/* dark: the swimlane header's text was black on its #2c3e50 bar (1.91:1). */
+.board-color-dark .swimlane-header {
+  color: #fff;
+}
+/* dark and exodark: the board, the opened card and the sidebar are dark surfaces
+   (#222, #2b2b2b, #2c3e50). Their popups differ: exodark's is dark too (above),
+   dark's is light, so the dark theme's popups keep the dark quiet text. */
+:is(
+  .board-color-dark,
+  .board-color-exodark
+) :is(.board-canvas, .card-details, .sidebar) {
+  --wekan-quiet-text: #b4b4b4;
+}
+/* A "quiet button" (Add custom field, Link fields to another card, ...) is #222 in
+   forms.css, for a light surface; on a dark popup or sidebar it was 1.18:1 (#6863). */
+:is(
+  .board-color-cleandark,
+  .board-color-moderndark
+) .quiet-button,
+:is(
+  .board-color-cleandark,
+  .board-color-moderndark,
+  .board-color-exodark
+).pop-over .quiet-button {
+  color: #e0e0e0;
+}
+/* The board sidebar of the dark themes: what is not a button or a heading
+   (a form label, the list of swimlanes' lists and cards) kept the light
+   sidebar's black: 1.34:1 on cleandark's #23232b (#6863). */
+:is(
+  .board-color-cleandark,
+  .board-color-moderndark
+) .sidebar .sidebar-content :is(label, .minilists, .minicards) {
+  color: #fff;
+}
+/* Popup items and sidebar lists: popup.css forces `.pop-over-list li > a` to black
+   with !important, which is right on a light surface. moderndark's popups and
+   sidebar and exodark's popups are dark: black on #454545 was 2.19:1, on #2b2b2b
+   1.48:1 (#6863). */
+:is(
+  .board-color-moderndark,
+  .board-color-exodark
+).pop-over .pop-over-list li > a,
+:is(
+  .board-color-moderndark,
+  .board-color-exodark
+).pop-over .pop-over-list li > a *,
+.board-color-moderndark .sidebar .pop-over-list li > a,
+.board-color-moderndark .sidebar .pop-over-list li > a * {
+  color: #fff !important;
+}
+/* moderndark: the sidebar's headings were #808080 on #222 (4.02:1). */
+.board-color-moderndark .sidebar .sidebar-content h3 {
+  color: var(--wekan-quiet-text);
+}
+/* moderndark: the selected minicard's title was #ccc on #666 (3.57:1). */
+.board-color-moderndark .is-selected > .minicard .minicard-title,
+.board-color-moderndark .is-selected > .minicard .minicard-title * {
+  color: #fff;
+}

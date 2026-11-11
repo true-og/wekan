@@ -1,0 +1,401 @@
+#!/usr/bin/env node
+'use strict';
+
+// Remove packages from a built bundle's programs/server/npm/node_modules that
+// no require() from the server can reach.
+//
+// Usage: node releases/prune-unreachable-npm.mjs <bundle-dir> [--dry-run] [--report-json <file>] [--sandstorm]
+//
+// WHY THIS TREE IS BIG
+//
+// programs/server/npm/node_modules is 347 MB of an ~850 MB bundle, and 206 MB of
+// it is not reachable from any server entry point. Two things make that happen
+// and neither is a bug in Meteor:
+//
+//   * It is OUTSIDE the bundler's graph. Meteor 3.5 compiles through rspack -
+//     the server output is minified, and programs/server/app/app.js requires only
+//     76 bare specifiers because rspack inlined the app's real dependencies into
+//     it. But this tree is what Atmosphere packages declare with Npm.depends()
+//     and load through Npm.require(), a call rspack cannot follow. So tree
+//     shaking never sees it. The tree is largely the INPUT to a build whose
+//     OUTPUT ships beside it.
+//   * It is a full `npm install`, devDependencies included. `typescript` is a
+//     devDependency of 196 packages here and a runtime dependency of none.
+//
+// Duplication is the smaller half of the story: 586 distinct packages exist as
+// 815 copies, but the redundant copies are only ~28 MB, because Meteor keeps
+// per-package node_modules on purpose so packages can pin conflicting versions.
+//
+// HOW THIS IS KEPT SAFE
+//
+// The reachable set is computed from the bundle every run, and it is
+// deliberately OVER-approximated: once a package is reached, every file in it is
+// scanned and every quoted package specifier and declared runtime dependency
+// counts. Then deletion is restricted
+// to an explicit POLICY list - a name is removed only if the policy names it AND
+// the graph says nothing reaches it. So the policy cannot outlive its own
+// justification: if a future WeKan really does require `typescript`, the graph
+// says so and the entry is refused rather than silently applied.
+//
+// After deleting, it re-checks that every path in the reachable set still
+// exists, and fails if one does not. A bundle that boots is worth more than the
+// megabytes.
+//
+// What the policy does NOT include is the long tail. 590 packages are unreached,
+// and only these are removed, because these are the ones whose reason is
+// provable rather than merely plausible - the same standard the uWebSockets.js
+// removal met. The rest stays until someone can say as much about it.
+
+import { readdirSync, readFileSync, statSync, existsSync, rmSync, writeFileSync } from 'fs';
+import { join, dirname, basename, resolve } from 'path';
+
+const argv = process.argv.slice(2);
+const bundleArg = argv[0];
+const bundle = bundleArg && !bundleArg.startsWith('--') ? resolve(bundleArg) : null;
+const reportAt = argv.indexOf('--report-json');
+const reportFile = reportAt >= 0 ? argv[reportAt + 1] : null;
+if (reportAt >= 0 && (!reportFile || reportFile.startsWith('--'))) {
+  throw new Error('--report-json requires an output filename');
+}
+const dryRun = argv.includes('--dry-run');
+// --sandstorm: the Sandstorm .spk's own policy entries, below. Only the
+// Sandstorm build passes it (releases/sandstorm-slim-spk.sh).
+const sandstorm = argv.includes('--sandstorm');
+
+if (!bundle) {
+  console.error('usage: node releases/prune-unreachable-npm.mjs <bundle-dir> [--dry-run] [--report-json <file>]');
+  process.exit(2);
+}
+const SERVER = join(bundle, 'programs', 'server');
+const NPM = join(SERVER, 'npm', 'node_modules');
+const OWN = join(SERVER, 'node_modules');
+if (!existsSync(SERVER)) {
+  console.error(`prune-unreachable-npm: ${bundle} does not look like a Meteor bundle (no programs/server)`);
+  process.exit(2);
+}
+if (!existsSync(NPM)) {
+  console.log('prune-unreachable-npm: no programs/server/npm/node_modules; nothing to do');
+  process.exit(0);
+}
+
+// ── The policy ───────────────────────────────────────────────────────────────
+// Each entry says WHY, because the why is what a later reader has to re-check.
+// `test` gets the package directory and returns true if this entry claims it.
+const POLICY = [
+  {
+    why: 'client polyfill copies in Meteor url and ecmascript-runtime-client. '
+      + 'Their server modules use Node URL and register browser versions only. '
+      + 'The ecmascript-runtime-server copy is deliberately not in this policy.',
+    test: dir => ['url', 'ecmascript-runtime-client'].some(name =>
+      dir === join(NPM, 'meteor', name, 'node_modules', 'core-js')),
+  },
+  {
+    why: 'browser-only build inputs. Blockly and the Office viewer are imported '
+      + 'only by client code; meteor-node-stubs supplies browser polyfills. '
+      + 'Their compiled browser chunks ship separately in programs/web.browser.',
+    test: dir => ['blockly', 'meteor-node-stubs'].includes(basename(dir))
+      || (basename(dir) === 'office-open-xml-viewer' && basename(dirname(dir)) === '@wekan'),
+  },
+  {
+    why: 'a TypeScript compiler. A devDependency of 196 packages in this tree '
+      + '(the @aws-sdk family) and a runtime dependency of none.',
+    test: dir => basename(dir) === 'typescript',
+  },
+  {
+    why: 'TypeScript declaration packages. Verified to contain no .js at all, so '
+      + 'no require() can resolve into one.',
+    test: dir => dirname(dir).endsWith('/@types') && !hasJs(dir),
+  },
+  // REMOVED: openpgp + nodemailer-openpgp, 21.3 MiB. The claim was "reachable
+  // only through an optional nodemailer plugin nothing requires", and it was
+  // wrong: packages/email.js links it on its first tick with
+  // `module.link('nodemailer-openpgp', ...)`, which the scanner did not read as a
+  // reference until it learned Meteor's linker calls. A bundle shipped without it
+  // crash-looped. The entry is gone rather than left to be vetoed every run - the
+  // reason is what grants the permission, and this reason was never true.
+  {
+    why: 'a test framework, shipped inside meteor/ostrio_files.',
+    test: dir => basename(dir) === 'sinon',
+  },
+];
+
+// The Sandstorm .spk is built without the login methods a grain cannot use
+// (releases/sandstorm-slim.mjs, docs/Platforms/FOSS/Container/Sandstorm/
+// Smaller-wekan-spk.md). What is left of them here are the HOISTED copies of
+// their protocol libraries: app code that names them is compiled into
+// app/app.js by rspack, and the Meteor packages that Npm.require() them are not
+// in this build. Same rule as every entry above - the graph still vetoes any of
+// these that something in the bundle names.
+const SANDSTORM_POLICY = [
+  {
+    why: 'Sandstorm: SAML and CAS protocol libraries. wekan-accounts-saml and '
+      + 'wekan-accounts-cas are not in the Sandstorm build.',
+    test: dir => ['@node-saml/node-saml', 'xml-crypto', 'xml-encryption', '@xmldom/xmldom',
+      '@xmldom/is-dom-node', 'xpath', 'xml2js', 'xmlbuilder'].includes(rel(dir)),
+  },
+  {
+    why: 'Sandstorm: passkey (WebAuthn) libraries. Sandstorm is the login; the '
+      + 'passkey menu is not drawn in a grain.',
+    test: dir => rel(dir) === '@simplewebauthn/server' || rel(dir) === '@levischuck/tiny-cbor'
+      || rel(dir) === 'asn1js' || rel(dir).startsWith('@peculiar/asn1-'),
+  },
+  {
+    why: 'Sandstorm: the hoisted SMTP library. A grain sends through its session '
+      + 'context; meteor/email keeps its own nodemailer, which is not touched.',
+    test: dir => rel(dir) === 'nodemailer',
+  },
+];
+if (sandstorm) POLICY.push(...SANDSTORM_POLICY);
+
+function hasJs(dir) {
+  let ents;
+  try { ents = readdirSync(dir, { withFileTypes: true }); } catch { return true; }
+  for (const e of ents) {
+    if (e.isDirectory()) { if (hasJs(join(dir, e.name))) return true; }
+    else if (/\.(js|cjs|mjs|node)$/.test(e.name)) return true;
+  }
+  return false;
+}
+
+// ── The reachability graph ───────────────────────────────────────────────────
+const CODE = /\.(js|cjs|mjs)$/;
+// EVERY WAY A METEOR BUNDLE NAMES A PACKAGE, not just require().
+//
+// A bundle that shipped without nodemailer-openpgp crash-looped on
+// `Cannot find module ".../nodemailer-openpgp/lib/nodemailer-openpgp.js"`,
+// because packages/email.js does not require() it - Meteor compiles an ESM
+// import to its own linker call:
+//
+//   module.link('nodemailer-openpgp',{openpgpEncrypt(v){openpgpEncrypt=v}},6);
+//
+// Scanning only for require() therefore missed every ESM import in every Meteor
+// package, which is most of them, and reported packages as unreachable that the
+// server links on its first tick. Each form contains a quoted specifier.
+// Count every quoted package specifier, including minified require aliases,
+// createRequire(...)("sharp"), native import(), and Meteor's virtual paths.
+// This intentionally over-approximates: an ordinary string can retain a package,
+// but a renamed loader must never make a runtime dependency disappear.
+// A `/` separates path segments and is never part of one, so each specifier
+// matches one way only. When `/` was also allowed inside a segment, `"-/-/-/...`
+// could be split in exponentially many ways (CodeQL alert #565, js/redos), and
+// es-module-lexer's minified lexer took longer than two seconds by itself. The
+// optional trailing `/` keeps `require('querystring-es3/')`, the form that
+// names a package rather than a built-in module, which the old pattern missed.
+const SPECIFIER = /["']((?:\/node_modules\/)?(?:@[a-zA-Z0-9_.-]+\/)?[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*\/?)["']/g;
+
+function filesOf(dir, out = []) {
+  let ents;
+  try { ents = readdirSync(dir, { withFileTypes: true }); } catch { return out; }
+  for (const e of ents) {
+    if (e.isSymbolicLink()) continue;
+    const p = join(dir, e.name);
+    // A nested node_modules is a different package; it is reached on its own.
+    if (e.isDirectory()) { if (e.name !== 'node_modules') filesOf(p, out); }
+    else if (CODE.test(e.name)) out.push(p);
+  }
+  return out;
+}
+
+// "@scope/name/sub" -> "@scope/name". Node builtins, relative paths and Meteor's
+// virtual `meteor/<package>` modules are not npm packages.
+function packageOf(spec) {
+  if (spec?.startsWith('/node_modules/')) spec = spec.slice('/node_modules/'.length);
+  if (!spec || spec.startsWith('.') || spec.startsWith('/')) return null;
+  if (spec.startsWith('node:')) return null;
+  if (spec === 'meteor' || spec.startsWith('meteor/')) return null;
+  const parts = spec.split('/');
+  return spec.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0];
+}
+
+// Node resolution: up through each node_modules, then the two trees a Meteor
+// server bundle always has.
+function resolvePackage(name, from) {
+  let d = from;
+  while (d.startsWith(bundle)) {
+    const p = join(d, 'node_modules', name);
+    if (existsSync(p)) return p;
+    d = dirname(d);
+  }
+  for (const base of [NPM, OWN]) {
+    const p = join(base, name);
+    if (existsSync(p)) return p;
+  }
+  return null;
+}
+
+const reached = new Set();
+const queue = [];
+const reasons = new Map();
+function retain(dir, reason) {
+  if (!dir) return;
+  if (!reasons.has(dir)) reasons.set(dir, new Set());
+  reasons.get(dir).add(reason);
+  if (!reached.has(dir)) { reached.add(dir); queue.push(dir); }
+}
+
+function scanFile(file, from) {
+  let src;
+  try { src = readFileSync(file, 'utf8'); } catch { return; }
+  for (const m of src.matchAll(SPECIFIER)) {
+    const nested = /^(?:\/node_modules\/)?meteor\/([^/]+)\/node_modules\/(.+)$/.exec(m[1]);
+    const name = packageOf(nested ? nested[2] : m[1]);
+    if (!name) continue;
+    const dir = resolvePackage(name, nested ? join(NPM, 'meteor', nested[1]) : from);
+    retain(dir, `specifier ${m[1]} in ${file.slice(SERVER.length + 1)}`);
+  }
+}
+
+// Roots: what the server actually loads.
+const roots = [];
+for (const f of readdirSync(SERVER).filter(f => CODE.test(f))) {
+  const p = join(SERVER, f);
+  if (existsSync(p)) roots.push([p, SERVER]);
+}
+for (const file of filesOf(join(SERVER, 'app'))) roots.push([file, dirname(file)]);
+// Each packages/<name>.js is a Meteor package, and its Npm.require() resolves
+// first in npm/node_modules/meteor/<name>/node_modules.
+const packagesDir = join(SERVER, 'packages');
+if (existsSync(packagesDir)) {
+  for (const f of readdirSync(packagesDir)) {
+    if (!f.endsWith('.js')) continue;
+    const own = join(NPM, 'meteor', basename(f, '.js'));
+    roots.push([join(packagesDir, f), existsSync(own) ? own : SERVER]);
+  }
+}
+for (const [file, from] of roots) scanFile(file, from);
+while (queue.length) {
+  const dir = queue.shift();
+  // Runtime metadata covers computed imports, notably sharp's platform package
+  // and native addons. Keep optional dependencies too; never traverse devDeps.
+  const metadata = join(dir, 'package.json');
+  if (existsSync(metadata)) {
+    const pkg = JSON.parse(readFileSync(metadata, 'utf8'));
+    for (const name of Object.keys({ ...pkg.dependencies, ...pkg.optionalDependencies, ...pkg.peerDependencies })) {
+      retain(resolvePackage(name, dir), `runtime dependency of ${dir.slice(SERVER.length + 1)}`);
+    }
+  }
+  for (const f of filesOf(dir)) scanFile(f, dirname(f));
+}
+
+// ── Apply ────────────────────────────────────────────────────────────────────
+// Every package directory in the tree: the hoisted ones, and each Meteor
+// package's own node_modules.
+function packagesIn(nodeModules) {
+  const out = [];
+  let ents;
+  try { ents = readdirSync(nodeModules, { withFileTypes: true }); } catch { return out; }
+  for (const e of ents) {
+    if (!e.isDirectory() || e.isSymbolicLink()) continue;
+    if (e.name === 'meteor' && nodeModules === NPM) continue;   // handled below
+    if (e.name.startsWith('@')) {
+      for (const s of readdirSync(join(nodeModules, e.name))) out.push(join(nodeModules, e.name, s));
+    } else out.push(join(nodeModules, e.name));
+  }
+  return out;
+}
+const all = packagesIn(NPM);
+for (const pkg of readdirSync(join(NPM, 'meteor'))) {
+  const nested = join(NPM, 'meteor', pkg, 'node_modules');
+  if (existsSync(nested)) all.push(...packagesIn(nested));
+}
+
+function sizeOf(dir) {
+  let total = 0;
+  const walk = d => {
+    let ents;
+    try { ents = readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      const p = join(d, e.name);
+      if (e.isSymbolicLink()) continue;
+      if (e.isDirectory()) walk(p);
+      else { try { total += statSync(p).size; } catch { /* vanished */ } }
+    }
+  };
+  walk(dir);
+  return total;
+}
+
+const rel = p => p.slice(NPM.length + 1);
+const mib = n => (n / 1048576).toFixed(1);
+
+const removals = [];
+const refused = [];
+for (const dir of all) {
+  const entry = POLICY.find(e => e.test(dir));
+  if (!entry) continue;
+  if (reached.has(dir)) {
+    // The policy claimed it and the graph disagrees. The graph wins.
+    refused.push([dir, entry]);
+    continue;
+  }
+  removals.push([dir, entry, sizeOf(dir)]);
+}
+
+if (reportFile) {
+  const report = all.map(dir => ({
+    package: rel(dir), bytes: sizeOf(dir),
+    action: reached.has(dir) ? 'keep-referenced' : POLICY.some(e => e.test(dir)) ? 'remove' : 'keep-unreviewed',
+    reasons: [...(reasons.get(dir) || [])],
+  })).sort((a, b) => b.bytes - a.bytes);
+  writeFileSync(reportFile, JSON.stringify(report, null, 2) + '\n');
+}
+
+for (const [dir, entry] of refused) {
+  console.log(`prune-unreachable-npm: KEEPING ${rel(dir)} - the policy names it (${entry.why}) `
+    + 'but a require() reaches it. The graph wins.');
+}
+
+let freed = 0;
+for (const [dir, , size] of removals) {
+  if (!dryRun) {
+    try { rmSync(dir, { recursive: true, force: true }); }
+    catch (e) { console.log(`prune-unreachable-npm: could not remove ${rel(dir)}: ${e.message}`); continue; }
+  }
+  freed += size;
+}
+
+// A removed package leaves its .bin symlinks dangling - `.bin/tsc` pointing into
+// a directory that is gone. Harmless to run, untidy to ship, and confusing to
+// anything that walks the tree, so they go with it.
+let danglingRemoved = 0;
+if (!dryRun) {
+  const bins = [join(NPM, '.bin')];
+  for (const pkg of readdirSync(join(NPM, 'meteor'))) {
+    bins.push(join(NPM, 'meteor', pkg, 'node_modules', '.bin'));
+  }
+  for (const bin of bins) {
+    let ents;
+    try { ents = readdirSync(bin, { withFileTypes: true }); } catch { continue; }
+    for (const e of ents) {
+      const p = join(bin, e.name);
+      // existsSync FOLLOWS the link, so a dangling one answers false.
+      if (!existsSync(p)) {
+        try { rmSync(p, { force: true }); danglingRemoved += 1; } catch { /* leave it */ }
+      }
+    }
+  }
+}
+
+// Nothing that is reached may have gone. A bundle that boots is worth more than
+// the megabytes, so this is checked rather than assumed.
+if (!dryRun) {
+  const missing = [...reached].filter(p => !existsSync(p));
+  if (missing.length) {
+    console.error('prune-unreachable-npm: FAILED - these are reachable and no longer present:');
+    for (const p of missing.slice(0, 10)) console.error(`  ${rel(p)}`);
+    process.exit(1);
+  }
+}
+
+const byWhy = new Map();
+for (const [, entry, size] of removals) {
+  const cur = byWhy.get(entry.why) || { n: 0, bytes: 0 };
+  byWhy.set(entry.why, { n: cur.n + 1, bytes: cur.bytes + size });
+}
+console.log(`prune-unreachable-npm: ${dryRun ? 'would remove' : 'removed'} ${removals.length} package(s), `
+  + `${mib(freed)} MiB from programs/server/npm/node_modules, of ${all.length} in the tree `
+  + `(${reached.size} reachable)`
+  + (danglingRemoved ? `, and ${danglingRemoved} dangling .bin symlink(s)` : ''));
+for (const [why, { n, bytes }] of byWhy) {
+  console.log(`  ${mib(bytes).padStart(7)} MiB  ${String(n).padStart(3)} pkg  ${why}`);
+}

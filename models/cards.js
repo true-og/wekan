@@ -1,7 +1,11 @@
 import { Meteor } from 'meteor/meteor';
 import { Mongo } from 'meteor/mongo';
 import { Random } from 'meteor/random';
+import { EJSON } from 'meteor/ejson';
 import { ReactiveCache, ReactiveMiniMongoIndex } from '/imports/reactiveCache';
+import { CARD_RECURRENCE_INTERVALS } from '/models/lib/cardRecurrenceSchedule';
+const { wipLimitBlocksRestore } = require('/models/lib/wipRestore');
+const { FIELD_KEYS: CARD_SHOWN_FIELD_KEYS } = require('/models/lib/cardShownFields');
 import {
   formatDateTime,
   formatDate,
@@ -28,6 +32,23 @@ import {
   TYPE_LINKED_CARD,
 } from '../config/const';
 import { CARD_COLORS } from '/models/metadata/colors';
+import { isHexColor, isAllowedCardColor, contrastText } from '/models/lib/contrastColor';
+import { resolveCoverId } from '/models/lib/linkedCardCover';
+import { liveAttachments, isLiveAttachment } from '/models/lib/attachmentSoftDelete';
+import {
+  DEFAULT_DEPENDENCY_COLOR,
+  DEFAULT_DEPENDENCY_ICON,
+  DEFAULT_DEPENDENCY_TYPE,
+  DEPENDENCY_TYPE_IDS,
+  normalizeDependencies,
+} from '/models/metadata/dependencies';
+import {
+  remapCoverId,
+} from '/server/lib/cardCopyHelpers';
+const {
+  cardParentIds, parentFields, withParentAdded, withParentRemoved, childrenSelector,
+  onlyChildrenSelector, sharedChildrenSelector, collectAllAncestorIdsSync, wouldCreateParentCycle,
+} = require('/models/lib/cardParents');
 import Attachments from "./attachments";
 import PositionHistory from './positionHistory';
 import Activities from '/models/activities';
@@ -38,6 +59,40 @@ import Checklists from '/models/checklists';
 import Lists from '/models/lists';
 import { debounce } from '/imports/lib/collectionHelpers';
 const { SimpleSchema } = require('/imports/simpleSchema');
+const { formatCardKey } = require('/models/lib/boardKey');
+
+// #6800: a field's definition as it is NOW, not from ReactiveCache - a copy may
+// just have shared the field with the destination board (mapCustomFieldsToBoard)
+// and a cached definition would still lack that board. Lazy require: the custom
+// fields model imports this one.
+async function fieldDefinitionNow(fieldId) {
+  const CustomFields = require('/models/customFields').default;
+  const options = { fields: { boardIds: 1 } };
+  return typeof CustomFields.findOneAsync === 'function'
+    ? CustomFields.findOneAsync(fieldId, options)
+    : CustomFields.findOne(fieldId, options);
+}
+const { customFieldsForBoard } = require('/models/lib/customFieldsForBoard.cjs');
+
+// #1759: map a card's labels onto the board it moves or is copied to, creating
+// the missing ones there when the actor is that board's admin
+// (models/lib/crossBoardLabels.js).
+async function crossBoardLabelIds(card, oldBoard, newBoard) {
+  const { planCrossBoardLabels } = require('/models/lib/crossBoardLabels');
+  let actorId = null;
+  try { actorId = Meteor.userId(); } catch (e) { actorId = null; }
+  const plan = planCrossBoardLabels({
+    sourceLabels: (oldBoard && oldBoard.labels) || [],
+    labelIds: card.labelIds || [],
+    destLabels: (newBoard && newBoard.labels) || [],
+    canCreate: !!(newBoard && actorId && typeof newBoard.hasAdmin === 'function' && newBoard.hasAdmin(actorId)),
+    newId: () => Random.id(6),
+  });
+  if (plan.create.length) {
+    await Boards.updateAsync(newBoard._id, { $push: { labels: { $each: plan.create } } });
+  }
+  return plan.labelIds;
+}
 
 const Cards = new Mongo.Collection('cards');
 
@@ -46,6 +101,9 @@ const Cards = new Mongo.Collection('cards');
 // of comments just to display the number of them in the board view.
 Cards.attachSchema(
   new SimpleSchema({
+    // Scrum metadata is optional and hidden by default; only validated methods write it.
+    scrum: { type: Object, optional: true, blackbox: true },
+    scrumRevision: { type: Number, optional: true, min: 0 },
     title: {
       /**
        * the title of the card
@@ -74,13 +132,42 @@ Cards.attachSchema(
       type: Date,
       optional: true,
     },
+    // Soft delete (docs/Features/Undo/Undo.md): see the matching fields on Lists.
+    // A soft-deleted card is marked, not destroyed; deleteBatchId ties it to the
+    // list (or other cascade) it was deleted with, so restore is all-or-nothing.
+    deletedAt: {
+      // See Lists: absent-or-null both mean "live"; no null default (would trip
+      // SimpleSchema Date validation on insert).
+      type: Date,
+      optional: true,
+    },
+    deletedBy: {
+      type: String,
+      optional: true,
+    },
+    deleteBatchId: {
+      type: String,
+      optional: true,
+    },
     parentId: {
       /**
-       * ID of the parent card
+       * ID of the parent card - the PRIMARY parent, always parentIds[0]
+       * (#3626, models/lib/cardParents.js).
        */
       type: String,
       optional: true,
       defaultValue: '',
+    },
+    parentIds: {
+      /**
+       * #3626: every parent of the card, primary first. A card written before
+       * this has only parentId, which is then its one parent.
+       */
+      type: Array,
+      optional: true,
+    },
+    'parentIds.$': {
+      type: String,
     },
     listId: {
       /**
@@ -107,6 +194,23 @@ Cards.attachSchema(
       optional: true,
       defaultValue: '',
     },
+    mapX: {
+      /**
+       * #3256: the card's place on the board's Map view, as a percentage of
+       * the map image's width (models/lib/boardMap.js). Unset = not on the map.
+       */
+      type: Number,
+      optional: true,
+      min: 0,
+      max: 100,
+    },
+    mapY: {
+      /** #3256: the same, as a percentage of the map image's height. */
+      type: Number,
+      optional: true,
+      min: 0,
+      max: 100,
+    },
     coverId: {
       /**
        * Cover ID of the card
@@ -115,10 +219,56 @@ Cards.attachSchema(
       optional: true,
       defaultValue: '',
     },
+    drawings: {
+      /**
+       * #1178: drawings on this card, editable later (models/lib/cardDrawing.js):
+       * [{ _id, strokes, width, height, pngAttachmentId, updatedAt }].
+       */
+      type: Array,
+      optional: true,
+    },
+    'drawings.$': {
+      type: Object,
+      blackbox: true,
+    },
+    columnSetValues: {
+      /**
+       * #211: which column this card is in for each of its board's column
+       * sets, { setId: columnId } (models/lib/columnSets.js).
+       */
+      type: Object,
+      optional: true,
+      blackbox: true,
+    },
+    cardKind: {
+      /**
+       * #2012: 'story' or 'task'; unset is an ordinary card
+       * (models/lib/cardKinds.js).
+       */
+      type: String,
+      optional: true,
+      allowedValues: ['story', 'task'],
+    },
     color: {
       type: String,
       optional: true,
-      allowedValues: CARD_COLORS,
+      // #5514: accept a named palette color OR a custom '#rrggbb' hex chosen
+      // from the color wheel (instead of a fixed allowedValues enum).
+      custom() {
+        // Multi-Selection writes the same field the same way, per card.
+        if (isAllowedCardColor(this.value, CARD_COLORS)) return undefined;
+        return 'notAllowed';
+      },
+    },
+    listEnteredAt: {
+      /** When this card entered its current board/list. Unrelated edits do not reset it. */
+      type: Date,
+      optional: true,
+      autoValue() {
+        if (this.isInsert) return new Date();
+        if (this.isUpsert) return { $setOnInsert: new Date() };
+        this.unset();
+      },
     },
     createdAt: {
       /**
@@ -179,6 +329,49 @@ Cards.attachSchema(
         },
       }),
     },
+    customFieldLinks: {
+      /**
+       * #5681: the cards this card's custom fields are linked to, by field
+       * name (models/lib/customFieldLinks.js). Written only by the server
+       * methods in server/models/customFieldLinks.js, on both cards at once.
+       */
+      type: Array,
+      optional: true,
+    },
+    'customFieldLinks.$': {
+      type: new SimpleSchema({
+        cardId: { type: String },
+        mode: { type: String, allowedValues: ['both', 'send', 'receive'] },
+        userId: { type: String },
+        createdAt: { type: Date, optional: true },
+      }),
+    },
+    recurrenceInterval: {
+      /**
+       * Kanboard-style whole-card recurrence: automatically create a fresh copy
+       * of this card in the same list on a recurring schedule (e.g. a weekly
+       * status-report card, a monthly invoice card), so the next occurrence
+       * does not have to be created by hand every time. 'none' (default) never
+       * recurs. Reuses the exact same due-date mechanism as a checklist's
+       * automatic reset (models/lib/checklistResetSchedule.js) - see
+       * models/lib/cardRecurrenceSchedule.js and
+       * server/cardRecurrenceSchedule.js for the due-date calculation and the
+       * periodic job that applies it.
+       */
+      type: String,
+      allowedValues: CARD_RECURRENCE_INTERVALS,
+      defaultValue: 'none',
+      optional: true,
+    },
+    lastRecurrenceAt: {
+      /**
+       * When the automatic-recurrence job last created this card's next
+       * occurrence. Falls back to createdAt (in isCardRecurrenceDue()) until
+       * the first automatic recurrence happens.
+       */
+      type: Date,
+      optional: true,
+    },
     dateLastActivity: {
       /**
        * Date of last activity
@@ -198,7 +391,7 @@ Cards.attachSchema(
     },
     requestedBy: {
       /**
-       * who requested the card (ID of the user)
+       * display name entered manually or copied from the selected user
        */
       type: String,
       optional: true,
@@ -206,11 +399,52 @@ Cards.attachSchema(
     },
     assignedBy: {
       /**
-       * who assigned the card (ID of the user)
+       * display name entered manually or copied from the selected user
        */
       type: String,
       optional: true,
       defaultValue: '',
+    },
+    // List sync (docs/Features/Board-Sidebar/Board-Settings/Import-Export/Sync.md): when a card was created or
+    // is kept up to date by a periodic sync job (server/listSync.js) from an
+    // external tracker (Jira, GitHub, GitLab, Gitea...) rather than by hand,
+    // syncExternalId is that source's own id for the item (a Jira issue key, a
+    // GitHub/GitLab issue number) and syncSourceType is which parser produced it
+    // - together they are how the reconcile step (models/lib/listSyncReconcile.js)
+    // matches an already-imported card back to its external item on the next
+    // run, instead of creating a duplicate.
+    syncSourceKey: { type: String, optional: true },
+    // "Comments, labels, state and files" (models/lib/listSyncIssueDetails.js):
+    // the labels sync put on the card - the only ones it ever takes off - and
+    // the issue's state upstream, which Board View / Version Control shows.
+    syncLabelIds: { type: Array, optional: true },
+    'syncLabelIds.$': { type: String },
+    syncIssueState: { type: String, optional: true, allowedValues: ['open', 'closed'] },
+    syncLastSource: { type: Object, optional: true },
+    // #2698: WeKan closed this card's GitLab issue when the card was archived,
+    // so restoring the card reopens it (server/lib/listSyncWriteBack.js).
+    syncClosedByWeKan: { type: Boolean, optional: true },
+    'syncLastSource.title': { type: String, optional: true },
+    'syncLastSource.description': { type: String, optional: true },
+    'syncLastSource.estimate': { type: Number, optional: true, min: 0, max: 1e12 },
+    'syncLastSource.originalEstimate': { type: Number, optional: true, min: 0, max: 1e12 },
+    'syncLastSource.remainingEstimate': { type: Number, optional: true, min: 0, max: 1e12 },
+    'syncLastSource.originalEstimateMapping': { type: String, optional: true },
+    'syncLastSource.remainingEstimateMapping': { type: String, optional: true },
+    'syncLastSource.estimateMapping': { type: String, optional: true },
+    'syncLastSource.spentTime': { type: Number, optional: true, min: 0 },
+    // The planning Sync last applied (models/lib/listSyncPlanning.js), in this
+    // board's record ids; '' is "no sprint".
+    'syncLastSource.sprint': { type: String, optional: true },
+    'syncLastSource.releases': { type: Array, optional: true },
+    'syncLastSource.releases.$': { type: String },
+    syncExternalId: {
+      type: String,
+      optional: true,
+    },
+    syncSourceType: {
+      type: String,
+      optional: true,
     },
     labelIds: {
       /**
@@ -221,6 +455,18 @@ Cards.attachSchema(
       defaultValue: [],
     },
     'labelIds.$': {
+      type: String,
+    },
+    attachedCardIds: {
+      /**
+       * #3257: the cards attached to this card (Trello's card attachments),
+       * by id - any card the user may read, on any board. Shown beside the
+       * file attachments (models/lib/attachedCards.js).
+       */
+      type: Array,
+      optional: true,
+    },
+    'attachedCardIds.$': {
       type: String,
     },
     members: {
@@ -246,12 +492,43 @@ Cards.attachSchema(
     'assignees.$': {
       type: String,
     },
+    requesters: {
+      /** board-member user IDs that requested the card */
+      type: Array,
+      optional: true,
+      defaultValue: [],
+    },
+    'requesters.$': {
+      type: String,
+    },
+    assigners: {
+      /** board-member user IDs that assigned the card */
+      type: Array,
+      optional: true,
+      defaultValue: [],
+    },
+    'assigners.$': {
+      type: String,
+    },
     receivedAt: {
       /**
        * Date the card was received
        */
       type: Date,
       optional: true,
+    },
+    email: {
+      /**
+       * #794: the email this card came from or was sent as - { direction:
+       * 'in'|'out', from: { name, address }, to: [address], cc: [address],
+       * subject, messageId, threadIds: [Message-ID], at }. threadIds holds
+       * every Message-ID of the conversation, so a reply to it (In-Reply-To /
+       * References) becomes a comment here rather than a new card
+       * (server/emailToCard.js, server/emailView.js).
+       */
+      type: Object,
+      optional: true,
+      blackbox: true,
     },
     startAt: {
       /**
@@ -412,6 +689,7 @@ Cards.attachSchema(
         },
       }),
     },
+    lastMoveReason: { type: String, optional: true, max: 1000, defaultValue: '' },
     spentTime: {
       /**
        * How much time has been spent on this
@@ -427,6 +705,83 @@ Cards.attachSchema(
       type: Boolean,
       defaultValue: false,
       optional: true,
+    },
+    // Flowtime (#3919): an in-progress, uninterrupted work session. Unlike
+    // Pomodoro's fixed interval, a Flowtime session runs until the user stops
+    // it themselves; interruptions are only tallied, not used to pause the
+    // clock. Stopping the session adds its duration into the existing
+    // `spentTime` field above via the same setSpentTime() card helper the
+    // manual time-entry popup already uses.
+    flowStartAt: {
+      /**
+       * when the active Flowtime session on this card started, or null/unset
+       * when no session is active
+       */
+      type: Date,
+      optional: true,
+    },
+    flowInterruptions: {
+      /**
+       * how many interruptions have been tallied during the active session
+       */
+      type: Number,
+      optional: true,
+      defaultValue: 0,
+    },
+    flowUserId: {
+      /**
+       * the user who started the active Flowtime session; a session belongs
+       * to one person
+       */
+      type: String,
+      optional: true,
+    },
+    // Pomodoro (#4862): the classic FIXED-interval technique - unlike
+    // Flowtime above, a Pomodoro session alternates fixed-length work and
+    // break intervals. A completed work interval adds its duration into the
+    // same `spentTime` field via the same setSpentTime() card helper the
+    // manual time-entry popup and Flowtime both use.
+    pomodoroStartAt: {
+      /**
+       * when the current work/break interval started, or null/unset when no
+       * Pomodoro interval is active
+       */
+      type: Date,
+      optional: true,
+    },
+    pomodoroPhase: {
+      /**
+       * 'work' or 'break' while an interval is active; null/unset otherwise
+       */
+      type: String,
+      optional: true,
+      allowedValues: ['work', 'break'],
+    },
+    pomodoroCount: {
+      /**
+       * how many work intervals have been completed, used for the "long
+       * break every 4th interval" rule
+       */
+      type: Number,
+      optional: true,
+      defaultValue: 0,
+    },
+    pomodoroUserId: {
+      /**
+       * the user who started the active Pomodoro session; a session belongs
+       * to one person
+       */
+      type: String,
+      optional: true,
+    },
+    pomodoroWorkMinutes: {
+      /**
+       * length of a work interval in minutes, configurable per session;
+       * defaults to the standard 25 minutes
+       */
+      type: Number,
+      optional: true,
+      defaultValue: 25,
     },
     // XXX Should probably be called `authorId`. Is it even needed since we have
     // the `members` field?
@@ -474,6 +829,44 @@ Cards.attachSchema(
       type: String,
       optional: true,
       defaultValue: '',
+    },
+    cardDependencies: {
+      /**
+       * #3392: PI Program Board "Red Strings". Typed card-to-card dependencies.
+       * Each entry is { cardId, type, color, icon } where cardId points at
+       * another card (drawn when on the same board), type is one of
+       * DEPENDENCY_TYPE_IDS, color is the connection line / badge color and icon
+       * is a FontAwesome name. See models/metadata/dependencies.js.
+       */
+      type: Array,
+      optional: true,
+      defaultValue: [],
+    },
+    'cardDependencies.$': {
+      type: new SimpleSchema({
+        cardId: {
+          /** the target card _id this card is connected to */
+          type: String,
+        },
+        type: {
+          /** relation kind, one of DEPENDENCY_TYPE_IDS */
+          type: String,
+          optional: true,
+          defaultValue: DEFAULT_DEPENDENCY_TYPE,
+        },
+        color: {
+          /** connection line / minicard badge color (any CSS color) */
+          type: String,
+          optional: true,
+          defaultValue: DEFAULT_DEPENDENCY_COLOR,
+        },
+        icon: {
+          /** FontAwesome 4.7 icon name without the "fa-" prefix */
+          type: String,
+          optional: true,
+          defaultValue: DEFAULT_DEPENDENCY_ICON,
+        },
+      }),
     },
     vote: {
       /**
@@ -701,6 +1094,38 @@ Cards.attachSchema(
       optional: true,
       defaultValue: false,
     },
+    showListOnCard: {
+      /**
+       * show list name on the opened card? (Board Settings / Card, List title)
+       */
+      type: Boolean,
+      optional: true,
+    },
+    // Was the opened card's "On this card" choice. Since 2026-10-28 every
+    // card shows every field its board shows (models/lib/cardShownFields.js),
+    // so nothing reads or writes these two; kept so existing cards validate.
+    shownFields: {
+      /**
+       * legacy, not read: the fields this card once chose to show although empty
+       */
+      type: Array,
+      optional: true,
+    },
+    'shownFields.$': {
+      type: String,
+      allowedValues: CARD_SHOWN_FIELD_KEYS,
+    },
+    hiddenFields: {
+      /**
+       * legacy, not read: the fields this card once chose to hide
+       */
+      type: Array,
+      optional: true,
+    },
+    'hiddenFields.$': {
+      type: String,
+      allowedValues: CARD_SHOWN_FIELD_KEYS,
+    },
     showChecklistAtMinicard: {
       /**
        * show checklist on minicard?
@@ -720,7 +1145,19 @@ Cards.attachSchema(
   }),
 );
 
+
 Cards.helpers({
+  /** Kanboard-style whole-card recurrence: set (or clear, with 'none') this
+   * card's automatic-recurrence interval. Does not itself create anything -
+   * the periodic job in server/cardRecurrenceSchedule.js does that once the
+   * interval comes due. */
+  async setRecurrenceInterval(recurrenceInterval) {
+    if (!CARD_RECURRENCE_INTERVALS.includes(recurrenceInterval)) return undefined;
+    return await Cards.updateAsync(this._id, {
+      $set: { recurrenceInterval },
+    });
+  },
+
   // Gantt https://github.com/wekan/wekan/issues/2870#issuecomment-857171127
   async setGanttTargetId(sourceId, targetId, linkType, linkId){
     return await Cards.updateAsync({ _id: sourceId}, {
@@ -742,7 +1179,29 @@ Cards.helpers({
     });
   },
 
-  mapCustomFieldsToBoard(boardId) {
+  // Re-key this card's custom field VALUES onto the destination board's field
+  // definitions, matching by name and type. Returns a NEW array of NEW entries -
+  // the caller assigns it to the card being written.
+  //
+  // #6560: this was a synchronous function calling ReactiveCache.getCustomField(),
+  // which is async on the SERVER (it awaits findOneAsync) and synchronous only on
+  // the client. So on the server `oldCf` and `newCf` were Promises. A Promise is
+  // truthy, so `!oldCf` never fired and the `newCf` branch always did, and it
+  // assigned `newCf._id` - `undefined` on a Promise. The schema declares
+  // `customFields.$._id` as `optional: true, defaultValue: ''`, so collection2
+  // cleaned that undefined to `''` on the way to the database: every moved or
+  // copied card came out with its values intact and its field ids blanked, which
+  // no board can match to a definition. Nothing threw, so it was silent.
+  //
+  // Both lookups are awaited now, and so is `addBoard` - also async, and until the
+  // awaits above were added its branch was unreachable, so its missing await had
+  // never been exercised.
+  //
+  // The entries are rebuilt rather than mutated in place because `copy()` works on
+  // a shallow copy of the card "to avoid mutating the source card in
+  // ReactiveCache" - and the old `cf._id = …` reached straight through that copy
+  // into the source card's own objects, re-keying the card being copied FROM.
+  async mapCustomFieldsToBoard(boardId) {
     // Guard against undefined/null customFields
     if (!this.customFields || !Array.isArray(this.customFields)) {
       return [];
@@ -750,40 +1209,83 @@ Cards.helpers({
     // Map custom fields to new board
     const result = [];
     for (const cf of this.customFields) {
-        const oldCf = ReactiveCache.getCustomField(cf._id);
+        // An entry with no id has nothing to look up - and must not be looked up:
+        // getCustomField() defaults its selector to `{}`, so passing undefined
+        // would return an ARBITRARY custom field and re-key the value to it.
+        if (!cf || !cf._id) {
+            result.push({ ...cf });
+            continue;
+        }
+
+        const oldCf = await ReactiveCache.getCustomField(cf._id);
 
         // Check if oldCf is undefined or null
         if (!oldCf) {
             //console.error(`Custom field with ID ${cf._id} not found.`);
-            result.push(cf);  // Skip this field if oldCf is not found
+            result.push({ ...cf });  // Skip this field if oldCf is not found
             continue;
         }
 
-        const newCf = ReactiveCache.getCustomField({
+        const newCf = await ReactiveCache.getCustomField({
             boardIds: boardId,
             name: oldCf.name,
             type: oldCf.type,
         });
 
         if (newCf) {
-            cf._id = newCf._id;
-        } else if (!(oldCf.boardIds || []).includes(boardId)) {
-            oldCf.addBoard(boardId);
+            // The destination board has its own definition of the same field:
+            // point the value at it.
+            result.push({ ...cf, _id: newCf._id });
+            continue;
         }
 
-        result.push(cf);
+        // It has none, so share this one with the destination board and keep the
+        // value pointing at it.
+        if (!(oldCf.boardIds || []).includes(boardId)) {
+            await oldCf.addBoard(boardId);
+        }
+        result.push({ ...cf });
     }
     return result;
 },
 
 
-  async copy(boardId, swimlaneId, listId) {
+  async copy(boardId, swimlaneId, listId, cardIdMap = null, copyOptions, deferScrum = false) {
+    if (Meteor.isServer) {
+      await require('/server/lib/cardCopyDestination').requireCardCopyDestination(boardId, swimlaneId, listId);
+    }
     const oldId = this._id;
     const oldCard = await ReactiveCache.getCard(oldId);
 
     // Work on a shallow copy to avoid mutating the source card in ReactiveCache
     const cardData = { ...this };
+    if (Meteor.isServer) {
+      const { DDP } = require('meteor/ddp');
+      const { currentReportRequest } = require('/server/lib/requestReportContext');
+      const actor = DDP._CurrentMethodInvocation.get()?.userId || currentReportRequest()?.userId;
+      if (actor) {
+        const policy = await require('/server/lib/adminOnlyCustomFields').fieldPolicy(actor);
+        const { mayReadField } = require('/models/lib/adminOnlyCustomFields');
+        cardData.customFields = (cardData.customFields || []).filter(field =>
+          mayReadField(policy.definitions.get(field._id), this.boardId, policy.adminBoards));
+      }
+    }
+    const { copiedCardScrum } = require('./lib/scrumCopy');
+    delete cardData.scrum;
+    delete cardData.scrumRevision;
+    // On another board: its sprint and release linked by name (scrumCopy.js).
+    const planning = Meteor.isServer && this.boardId !== boardId
+      ? await require('/server/lib/scrumPlanningPair').scrumPlanningPair(this.boardId, boardId) : null;
+    Object.assign(cardData, copiedCardScrum(this, boardId, { omit: deferScrum || copyOptions?.scrum === false, planning }));
     delete cardData._id;
+    // getRealId() caches __id on rendered cards; it is not a schema field.
+    delete cardData.__id;
+    // A copy is independent work, not a second target for the same source item.
+    delete cardData.syncExternalId;
+    delete cardData.syncSourceType;
+    delete cardData.syncSourceKey;
+    delete cardData.syncLastSource;
+    delete cardData.syncClosedByWeKan;
 
     // Normalize customFields to ensure it's always an array
     if (!Array.isArray(cardData.customFields)) {
@@ -793,63 +1295,164 @@ Cards.helpers({
     // we must only copy the labels and custom fields if the target board
     // differs from the source board
     if (this.boardId !== boardId) {
+      // A board may have no `labels` array (e.g. one created via the REST API,
+      // which does not seed default labels); crossBoardLabelIds reads either
+      // board's labels defensively.
       const oldBoard = await ReactiveCache.getBoard(this.boardId);
-      const oldBoardLabels = oldBoard.labels;
-
-      // Get old label names
-      const oldCardLabels = oldBoardLabels.filter(label => {
-          return (this.labelIds || []).includes(label._id);
-        }).map(x => x.name);
 
       const newBoard = await ReactiveCache.getBoard(boardId);
-      const newBoardLabels = newBoard.labels;
-      const newCardLabels = newBoardLabels.filter(label => {
-          return oldCardLabels.includes(label.name);
-        }).map(x => x._id);
-      cardData.labelIds = newCardLabels;
+      // #2970: only labels named on both boards are matched, never unnamed
+      // ones; #1759: a missing named label is created on the destination board
+      // when the actor is its admin (crossBoardLabelIds above).
+      cardData.labelIds = copyOptions ? (copyOptions.labels ? [...(this.labelIds || [])] : [])
+        : await crossBoardLabelIds(this, oldBoard, newBoard);
 
-      this.customFields = this.mapCustomFieldsToBoard(newBoard._id);
+      // A scoped board copy clones definitions and remaps their IDs after the
+      // cards exist. Do not share/mutate the source definitions on this path.
+      // A whole-board copy clones the definitions first and passes their new
+      // ids; a value whose field was not cloned is dropped, never left
+      // pointing at the source board's field.
+      const fieldIds = copyOptions && copyOptions.customFieldIdMap;
+      cardData.customFields = copyOptions
+        ? (copyOptions.customFields
+          ? (cardData.customFields || []).map(field => ({ ...field, _id: fieldIds ? fieldIds[field._id] : field._id }))
+            .filter(field => field._id)
+          : [])
+        : await this.mapCustomFieldsToBoard.call({ customFields: cardData.customFields }, newBoard._id);
     }
 
-    delete this._id;
-    this.boardId = boardId;
+    cardData.boardId = boardId;
     const board = await ReactiveCache.getBoard(boardId);
-    this.cardNumber = await board.getNextCardNumber();
-    this.swimlaneId = swimlaneId;
-    this.listId = listId;
-    const _id = await Cards.insertAsync(this);
+    cardData.cardNumber = await board.getNextCardNumber();
+    cardData.swimlaneId = swimlaneId;
+    cardData.listId = listId;
+
+    // #3392: PI Program Board "Red Strings". For a single-card copy keep only
+    // dependencies whose target card is also present on the destination board,
+    // so same-board copies keep their links and cross-board copies drop
+    // dangling ones. For a whole-board/swimlane copy a cardIdMap is supplied
+    // and the old ids are remapped by the caller once every card has been
+    // copied, so leave them untouched here.
+    if (!cardIdMap) {
+      const deps = normalizeDependencies(this.cardDependencies);
+      const keptDeps = [];
+      for (const dep of deps) {
+        const target = await ReactiveCache.getCard(dep.cardId);
+        if (target && target.boardId === boardId) {
+          keptDeps.push(dep);
+        }
+      }
+      cardData.cardDependencies = keptDeps;
+    } else {
+      // Normalize so the post-copy remap (board/swimlane copy) sees objects.
+      cardData.cardDependencies = normalizeDependencies(this.cardDependencies);
+    }
+
+    if (copyOptions && !copyOptions.labels) cardData.labelIds = [];
+    if (copyOptions && !copyOptions.attachments) delete cardData.coverId;
+    // #6800: only values of fields of the destination board.
+    cardData.customFields = await customFieldsForBoard(cardData.customFields, boardId, fieldDefinitionNow);
+    const _id = await Cards.insertAsync(cardData);
+
+    // #3392: record old->new id so a whole-board/swimlane copy can remap
+    // cardDependencies (Red Strings) after every card has been copied.
+    if (cardIdMap) {
+      cardIdMap[oldId] = _id;
+    }
 
     // Copy attachments (server-only — requires filesystem access)
-    if (Meteor.isServer) {
+    if (Meteor.isServer && (!copyOptions || copyOptions.attachments)) {
       const { copyFile } = require('./lib/fileStoreStrategy.js');
       const { fileStoreStrategyFactory } = require('./attachments.server');
-      const attachmentList = await ReactiveCache.getAttachments({ 'meta.cardId': oldId });
+      const attachmentList = await ReactiveCache.getAttachments(liveAttachments({ 'meta.cardId': oldId }));
       for (const att of attachmentList) {
-        copyFile(att, _id, fileStoreStrategyFactory);
+        await copyFile(att, _id, fileStoreStrategyFactory);
+      }
+
+      // #5364: "show as thumb" / cover is stored as coverId pointing at an
+      // attachment id. The attachments above are copied with NEW ids, so the
+      // old coverId no longer resolves on the copy and the cover is lost.
+      // Each copied attachment records its origin in meta.copyFrom, so build an
+      // old->new attachment id map and remap coverId to the new attachment id.
+      const sourceCoverId = oldCard ? oldCard.coverId : this.coverId;
+      if (sourceCoverId) {
+        // Attachments have finished copying; resolve their new cover ID.
+        let newCoverId;
+        for (let attempt = 0; attempt < 20 && !newCoverId; attempt += 1) {
+          const copied = await ReactiveCache.getAttachments({
+            'meta.cardId': _id,
+            'meta.copyFrom': sourceCoverId,
+          });
+          if (Array.isArray(copied) && copied.length > 0) {
+            const oldToNew = { [sourceCoverId]: copied[0]._id };
+            newCoverId = remapCoverId(sourceCoverId, oldToNew);
+          } else {
+            await new Promise(resolve => setTimeout(resolve, 100));
+          }
+        }
+        if (newCoverId) {
+          await Cards.updateAsync(_id, { $set: { coverId: newCoverId } });
+        } else {
+          // The cover attachment could not be remapped (e.g. its binary was
+          // missing and copyFile skipped it). Drop the stale coverId so the
+          // copy does not reference a non-existent attachment.
+          await Cards.updateAsync(_id, { $unset: { coverId: '' } });
+        }
       }
     }
 
     // copy checklists
-    const checklists = await ReactiveCache.getChecklists({ cardId: oldId });
+    const checklists = !copyOptions || copyOptions.checklists ? await ReactiveCache.getChecklists({ cardId: oldId }) : [];
     for (const ch of checklists) {
       await ch.copy(_id);
     }
 
-    // copy subtasks
-    const subtasks = await ReactiveCache.getCards({ parentId: oldId });
+    // copy subtasks (#5874-class data bug: previously the copied subtasks kept
+    // the SOURCE board's boardId/swimlaneId/listId, so copying a card to another
+    // board left orphaned subtasks on the old board pointing at a parent on the
+    // new board — and it mutated the cached source docs). Re-home them onto the
+    // destination board alongside the copied parent.
+    const { buildCopiedSubtaskFields } = require('./lib/subtaskCopy');
+    // #3626: a subtask shared with another parent is copied too, under the copy.
+    let subtasks = copyOptions ? [] : await ReactiveCache.getCards(childrenSelector(oldId));
+    if (Meteor.isServer && subtasks.length) {
+      // Only the subtasks the copier could read and copy themselves
+      // (models/lib/boardCardScope.js copyableSubtasks). A copy with no
+      // acting user (a server-internal copy) keeps them all, as before.
+      const { DDP } = require('meteor/ddp');
+      const { currentReportRequest } = require('/server/lib/requestReportContext');
+      const actor = DDP._CurrentMethodInvocation.get()?.userId || currentReportRequest()?.userId;
+      if (actor) {
+        const { copyableSubtasks } = require('./lib/boardCardScope');
+        const { canReadBoard } = require('./lib/boardVisibility');
+        const boards = new Map();
+        for (const id of new Set(subtasks.map(subtask => subtask.boardId))) boards.set(id, await ReactiveCache.getBoard(id));
+        subtasks = copyableSubtasks(subtasks, actor, id => boards.get(id), canReadBoard);
+      }
+    }
     for (const subtask of subtasks) {
-      subtask.parentId = _id;
-      subtask._id = null;
-      await Cards.insertAsync(subtask);
+      const copySubtask = buildCopiedSubtaskFields(subtask, {
+        newParentId: _id,
+        boardId,
+        swimlaneId,
+        listId,
+        planning: subtask.boardId === this.boardId ? planning : null,
+      });
+      copySubtask.customFields = await customFieldsForBoard(copySubtask.customFields, boardId, fieldDefinitionNow);
+      const newSubtaskId = await Cards.insertAsync(copySubtask);
+      // #3185: copy the subtask's checklists (and their items) too — previously
+      // the subtask was inserted as a bare card, so it came out empty.
+      const subChecklists = await ReactiveCache.getChecklists({ cardId: subtask._id });
+      for (const ch of subChecklists) {
+        await ch.copy(newSubtaskId);
+      }
     }
 
-    // copy card comments
-    const comments = await ReactiveCache.getCardComments({ cardId: oldId });
+    // copy card comments (#5166: re-home them onto the destination board)
+    const comments = !copyOptions || copyOptions.comments ? await ReactiveCache.getCardComments({ cardId: oldId }) : [];
     for (const cmt of comments) {
-      await cmt.copy(_id);
+      await cmt.copy(_id, boardId);
     }
-    // restore the id, otherwise new copies will fail
-    this._id = oldId;
 
     return _id;
   },
@@ -863,7 +1466,10 @@ Cards.helpers({
     linkCard.swimlaneId = swimlaneId;
     linkCard.listId = listId;
     linkCard.type = 'cardType-linkedCard';
+    // #6800: only values of fields of `boardId`.
+    linkCard.customFields = await customFieldsForBoard(linkCard.customFields, boardId, fieldDefinitionNow);
     delete linkCard._id;
+    delete linkCard.__id;
     // TODO shall we copy the labels for a linked card?!
     delete linkCard.labelIds;
     return await Cards.insertAsync(linkCard);
@@ -891,6 +1497,18 @@ Cards.helpers({
       }
     }
     return this.__id;
+  },
+
+  // A linked card owns only its placement. Displayed content comes from the
+  // source card so the link remains a live mirror instead of a stale snapshot.
+  getRealCard() {
+    if (!this.isLinkedCard()) return this;
+    return ReactiveCache.getCard(this.linkedId) || this;
+  },
+
+  getRealBoard() {
+    const card = this.getRealCard();
+    return ReactiveCache.getBoard(card.boardId) || this.board();
   },
 
   getList() {
@@ -933,17 +1551,18 @@ Cards.helpers({
   },
 
   labels() {
-    const board = this.board();
+    const card = this.getRealCard();
+    const board = ReactiveCache.getBoard(card.boardId);
     if (!board) return [];
     const boardLabels = board.labels;
     const cardLabels = (boardLabels || []).filter(label => {
-      return (this.labelIds || []).includes(label._id);
+      return (card.labelIds || []).includes(label._id);
     });
     return cardLabels;
   },
 
   hasLabel(labelId) {
-    return (this.labelIds || []).includes(labelId);
+    return (this.getRealCard().labelIds || []).includes(labelId);
   },
 
   /** returns the sort number of a list
@@ -994,7 +1613,7 @@ Cards.helpers({
   },
 
   user() {
-    return ReactiveCache.getUser(this.userId);
+    return ReactiveCache.getUser(this.getCreatorId());
   },
 
   isAssigned(memberId) {
@@ -1036,8 +1655,11 @@ Cards.helpers({
   },
 
   attachments() {
+    // Live attachments only (History.md §12.1): a soft-deleted one is invisible
+    // on the card, in its count and on the minicard badge, and is reached
+    // through the card history instead.
     const ret = ReactiveCache.getAttachments(
-      { 'meta.cardId': this.getRealId() },
+      liveAttachments({ 'meta.cardId': this.getRealId() }),
       { sort: { uploadedAt: -1 } },
       true,
     ).each();
@@ -1045,8 +1667,14 @@ Cards.helpers({
   },
 
   cover() {
-    if (!this.coverId) return false;
-    const cover = ReactiveCache.getAttachment(this.coverId);
+    // #5666: resolve the cover id through the real card for linked cards (a
+    // linked card has no coverId of its own), matching the other linked-card
+    // getters; a plain card resolves to its own coverId.
+    const coverId = resolveCoverId(this, id => ReactiveCache.getCard(id));
+    if (!coverId) return false;
+    const cover = ReactiveCache.getAttachment(coverId);
+    // A soft-deleted attachment is never a cover (History.md §12.1).
+    if (!isLiveAttachment(cover)) return false;
     // if we return a cover before it is fully stored, we will get errors when we try to display it
     // todo XXX we could return a default "upload pending" image in the meantime?
     return cover && cover.link() && cover;
@@ -1105,7 +1733,7 @@ Cards.helpers({
   },
 
   subtasks() {
-    const ret = ReactiveMiniMongoIndex.getSubTasksWithParentId(this._id, {
+    const ret = ReactiveMiniMongoIndex.getSubTasksWithParentId(this.getRealId(), {
         archived: false,
       }, {
         sort: {
@@ -1117,14 +1745,17 @@ Cards.helpers({
   },
 
   subtasksFinished() {
-    const ret = ReactiveMiniMongoIndex.getSubTasksWithParentId(this._id, {
-      archived: true,
+    // #4693: a subtask is finished when it is archived OR marked complete
+    // (dueComplete, ticked in the parent's Subtasks list) -
+    // models/lib/subtaskDone.js isSubtaskDone, the same rule as the heading.
+    const ret = ReactiveMiniMongoIndex.getSubTasksWithParentId(this.getRealId(), {
+      $or: [{ archived: true }, { dueComplete: true }],
     });
     return ret;
   },
 
   allSubtasks() {
-    const ret = ReactiveMiniMongoIndex.getSubTasksWithParentId(this._id);
+    const ret = ReactiveMiniMongoIndex.getSubTasksWithParentId(this.getRealId());
     return ret;
   },
 
@@ -1148,91 +1779,103 @@ Cards.helpers({
   },
 
   customFieldIndex(customFieldId) {
-    return (this.customFields || []).map(x => x._id).indexOf(customFieldId);
+    return (this.getRealCard().customFields || []).map(x => x._id).indexOf(customFieldId);
   },
 
   // customFields with definitions
   customFieldsWD() {
-    // get all definitions
-    const definitions = ReactiveCache.getCustomFields({
-      boardIds: { $in: [this.boardId] },
+    const card = this.getRealCard();
+    // get all definitions attached to this card's CURRENT board
+    let definitions = ReactiveCache.getCustomFields({
+      boardIds: { $in: [card.boardId] },
     });
     if (!definitions) {
       return {};
     }
-    // match right definition to each field
-    if (!this.customFields) return [];
-    const ret = this.customFields.map(customField => {
-      const definition = definitions.find(definition => {
-        return definition._id === customField._id;
-      });
-      if (!definition) {
-        return {};
-      }
-      //search for "True Value" which is for DropDowns other then the Value (which is the id)
-      let trueValue = customField.value;
-      if (
-        definition.settings.dropdownItems &&
-        definition.settings.dropdownItems.length > 0
-      ) {
-        for (let i = 0; i < definition.settings.dropdownItems.length; i++) {
-          if (definition.settings.dropdownItems[i]._id === customField.value) {
-            trueValue = definition.settings.dropdownItems[i].name;
-          }
-        }
-      }
-      return {
-        _id: customField._id,
-        value: customField.value,
-        trueValue,
-        definition,
-      };
-    });
-    // at linked cards custom fields definition is not found
-    ret.sort(
-      (a, b) =>
-        a.definition !== undefined &&
-        b.definition !== undefined &&
-        a.definition.name !== undefined &&
-        b.definition.name !== undefined &&
-        a.definition.name.localeCompare(b.definition.name),
-    );
-    return ret;
+    // #3141: an "Admin only" custom field's VALUE is invisible to anyone who
+    // is not a board admin - on the card detail view and the minicard alike,
+    // since both render off this one shared helper. Filtering the definition
+    // out here, before buildCustomFieldsWD() ever matches a value to it, is
+    // the single choke point for every render call site at once, the same
+    // way an unmatched/deleted definition is already skipped (#3748 above).
+    // #6745: by id, not the user document - this runs once per minicard, and the
+    // whole user document changes on every card open. Same test as
+    // Users.isBoardAdmin(boardId): board.hasAdmin(userId).
+    const currentUserId = Meteor.userId && Meteor.userId();
+    const cardBoard = currentUserId ? ReactiveCache.getBoard(card.boardId) : null;
+    const isBoardAdmin = !!(cardBoard && cardBoard.hasAdmin(currentUserId));
+    const { buildCustomFieldsWD, filterAdminOnlyDefinitions } = require('./lib/customFieldsWD');
+    definitions = filterAdminOnlyDefinitions(definitions, isBoardAdmin);
+    // #2012: a field that belongs to other card kinds is not shown here.
+    const { definitionAppliesToKind } = require('./lib/cardKinds');
+    definitions = definitions.filter(d => definitionAppliesToKind(d, card.cardKind));
+    // #3748: entries whose definition is unavailable are skipped rather than
+    // becoming phantom `{}` rows. For a linked card both values and definitions
+    // now come from its source board publication.
+    return buildCustomFieldsWD(card.customFields, definitions);
+  },
+
+  // #4756: the card's own colour, else its list's when the list asks for it
+  // (models/lib/cardDisplayColor.js). The list is the one this card is shown
+  // in, so a linked card follows the list it sits in.
+  displayColor() {
+    const card = this.getRealCard();
+    if (card.color) return card.color;
+    const { effectiveCardColor } = require('/models/lib/cardDisplayColor');
+    const list = this.listId ? ReactiveCache.getList(this.listId) : null;
+    return effectiveCardColor(card, list && typeof list.then !== 'function' ? list : null);
   },
 
   colorClass() {
-    if (this.color) return this.color;
+    const color = this.displayColor();
+    // #5514: a custom '#rrggbb' hex has no CSS class (templates prepend
+    // `minicard-` / `card-details-`); it is applied inline via colorStyle().
+    if (color && !isHexColor(color)) return color;
     return '';
   },
 
-  absoluteUrl() {
+  colorStyle() {
+    const color = this.displayColor();
+    // #5514: for a custom hex color, set the background inline plus an
+    // automatically readable text color. Empty for named colors.
+    if (isHexColor(color)) {
+      return `background-color:${color} !important;color:${contrastText(color)} !important;`;
+    }
+    return '';
+  },
+
+  absoluteUrl(board) {
     // Built from the relative path instead of FlowRouter.url(): FlowRouter is
     // client-only and returns a generic link when called on the server (card
     // activity notification emails). Meteor.absoluteUrl() works on both sides
-    // and expects no leading slash.
-    const relativeUrl = this.originRelativeUrl();
+    // and expects no leading slash. On the server pass the already-awaited board
+    // (see originRelativeUrl) so the slug/boardId are not read off a Promise.
+    const relativeUrl = this.originRelativeUrl(board);
     if (!relativeUrl) return undefined;
     return Meteor.absoluteUrl(relativeUrl.replace(/^\//, ''));
   },
-  originRelativeUrl() {
-    const board = this.board();
-    if (!board) return undefined;
-    // Matches the 'card' route '/b/:boardId/:slug/:cardId' (config/router.js).
-    // swimlaneId/listId were only ever appended as query params the route
-    // ignores, so they are dropped here.
-    return `/b/${board._id}/${board.slug || 'board'}/${this._id}`;
+  originRelativeUrl(board) {
+    // On the server ReactiveCache.getBoard() (used by this.board()) is async and
+    // returns a Promise, so callers there (e.g. activity notification emails) must
+    // pass the already-awaited board. Without it we would interpolate a Promise and
+    // emit '/b/undefined/board/<cardId>' (issue #6427). buildCardRelativeUrl detects
+    // that case and falls back to this.boardId. See models/lib/cardUrl.js.
+    const { buildCardRelativeUrl } = require('./lib/cardUrl');
+    return buildCardRelativeUrl(this, board || this.board());
   },
 
   canBeRestored() {
     const list = ReactiveCache.getList(this.listId);
-    if (
-      !list.getWipLimit('soft') &&
-      list.getWipLimit('enabled') &&
-      list.getWipLimit('value') === list.cards().length
-    ) {
-      return false;
-    }
-    return true;
+    // A list that is gone cannot hold it either; the restore asks for another.
+    if (!list) return false;
+    // #6772: full - or over - a hard limit blocks (models/lib/wipRestore.js).
+    // #2095: WIP limit must count ALL cards in the list, not only the ones
+    // currently visible through an active filter (cards() applies the filter).
+    return !wipLimitBlocksRestore({
+      enabled: list.getWipLimit('enabled'),
+      soft: list.getWipLimit('soft'),
+      value: list.getWipLimit('value'),
+    }, list.cardsUnfiltered().length);
   },
 
   parentCard() {
@@ -1241,6 +1884,11 @@ Cards.helpers({
       ret = ReactiveCache.getCard(this.parentId);
     }
     return ret;
+  },
+
+  // #3626: every parent card, primary first.
+  parentCards() {
+    return cardParentIds(this).map(id => ReactiveCache.getCard(id)).filter(Boolean);
   },
 
   parentCardName() {
@@ -1263,8 +1911,10 @@ Cards.helpers({
         // maybe it has been deleted
         break;
       }
-      if (crtParentId in result) {
-        // circular reference
+      if (result.includes(crtParentId)) {
+        // #3328: circular reference. Compare by VALUE, not by array index.
+        // `crtParentId in result` tested array indices ("0","1",...) and never
+        // matched, so a cyclic parent chain looped here forever.
         break;
       }
       result.unshift(crtParentId);
@@ -1283,8 +1933,10 @@ Cards.helpers({
         // maybe it has been deleted
         break;
       }
-      if (crtParentId in resultId) {
-        // circular reference
+      if (resultId.includes(crtParentId)) {
+        // #3328: circular reference. Compare by VALUE, not by array index.
+        // `crtParentId in resultId` tested array indices ("0","1",...) and never
+        // matched, so a cyclic parent chain looped here forever.
         break;
       }
       resultId.unshift(crtParentId);
@@ -1322,11 +1974,18 @@ Cards.helpers({
     return this.isLinkedCard() || this.isLinkedBoard();
   },
 
-  setDescription(description) {
+  async setDescription(description) {
+    // History.md §10.2: the first content group. The PREVIOUS text is read
+    // before the write - once the update lands it is gone, which is why a
+    // description could never be restored before this.
+    // The change itself is recorded by the field-diffing hook in
+    // server/models/changeHistoryHooks.js, not here. Recording it in both
+    // places would put two rows on one edit - and the hook also catches the
+    // REST API, the importers and the rules engine, none of which call this.
     if (this.isLinkedBoard()) {
-      return Boards.updateAsync({ _id: this.linkedId }, { $set: { description } });
+      await Boards.updateAsync({ _id: this.linkedId }, { $set: { description } });
     } else {
-      return Cards.updateAsync({ _id: this.getRealId() }, { $set: { description } });
+      await Cards.updateAsync({ _id: this.getRealId() }, { $set: { description } });
     }
   },
 
@@ -1364,7 +2023,9 @@ Cards.helpers({
         });
       }
     } else {
-      return this.members;
+      // #3697: heal legacy data where members was stored as null (older REST
+      // writes) so UI callers always get an array to edit.
+      return this.members || [];
     }
   },
 
@@ -1386,88 +2047,55 @@ Cards.helpers({
         });
       }
     } else {
-      return this.assignees;
+      // #3697: heal legacy data where assignees was stored as null.
+      return this.assignees || [];
     }
   },
 
-  assignMember(memberId) {
-    let ret;
-    if (this.isLinkedBoard()) {
-      const board = ReactiveCache.getBoard(this.linkedId);
-      ret = board.addMember(memberId);
-    } else {
-      ret = Cards.updateAsync(
-        { _id: this.getRealId() },
-        { $addToSet: { members: memberId } },
-      );
-    }
-    return ret;
+  getRequesters() {
+    const card = this.isLinkedCard() ? ReactiveCache.getCard(this.linkedId) : this;
+    return card ? card.requesters || [] : null;
   },
 
-  assignAssignee(assigneeId) {
-    if (this.isLinkedCard()) {
-      return Cards.updateAsync(
-        { _id: this.linkedId },
-        { $addToSet: { assignees: assigneeId } },
-      );
-    } else if (this.isLinkedBoard()) {
-      const board = ReactiveCache.getBoard(this.linkedId);
-      return board.addAssignee(assigneeId);
-    } else {
-      return Cards.updateAsync(
-        { _id: this._id },
-        { $addToSet: { assignees: assigneeId } },
-      );
-    }
+  getAssigners() {
+    const card = this.isLinkedCard() ? ReactiveCache.getCard(this.linkedId) : this;
+    return card ? card.assigners || [] : null;
   },
 
-  unassignMember(memberId) {
-    if (this.isLinkedCard()) {
-      return Cards.updateAsync(
-        { _id: this.linkedId },
-        { $pull: { members: memberId } },
-      );
-    } else if (this.isLinkedBoard()) {
-      const board = ReactiveCache.getBoard(this.linkedId);
-      return board.removeMember(memberId);
-    } else {
-      return Cards.updateAsync({ _id: this._id }, { $pull: { members: memberId } });
-    }
+  // #3392: PI Program Board "Red Strings". Return this card's dependencies as
+  // normalized { cardId, type, color, icon } objects (legacy bare-string ids are
+  // upgraded on read).
+  getDependencies() {
+    return normalizeDependencies(this.getRealCard().cardDependencies);
   },
 
-  unassignAssignee(assigneeId) {
-    if (this.isLinkedCard()) {
-      return Cards.updateAsync(
-        { _id: this.linkedId },
-        { $pull: { assignees: assigneeId } },
-      );
-    } else if (this.isLinkedBoard()) {
-      const board = ReactiveCache.getBoard(this.linkedId);
-      return board.removeAssignee(assigneeId);
-    } else {
-      return Cards.updateAsync(
-        { _id: this._id },
-        { $pull: { assignees: assigneeId } },
-      );
+  // #3392 / #6732: Board Dependencies are changed through server methods
+  // (server/models/dependencies.js) under one rule: a role that may edit OR
+  // move cards - a Worker included - on cards the user can see. Direct card
+  // writes allowed only full editors, and only by rewriting the whole card.
+  // Add (or update) a typed dependency to another card on the same board.
+  addDependency(targetCardId, options = {}) {
+    const realCard = this.getRealCard();
+    if (!targetCardId || targetCardId === realCard._id) {
+      return undefined;
     }
+    const target = ReactiveCache.getCard(targetCardId);
+    if (!target || target.boardId !== realCard.boardId) {
+      return undefined;
+    }
+    return Meteor.callAsync('setBoardDependency', this.getRealId(), targetCardId, options);
   },
 
-  toggleMember(memberId) {
-    const members = this.getMembers();
-    if (members && members.indexOf(memberId) > -1) {
-      return this.unassignMember(memberId);
-    } else {
-      return this.assignMember(memberId);
+  // Update a single property (type/color/icon) of an existing dependency.
+  setDependencyProps(targetCardId, props = {}) {
+    if (!this.getDependencies().some(dep => dep.cardId === targetCardId)) {
+      return undefined;
     }
+    return Meteor.callAsync('setBoardDependency', this.getRealId(), targetCardId, props);
   },
 
-  toggleAssignee(assigneeId) {
-    const assignees = this.getAssignees();
-    if (assignees && assignees.indexOf(assigneeId) > -1) {
-      return this.unassignAssignee(assigneeId);
-    } else {
-      return this.assignAssignee(assigneeId);
-    }
+  removeDependency(targetCardId) {
+    return Meteor.callAsync('removeBoardDependency', this.getRealId(), targetCardId);
   },
 
   getReceived() {
@@ -1552,6 +2180,20 @@ Cards.helpers({
     } else {
       return Cards.updateAsync({ _id: this.getRealId() }, { $set: { dueAt } });
     }
+  },
+
+  // Number of times this card's due date has been set/changed (issue #6081).
+  // Each due-date change is logged as an activity with activityType 'a-dueAt'
+  // (see server/models/cards.js before.update hook), so counting those
+  // activities gives the change count. Read-only; used in the card detail to
+  // show accountability for moved deadlines.
+  getDueDateChangeCount() {
+    const cardId = this.isLinkedCard() ? this.linkedId : this.getRealId();
+    const activities = ReactiveCache.getActivities({
+      cardId,
+      activityType: 'a-dueAt',
+    });
+    return Array.isArray(activities) ? activities.length : 0;
   },
 
   getEnd() {
@@ -1656,6 +2298,180 @@ Cards.helpers({
     } else {
       return Cards.updateAsync({ _id: this.getRealId() }, { $set: { spentTime } });
     }
+  },
+
+  // Adds a finished session to the total, where the total is kept: the linked
+  // board, the linked card, or this card. An $inc, not read-and-$set: the
+  // client's copy of a linked board or card can still be on its way (it is
+  // published after the card that links to it), and getSpentTime() then reads
+  // null - a Stop at that moment replaced a board's 4 logged hours with the 1
+  // hour of the session. The server adds to what it has, whatever the client
+  // has seen.
+  addSpentTime(hours) {
+    const amount = Number(hours);
+    if (!Number.isFinite(amount) || amount <= 0) return null;
+    if (this.isLinkedBoard()) {
+      return Boards.updateAsync({ _id: this.linkedId }, { $inc: { spentTime: amount } });
+    }
+    return Cards.updateAsync({ _id: this.getRealId() }, { $inc: { spentTime: amount } });
+  },
+
+  // Flowtime (#3919) session helpers. These mirror the shape of
+  // setSpentTime()/setIsOvertime() above, but do not follow linked
+  // cards/boards - a Flowtime session belongs to one person working on one
+  // card right now, not to whatever the card links to.
+  getFlowStartAt() {
+    return this.flowStartAt;
+  },
+
+  getFlowInterruptions() {
+    return this.flowInterruptions || 0;
+  },
+
+  getFlowUserId() {
+    return this.flowUserId;
+  },
+
+  isFlowActive() {
+    return !!this.flowStartAt;
+  },
+
+  startFlowSession(userId) {
+    return Cards.updateAsync(
+      { _id: this._id },
+      { $set: { flowStartAt: new Date(), flowInterruptions: 0, flowUserId: userId } },
+    );
+  },
+
+  addFlowInterruption() {
+    return Cards.updateAsync(
+      { _id: this._id },
+      { $inc: { flowInterruptions: 1 } },
+    );
+  },
+
+  // Stops the active Flowtime session: adds its duration (in hours) into the
+  // existing spentTime field via setSpentTime() - the same method the manual
+  // time-entry popup uses - and clears the session fields.
+  async stopFlowSession() {
+    if (!this.flowStartAt) return null;
+    const elapsedHours =
+      (Date.now() - new Date(this.flowStartAt).getTime()) / (1000 * 60 * 60);
+    await this.addSpentTime(elapsedHours);
+    return Cards.updateAsync(
+      { _id: this._id },
+      { $set: { flowStartAt: null, flowInterruptions: 0, flowUserId: null } },
+    );
+  },
+
+  // Pomodoro (#4862) session helpers. Additive and separate from the
+  // Flowtime helpers above - same shape, different technique (fixed
+  // intervals rather than open-ended).
+  BREAK_MINUTES: 5,
+  LONG_BREAK_MINUTES: 15,
+
+  getPomodoroStartAt() {
+    return this.pomodoroStartAt;
+  },
+
+  getPomodoroPhase() {
+    return this.pomodoroPhase;
+  },
+
+  getPomodoroCount() {
+    return this.pomodoroCount || 0;
+  },
+
+  getPomodoroUserId() {
+    return this.pomodoroUserId;
+  },
+
+  getPomodoroWorkMinutes() {
+    return this.pomodoroWorkMinutes || 25;
+  },
+
+  isPomodoroActive() {
+    return !!this.pomodoroStartAt && !!this.pomodoroPhase;
+  },
+
+  // Every 4th completed work interval gets the longer break (the standard
+  // Pomodoro Technique rule) - a plain modulo check on the count.
+  getPomodoroBreakMinutes() {
+    const count = this.getPomodoroCount();
+    return count > 0 && count % 4 === 0
+      ? this.LONG_BREAK_MINUTES
+      : this.BREAK_MINUTES;
+  },
+
+  startPomodoro(userId, workMinutes) {
+    return Cards.updateAsync(
+      { _id: this._id },
+      {
+        $set: {
+          pomodoroStartAt: new Date(),
+          pomodoroPhase: 'work',
+          pomodoroUserId: userId,
+          pomodoroWorkMinutes: workMinutes || this.getPomodoroWorkMinutes(),
+        },
+      },
+    );
+  },
+
+  // Called when a work interval's countdown reaches zero: adds the interval
+  // duration (in hours) into the existing spentTime field - the one the
+  // manual time-entry popup edits - with addSpentTime(), increments the
+  // completed-interval count, and switches to a break interval.
+  async completePomodoroWorkInterval() {
+    if (!this.pomodoroStartAt || this.pomodoroPhase !== 'work') return null;
+    const workHours = this.getPomodoroWorkMinutes() / 60;
+    await this.addSpentTime(workHours);
+    const newCount = this.getPomodoroCount() + 1;
+    return Cards.updateAsync(
+      { _id: this._id },
+      {
+        $set: {
+          pomodoroStartAt: new Date(),
+          pomodoroPhase: 'break',
+          pomodoroCount: newCount,
+        },
+      },
+    );
+  },
+
+  // Called when a break interval's countdown reaches zero: goes back to
+  // ready-to-start rather than auto-starting the next work interval.
+  completePomodoroBreakInterval() {
+    if (!this.pomodoroStartAt || this.pomodoroPhase !== 'break') return null;
+    return Cards.updateAsync(
+      { _id: this._id },
+      { $set: { pomodoroStartAt: null, pomodoroPhase: null } },
+    );
+  },
+
+  // Stop/Reset: clears all Pomodoro fields back to their empty/null
+  // defaults. If stopped mid-work-interval, credits the partial elapsed
+  // time to spentTime (consistent with how Flowtime's stopFlowSession()
+  // credits an interrupted session above); a break interval adds no time.
+  async stopPomodoro() {
+    if (!this.pomodoroStartAt) return null;
+    if (this.pomodoroPhase === 'work') {
+      const elapsedHours =
+        (Date.now() - new Date(this.pomodoroStartAt).getTime()) /
+        (1000 * 60 * 60);
+      await this.addSpentTime(elapsedHours);
+    }
+    return Cards.updateAsync(
+      { _id: this._id },
+      {
+        $set: {
+          pomodoroStartAt: null,
+          pomodoroPhase: null,
+          pomodoroCount: 0,
+          pomodoroUserId: null,
+          pomodoroWorkMinutes: 25,
+        },
+      },
+    );
   },
 
   getVoteQuestion() {
@@ -1958,11 +2774,11 @@ Cards.helpers({
   getTitle() {
     if (this.isLinkedCard()) {
       const card = ReactiveCache.getCard(this.linkedId);
-      if (card === undefined) {
-        return null;
-      } else {
-        return card.title;
-      }
+      // A user may see the linked card's destination board without being a
+      // member of its private source board.  In that case the source is
+      // deliberately not published; retain the title copied into the linked
+      // card instead of rendering an empty minicard.
+      return card === undefined ? (this.title ?? null) : card.title;
     } else if (this.isLinkedBoard()) {
       const board = ReactiveCache.getBoard(this.linkedId);
       if (board === undefined) {
@@ -1978,7 +2794,15 @@ Cards.helpers({
   },
 
   getCardNumber() {
-    return this.cardNumber;
+    return this.getRealCard().cardNumber;
+  },
+
+  // The card's number as people see and search it: KEY-7 with its board's key
+  // (#2449, #2450), #7 for a board that has none yet.
+  getCardKey() {
+    const card = this.getRealCard();
+    const board = card && ReactiveCache.getBoard(card.boardId);
+    return formatCardKey(board && board.key, card && card.cardNumber);
   },
 
   getBoardTitle() {
@@ -2021,11 +2845,17 @@ Cards.helpers({
       }
     }
 
-    if (this.isLinkedBoard()) {
-      return Boards.updateAsync({ _id: this.linkedId }, { $set: { title: sanitizedTitle } });
-    } else {
-      return Cards.updateAsync({ _id: this.getRealId() }, { $set: { title: sanitizedTitle } });
+    // #4249: also write the linking card's OWN title field (not only the linked
+    // target), so filter-by-title — which queries each card's own title — keeps
+    // matching a linked card after it is renamed.
+    const { computeTitleUpdateTargets } = require('./lib/linkedCardTitle');
+    const targets = computeTitleUpdateTargets(this);
+    let last;
+    for (const t of targets) {
+      const collection = t.collection === 'boards' ? Boards : Cards;
+      last = collection.updateAsync({ _id: t.id }, { $set: { title: sanitizedTitle } });
     }
+    return last;
   },
 
   getArchived() {
@@ -2081,6 +2911,7 @@ Cards.helpers({
       return this.assignedBy;
     }
   },
+
 
   isTemplateCard() {
     return this.type === 'template-card';
@@ -2201,12 +3032,27 @@ Cards.helpers({
     return pokerWinnersListMap[0].pokerCard;
   },
 
+  // Archive/restore cascade: only the children this card is the one parent of
+  // (#3626 - a subtask shared with another parent stays where it is).
   async applyToChildren(funct) {
-    const cards = await ReactiveCache.getCards({ parentId: this._id });
+    const cards = await ReactiveCache.getCards(onlyChildrenSelector(this._id));
     if (!cards) return;
     for (const card of cards) {
       await funct(card);
     }
+  },
+
+  // #3256: place the card on the board's Map view, or take it off.
+  async setMapPosition(x, y) {
+    const { clampPercent } = require('/models/lib/boardMap');
+    const mapX = clampPercent(x);
+    const mapY = clampPercent(y);
+    if (mapX === null || mapY === null) return this.clearMapPosition();
+    return Cards.updateAsync(this._id, { $set: { mapX, mapY } });
+  },
+
+  async clearMapPosition() {
+    return Cards.updateAsync(this._id, { $unset: { mapX: '', mapY: '' } });
   },
 
   async archive() {
@@ -2264,7 +3110,7 @@ Cards.helpers({
     return this.move(boardId, swimlaneId, listId, sort);
   },
 
-  async move(boardId, swimlaneId, listId, sort = null) {
+  async move(boardId, swimlaneId, listId, sort = null, moveReason) {
     const previousState = {
       boardId: this.boardId,
       swimlaneId: this.swimlaneId,
@@ -2272,28 +3118,41 @@ Cards.helpers({
       sort: this.sort,
     };
 
-    const mutatedFields = { boardId, swimlaneId, listId };
+    // #6430: only write the fields that actually change. Writing boardId on a
+    // same-board move (drag to another list) needlessly triggered the cross-board
+    // after/before hooks (checklist boardId re-sync multi-updates, consistency
+    // guard, denyCrossBoardMove DB lookup) and extra reactive invalidations,
+    // contributing to a ~1s card flicker on large boards. See lib/cardMoveModifier.
+    const { computeCardMoveModifier } = require('./lib/cardMoveModifier');
+    const mutatedFields = computeCardMoveModifier(this, { boardId, swimlaneId, listId, sort });
 
-    if (sort !== null) {
-      mutatedFields.sort = sort;
+    // A true no-op (e.g. a card dropped back in the same place) — skip the write
+    // so it does not run the move hooks/activities or trigger a reactive re-render.
+    if (Object.keys(mutatedFields).length === 0) {
+      return;
+    }
+
+    if (this.listId !== listId || this.boardId !== boardId) {
+      if (Meteor.isClient && moveReason === undefined) {
+        const sourceBoard = ReactiveCache.getBoard(this.boardId);
+        if (sourceBoard?.askForMoveReason) {
+          moveReason = window.prompt(require('/imports/i18n').TAPi18n.__('move-reason'), '') || '';
+        }
+      }
+      mutatedFields.lastMoveReason = typeof moveReason === 'string' ? moveReason.trim().slice(0, 1000) : '';
     }
 
     if (this.boardId !== boardId) {
-      const oldBoard = ReactiveCache.getBoard(this.boardId);
-      const oldBoardLabels = Array.isArray(oldBoard?.labels) ? oldBoard.labels : [];
-      const oldCardLabels = oldBoardLabels.filter(label => {
-          return (this.labelIds || []).includes(label._id);
-        }).map(x => x.name);
+      const oldBoard = await ReactiveCache.getBoard(this.boardId);
 
-      const newBoard = ReactiveCache.getBoard(boardId);
+      const newBoard = await ReactiveCache.getBoard(boardId);
       if (!newBoard) {
         throw new Meteor.Error('board-not-found', 'Destination board not found while moving card.');
       }
       const allowedMemberIds = (newBoard.members || []).filter(member => member.isActive === true).map(x => x.userId);
-      const newBoardLabels = Array.isArray(newBoard.labels) ? newBoard.labels : [];
-      const newCardLabelIds = newBoardLabels.filter(label => {
-          return label.name && oldCardLabels.includes(label.name);
-        }).map(x => x._id);
+      // #1759: named labels are matched, and a missing one is created on the
+      // destination board when the actor is its admin (crossBoardLabelIds).
+      const newCardLabelIds = await crossBoardLabelIds(this, oldBoard, newBoard);
 
       const newCardNumber = await newBoard.getNextCardNumber();
 
@@ -2302,7 +3161,9 @@ Cards.helpers({
         cardNumber: newCardNumber
       });
 
-      mutatedFields.customFields = this.mapCustomFieldsToBoard(newBoard._id);
+      mutatedFields.customFields = await this.mapCustomFieldsToBoard(newBoard._id);
+      // Its sprint and release are dropped by a server hook
+      // (server/models/cards.js): Scrum fields are not the client's to write.
 
       // Ensure customFields is always an array (guards against legacy {} data)
       if (!Array.isArray(mutatedFields.customFields)) {
@@ -2320,12 +3181,50 @@ Cards.helpers({
       if (currentWatchers.filter(x => !filteredWatchers.includes(x)).length > 0) {
         mutatedFields.watchers = filteredWatchers;
       }
+
+      // #3392: card-to-card dependencies ("Red Strings") only connect cards on
+      // the same board. When a card moves to another board, drop its now
+      // cross-board dependencies. This half is part of the by-_id update below,
+      // so it is allowed from the client.
+      //
+      // The OTHER half - removing inbound references to this card from the cards
+      // left behind on the old board - needs a multi-document update with a
+      // compound selector, and it used to be done right here. This helper is
+      // called straight from client code (list.js, swimlanes.js, globalSearch.js,
+      // sidebarFilters.js, minicard.js), and Meteor's insecure-write rule only
+      // lets untrusted code updateAsync BY ID: every cross-board move therefore
+      // threw "Not permitted. Untrusted code may only updateAsync documents by
+      // ID" and never reached the move itself (#6572). addDependency,
+      // setDependencyProps and removeDependency above already follow that rule -
+      // this was the one place that did not.
+      //
+      // It is a Cards.after.update hook in server/models/cards.js now, where a
+      // selector is allowed, and being server-side it also covers the REST API
+      // and import paths, which never ran this helper at all.
+      mutatedFields.cardDependencies = [];
     }
 
     await Cards.updateAsync(this._id, { $set: mutatedFields });
 
-    if (Meteor.isServer && typeof Meteor.userId === 'function' && Meteor.userId() && typeof UserPositionHistory !== 'undefined') {
+    if (Meteor.isServer && typeof Meteor.userId === 'function' && Meteor.userId()) {
       try {
+        // #6478 fixed this for list moves and missed the card path, so Ctrl+Z
+        // after dragging a card went on doing nothing. The guard used to be
+        // `typeof UserPositionHistory !== 'undefined'` on a bare identifier -
+        // an assumed global that this file never imported, so it was ALWAYS
+        // false and no card move was ever recorded.
+        //
+        // The import has to be lazy and it has to be here: models/userPositionHistory
+        // imports THIS file, so a top-level import would be a cycle and could
+        // leave the binding undefined depending on evaluation order. Requiring
+        // it inside the call, on the server, where the module graph is already
+        // built, is the same shape as the cardMoveModifier require above.
+        // Both stores during the transition (History.md §4, "keep
+        // userPositionHistory writing during transition"): the new one is what
+        // Ctrl+Z reads now, the old one stays until its rows are migrated.
+        // Universal History is recorded by the collection hook for every
+        // write path. Keep only the legacy position store during transition.
+        const UserPositionHistory = require('/models/userPositionHistory').default;
         UserPositionHistory.trackChange({
           userId: Meteor.userId(),
           boardId: this.boardId,
@@ -2345,42 +3244,41 @@ Cards.helpers({
       }
     }
 
-    if (Meteor.isServer) {
-      const updateMeta = {};
-      if (mutatedFields.boardId !== undefined) updateMeta['meta.boardId'] = mutatedFields.boardId;
-      if (mutatedFields.listId !== undefined) updateMeta['meta.listId'] = mutatedFields.listId;
-      if (mutatedFields.swimlaneId !== undefined) updateMeta['meta.swimlaneId'] = mutatedFields.swimlaneId;
-
-      if (Object.keys(updateMeta).length > 0) {
-        try {
-          Attachments.collection.updateAsync(
-            { 'meta.cardId': this._id },
-            { $set: updateMeta },
-            { multi: true },
-          );
-        } catch (err) {
-          console.error('Failed to update attachments metadata after moving card', this._id, err);
-        }
-      }
-    }
+    // #6793: the card's comments, reactions, text notes, checklists, checklist
+    // items and attachments follow it from the Cards.after.update hook in
+    // server/models/cards.js (server/lib/cardChildrenBoardSync.js), for every
+    // move path. The attachments' meta used to be re-pointed here, inside
+    // `if (Meteor.isServer)` - which a drag in the browser never reached, so a
+    // moved card's attachments stayed published to the board it left.
   },
 
   addLabel(labelId) {
-    this.labelIds.push(labelId);
-    return Cards.updateAsync(this._id, { $addToSet: { labelIds: labelId } });
+    const card = this.getRealCard();
+    card.labelIds = card.labelIds || [];
+    card.labelIds.push(labelId);
+    return Cards.updateAsync(this.getRealId(), { $addToSet: { labelIds: labelId } });
   },
 
   removeLabel(labelId) {
-    this.labelIds = (this.labelIds || []).filter(x => x !== labelId);
-    return Cards.updateAsync(this._id, { $pull: { labelIds: labelId } });
+    const card = this.getRealCard();
+    card.labelIds = (card.labelIds || []).filter(x => x !== labelId);
+    return Cards.updateAsync(this.getRealId(), { $pull: { labelIds: labelId } });
   },
 
   toggleLabel(labelId) {
-    if (this.labelIds && this.labelIds.indexOf(labelId) > -1) {
+    if (this.hasLabel(labelId)) {
       return this.removeLabel(labelId);
     } else {
       return this.addLabel(labelId);
     }
+  },
+
+  // #3432: remove every label from the card in one step, instead of one
+  // "remove label" rule action per label. A card with no labels is a no-op.
+  removeAllLabels() {
+    const card = this.getRealCard();
+    card.labelIds = [];
+    return Cards.updateAsync(this.getRealId(), { $set: { labelIds: [] } });
   },
 
   // A sticker is identified by its icon plus its highlight style ('underline'
@@ -2388,12 +3286,20 @@ Cards.helpers({
   // icon can exist as a plain, mascot or computer sticker.
   hasSticker(icon, highlight) {
     const h = highlight || '';
-    return (this.stickers || []).some(s => s.icon === icon && (s.highlight || '') === h);
+    return this.getStickers().some(s => s.icon === icon && (s.highlight || '') === h);
+  },
+
+  getStickers() {
+    return this.getRealCard().stickers || [];
+  },
+
+  getCreatorId() {
+    return this.getRealCard().userId;
   },
 
   addSticker(icon, highlight, name) {
     if (!icon || this.hasSticker(icon, highlight)) return Promise.resolve();
-    const position = (this.stickers || []).length;
+    const position = this.getStickers().length;
     const sticker = { icon, position };
     if (highlight) sticker.highlight = highlight;
     if (name) sticker.name = name;
@@ -2405,7 +3311,7 @@ Cards.helpers({
 
   removeSticker(icon, highlight) {
     const h = highlight || '';
-    const stickers = (this.stickers || []).slice();
+    const stickers = this.getStickers().slice();
     const index = stickers.findIndex(
       s => s.icon === icon && (s.highlight || '') === h,
     );
@@ -2420,7 +3326,7 @@ Cards.helpers({
   // Remove a single sticker by its position in the array (so duplicates with
   // the same icon/name can be removed individually).
   removeStickerAt(index) {
-    const stickers = (this.stickers || []).slice();
+    const stickers = this.getStickers().slice();
     if (index < 0 || index >= stickers.length) return Promise.resolve();
     stickers.splice(index, 1);
     return Cards.updateAsync(
@@ -2441,20 +3347,21 @@ Cards.helpers({
   // flat locationName/Address/Latitude/Longitude fields is surfaced here as a
   // location entry so existing (e.g. Trello-imported) cards keep working.
   getLocations() {
-    const locations = (this.locations || []).slice();
+    const card = this.getRealCard();
+    const locations = (card.locations || []).slice();
     if (
       !locations.length &&
-      (this.locationName ||
-        this.locationAddress ||
-        typeof this.locationLatitude === 'number' ||
-        typeof this.locationLongitude === 'number')
+      (card.locationName ||
+        card.locationAddress ||
+        typeof card.locationLatitude === 'number' ||
+        typeof card.locationLongitude === 'number')
     ) {
       locations.push({
         _id: 'legacy',
-        name: this.locationName || '',
-        address: this.locationAddress || '',
-        latitude: this.locationLatitude,
-        longitude: this.locationLongitude,
+        name: card.locationName || '',
+        address: card.locationAddress || '',
+        latitude: card.locationLatitude,
+        longitude: card.locationLongitude,
       });
     }
     return locations;
@@ -2541,31 +3448,61 @@ Cards.helpers({
     );
   },
 
+  // #2012: make this a Story or a Task (null: an ordinary card), adding the
+  // custom fields that belong to that kind.
+  async setCardKind(kind) {
+    const { cleanCardKind, fieldsToAddForKind } = require('./lib/cardKinds');
+    const card = this.getRealCard();
+    const clean = cleanCardKind(kind);
+    if (!clean) return Cards.updateAsync(card._id, { $unset: { cardKind: '' } });
+    const definitions = ReactiveCache.getCustomFields({ boardIds: { $in: [card.boardId] } });
+    const add = fieldsToAddForKind(card.customFields, Array.isArray(definitions) ? definitions : [], clean)
+      .map(d => ({ _id: d._id, value: null }));
+    return Cards.updateAsync(card._id, { $set: { cardKind: clean },
+      ...(add.length ? { $push: { customFields: { $each: add } } } : {}) });
+  },
+
   setColor(newColor) {
     if (newColor === 'white') {
       newColor = null;
     }
-    return Cards.updateAsync(this._id, { $set: { color: newColor } });
+    return Cards.updateAsync(this.getRealId(), { $set: { color: newColor } });
   },
 
   assignMember(memberId) {
-    return Cards.updateAsync(this._id, { $addToSet: { members: memberId } });
+    return Cards.updateAsync(this.getRealId(), { $addToSet: { members: memberId } });
   },
 
   assignAssignee(assigneeId) {
-    return Cards.updateAsync(this._id, { $addToSet: { assignees: assigneeId } });
+    return Cards.updateAsync(this.getRealId(), { $addToSet: { assignees: assigneeId } });
+  },
+
+  assignRequester(userId) {
+    return Cards.updateAsync(this.getRealId(), { $addToSet: { requesters: userId } });
+  },
+
+  assignAssigner(userId) {
+    return Cards.updateAsync(this.getRealId(), { $addToSet: { assigners: userId } });
   },
 
   unassignMember(memberId) {
-    return Cards.updateAsync(this._id, { $pull: { members: memberId } });
+    return Cards.updateAsync(this.getRealId(), { $pull: { members: memberId } });
   },
 
   unassignAssignee(assigneeId) {
-    return Cards.updateAsync(this._id, { $pull: { assignees: assigneeId } });
+    return Cards.updateAsync(this.getRealId(), { $pull: { assignees: assigneeId } });
+  },
+
+  unassignRequester(userId) {
+    return Cards.updateAsync(this.getRealId(), { $pull: { requesters: userId } });
+  },
+
+  unassignAssigner(userId) {
+    return Cards.updateAsync(this.getRealId(), { $pull: { assigners: userId } });
   },
 
   toggleMember(memberId) {
-    if (this.members && this.members.indexOf(memberId) > -1) {
+    if ((this.getMembers() || []).includes(memberId)) {
       return this.unassignMember(memberId);
     } else {
       return this.assignMember(memberId);
@@ -2573,21 +3510,31 @@ Cards.helpers({
   },
 
   toggleAssignee(assigneeId) {
-    if (this.assignees && this.assignees.indexOf(assigneeId) > -1) {
+    if ((this.getAssignees() || []).includes(assigneeId)) {
       return this.unassignAssignee(assigneeId);
     } else {
       return this.assignAssignee(assigneeId);
     }
   },
 
+  toggleRequester(userId) {
+    return (this.requesters || []).includes(userId)
+      ? this.unassignRequester(userId) : this.assignRequester(userId);
+  },
+
+  toggleAssigner(userId) {
+    return (this.assigners || []).includes(userId)
+      ? this.unassignAssigner(userId) : this.assignAssigner(userId);
+  },
+
   assignCustomField(customFieldId) {
-    return Cards.updateAsync(this._id, {
+    return Cards.updateAsync(this.getRealId(), {
       $addToSet: { customFields: { _id: customFieldId, value: null } },
     });
   },
 
   unassignCustomField(customFieldId) {
-    return Cards.updateAsync(this._id, {
+    return Cards.updateAsync(this.getRealId(), {
       $pull: { customFields: { _id: customFieldId } },
     });
   },
@@ -2601,22 +3548,22 @@ Cards.helpers({
   },
 
   toggleShowActivities() {
-    return Cards.updateAsync(this._id, {
-      $set: { showActivities: !this.showActivities },
+    return Cards.updateAsync(this.getRealId(), {
+      $set: { showActivities: !this.getRealCard().showActivities },
     });
   },
 
   toggleShowChecklistAtMinicard() {
-    return Cards.updateAsync(this._id, {
-      $set: { showChecklistAtMinicard: !this.showChecklistAtMinicard },
+    return Cards.updateAsync(this.getRealId(), {
+      $set: { showChecklistAtMinicard: !this.getRealCard().showChecklistAtMinicard },
     });
   },
 
   toggleHideFinishedChecklist() {
-    return Cards.updateAsync(this._id, {
+    return Cards.updateAsync(this.getRealId(), {
       $set: {
         hideFinishedChecklistIfItemsAreHidden:
-          !this.hideFinishedChecklistIfItemsAreHidden,
+          !this.getRealCard().hideFinishedChecklistIfItemsAreHidden,
       },
     });
   },
@@ -2626,53 +3573,96 @@ Cards.helpers({
     if (index > -1) {
       const update = { $set: {} };
       update.$set[`customFields.${index}.value`] = value;
-      return Cards.updateAsync(this._id, update);
+      return Cards.updateAsync(this.getRealId(), update);
     }
     return null;
   },
 
   setCover(coverId) {
-    return Cards.updateAsync(this._id, { $set: { coverId } });
+    return Cards.updateAsync(this.getRealId(), { $set: { coverId } });
   },
 
   unsetCover() {
-    return Cards.updateAsync(this._id, { $unset: { coverId: '' } });
+    return Cards.updateAsync(this.getRealId(), { $unset: { coverId: '' } });
   },
 
+  // #4561: on a linked card these must target the REAL underlying card
+  // document, not the link placeholder — mirror the setReceived/setStart/
+  // setDue/setEnd methods, which all resolve the id via getRealId().
   unsetReceived() {
-    return Cards.updateAsync(this._id, { $unset: { receivedAt: '' } });
+    return Cards.updateAsync({ _id: this.getRealId() }, { $unset: { receivedAt: '' } });
   },
 
   unsetStart() {
-    return Cards.updateAsync(this._id, { $unset: { startAt: '' } });
+    return Cards.updateAsync({ _id: this.getRealId() }, { $unset: { startAt: '' } });
   },
 
   unsetDue() {
-    return Cards.updateAsync(this._id, { $unset: { dueAt: '' } });
+    return Cards.updateAsync({ _id: this.getRealId() }, { $unset: { dueAt: '' } });
   },
 
   unsetEnd() {
-    return Cards.updateAsync(this._id, { $unset: { endAt: '' } });
+    return Cards.updateAsync({ _id: this.getRealId() }, { $unset: { endAt: '' } });
   },
 
   setOvertime(isOvertime) {
-    return Cards.updateAsync(this._id, { $set: { isOvertime } });
-  },
-
-  setSpentTime(spentTime) {
-    return Cards.updateAsync(this._id, { $set: { spentTime } });
+    return Cards.updateAsync(this.getRealId(), { $set: { isOvertime } });
   },
 
   unsetSpentTime() {
-    return Cards.updateAsync(this._id, { $unset: { spentTime: '', isOvertime: false } });
+    return Cards.updateAsync(this.getRealId(), { $unset: { spentTime: '', isOvertime: false } });
   },
 
+  // #3328: never allow a card to become its own ancestor - that closes a
+  // parent/subtask loop and hangs every ancestor walk. #3626: the proposed
+  // parent's ancestors are followed through ALL of their parents.
+  // The card as it is NOW: a cached copy from before an earlier parent change
+  // would make the next change replace a parent instead of adding one.
+  liveParentSource() {
+    return (Meteor.isClient && Cards.findOne(this.getRealId())) || this;
+  },
+
+  assertNoParentCycle(parentId) {
+    if (!parentId) return;
+    const lookup = id => (Meteor.isClient && Cards.findOne(id)) || ReactiveCache.getCard(id);
+    const ancestors = collectAllAncestorIdsSync([parentId], lookup);
+    if (wouldCreateParentCycle(this.getRealId(), parentId, ancestors)) {
+      throw new Meteor.Error(
+        'circular-subtask',
+        'A card cannot be made a subtask of itself or of one of its own subtasks.',
+      );
+    }
+  },
+
+  // Make `parentId` the card's ONE parent ('' for none), as before #3626.
   setParentId(parentId) {
-    return Cards.updateAsync(this._id, { $set: { parentId } });
+    this.assertNoParentCycle(parentId);
+    return Cards.updateAsync(this.getRealId(), { $set: parentFields(parentId ? [parentId] : []) });
+  },
+
+  // #3626: make `parentId` the PRIMARY parent, keeping the others; '' drops
+  // the primary one and the next parent takes its place.
+  setPrimaryParent(parentId) {
+    const live = this.liveParentSource();
+    const current = cardParentIds(live);
+    if (!parentId) return Cards.updateAsync(this.getRealId(), { $set: withParentRemoved(live, current[0]) });
+    this.assertNoParentCycle(parentId);
+    return Cards.updateAsync(this.getRealId(), { $set: parentFields([parentId, ...current.filter(id => id !== parentId)]) });
+  },
+
+  // #3626: also a subtask of `parentId`, keeping the parents it has.
+  addParent(parentId) {
+    this.assertNoParentCycle(parentId);
+    return Cards.updateAsync(this.getRealId(), { $set: withParentAdded(this.liveParentSource(), parentId) });
+  },
+
+  // #3626: no longer a subtask of `parentId`; the next parent becomes primary.
+  removeParent(parentId) {
+    return Cards.updateAsync(this.getRealId(), { $set: withParentRemoved(this.liveParentSource(), parentId) });
   },
 
   setVoteQuestion(question, publicVote, allowNonBoardMembers) {
-    return Cards.updateAsync(this._id, {
+    return Cards.updateAsync(this.getRealId(), {
       $set: {
         vote: {
           question,
@@ -2686,38 +3676,38 @@ Cards.helpers({
   },
 
   unsetVote() {
-    return Cards.updateAsync(this._id, { $unset: { vote: '' } });
+    return Cards.updateAsync(this.getRealId(), { $unset: { vote: '' } });
   },
 
   setVoteEnd(end) {
-    return Cards.updateAsync(this._id, { $set: { 'vote.end': end } });
+    return Cards.updateAsync(this.getRealId(), { $set: { 'vote.end': end } });
   },
 
   unsetVoteEnd() {
-    return Cards.updateAsync(this._id, { $unset: { 'vote.end': '' } });
+    return Cards.updateAsync(this.getRealId(), { $unset: { 'vote.end': '' } });
   },
 
   setVote(userId, forIt) {
     switch (forIt) {
       case true:
-        return Cards.updateAsync(this._id, {
+        return Cards.updateAsync(this.getRealId(), {
           $pull: { 'vote.negative': userId },
           $addToSet: { 'vote.positive': userId },
         });
       case false:
-        return Cards.updateAsync(this._id, {
+        return Cards.updateAsync(this.getRealId(), {
           $pull: { 'vote.positive': userId },
           $addToSet: { 'vote.negative': userId },
         });
       default:
-        return Cards.updateAsync(this._id, {
+        return Cards.updateAsync(this.getRealId(), {
           $pull: { 'vote.positive': userId, 'vote.negative': userId },
         });
     }
   },
 
   setPokerQuestion(question, allowNonBoardMembers) {
-    return Cards.updateAsync(this._id, {
+    return Cards.updateAsync(this.getRealId(), {
       $set: {
         poker: {
           question,
@@ -2738,23 +3728,23 @@ Cards.helpers({
   },
 
   setPokerEstimation(estimation) {
-    return Cards.updateAsync(this._id, { $set: { 'poker.estimation': estimation } });
+    return Cards.updateAsync(this.getRealId(), { $set: { 'poker.estimation': estimation } });
   },
 
   unsetPokerEstimation() {
-    return Cards.updateAsync(this._id, { $unset: { 'poker.estimation': '' } });
+    return Cards.updateAsync(this.getRealId(), { $unset: { 'poker.estimation': '' } });
   },
 
   unsetPoker() {
-    return Cards.updateAsync(this._id, { $unset: { poker: '' } });
+    return Cards.updateAsync(this.getRealId(), { $unset: { poker: '' } });
   },
 
   setPokerEnd(end) {
-    return Cards.updateAsync(this._id, { $set: { 'poker.end': end } });
+    return Cards.updateAsync(this.getRealId(), { $set: { 'poker.end': end } });
   },
 
   unsetPokerEnd() {
-    return Cards.updateAsync(this._id, { $unset: { 'poker.end': '' } });
+    return Cards.updateAsync(this.getRealId(), { $unset: { 'poker.end': '' } });
   },
 
   setPoker(userId, state) {
@@ -2764,17 +3754,17 @@ Cards.helpers({
 
     if (pokerFields.includes(state)) {
       delete pullFields[`poker.${state}`];
-      return Cards.updateAsync(this._id, {
+      return Cards.updateAsync(this.getRealId(), {
         $pull: pullFields,
         $addToSet: { [`poker.${state}`]: userId },
       });
     } else {
-      return Cards.updateAsync(this._id, { $pull: pullFields });
+      return Cards.updateAsync(this.getRealId(), { $pull: pullFields });
     }
   },
 
   replayPoker() {
-    return Cards.updateAsync(this._id, {
+    return Cards.updateAsync(this.getRealId(), {
       $set: {
         'poker.one': [],
         'poker.two': [],
@@ -2794,7 +3784,17 @@ Cards.helpers({
 //FUNCTIONS FOR creation of Activities
 
 async function updateActivities(doc, fieldNames, modifier) {
-  if (fieldNames.includes('labelIds') && fieldNames.includes('boardId')) {
+  // Only react to a real board CHANGE. This is a before.update hook, so doc is
+  // the pre-update card and modifier.$set.boardId is the new value. Card.move()
+  // always re-sets boardId (even for a move within the same board), so checking
+  // only fieldNames.includes('boardId') wrongly deleted the card's addedLabel
+  // activities on every move. See https://github.com/wekan/wekan/issues/3907
+  const boardIdChanged =
+    fieldNames.includes('boardId') &&
+    !!modifier.$set &&
+    modifier.$set.boardId !== doc.boardId;
+
+  if (fieldNames.includes('labelIds') && boardIdChanged) {
     const activities = await ReactiveCache.getActivities({
       activityType: 'addedLabel',
       cardId: doc._id,
@@ -2812,13 +3812,14 @@ async function updateActivities(doc, fieldNames, modifier) {
         await Activities.removeAsync(a._id);
       }
     }
-  } else if (fieldNames.includes('boardId')) {
+  } else if (boardIdChanged) {
     await Activities.removeAsync({
       activityType: 'addedLabel',
       cardId: doc._id,
     });
   }
 }
+
 
 async function cardMove(
   userId,
@@ -2835,6 +3836,7 @@ async function cardMove(
     await Activities.insertAsync({
       userId,
       activityType: 'moveCardBoard',
+      moveReason: doc.lastMoveReason || '',
       boardName: newBoard.title,
       boardId: doc.boardId,
       oldBoardId,
@@ -2854,12 +3856,16 @@ async function cardMove(
       userId,
       oldListId,
       activityType: 'moveCard',
-      listName: list.title,
+      moveReason: doc.lastMoveReason || '',
+      // Old/shared-list boards can momentarily update a card before the target
+      // list/swimlane reaches this cache. Activity logging must not make the
+      // otherwise-valid move fail (#6614).
+      listName: list ? list.title : '',
       listId: doc.listId,
       boardId: doc.boardId,
       cardId: doc._id,
       cardTitle: doc.title,
-      swimlaneName: swimlane.title,
+      swimlaneName: swimlane ? swimlane.title : '',
       swimlaneId: doc.swimlaneId,
       oldSwimlaneId,
     });
@@ -2877,6 +3883,11 @@ async function cardState(userId, doc, fieldNames) {
         boardId: doc.boardId,
         listId: doc.listId,
         cardId: doc._id,
+        // #3144: the title, recorded WITH the activity. An archived card is not
+        // published to the client, so the board feed could not name the card that
+        // had just been archived - the sentence about it was the one sentence
+        // guaranteed to be about a card nobody could look up.
+        cardTitle: doc.title,
         swimlaneId: doc.swimlaneId,
       });
     } else {
@@ -2887,6 +3898,7 @@ async function cardState(userId, doc, fieldNames) {
         listName: list.title,
         listId: doc.listId,
         cardId: doc._id,
+        cardTitle: doc.title,
         swimlaneId: doc.swimlaneId,
       });
     }
@@ -2900,7 +3912,7 @@ async function cardMembers(userId, doc, fieldNames, modifier) {
   if (modifier.$addToSet && modifier.$addToSet.members) {
     memberId = modifier.$addToSet.members;
     const user = await ReactiveCache.getUser(memberId);
-    const username = user.username;
+    const username = user && user.username;
     if (!(doc.members || []).includes(memberId)) {
       await Activities.insertAsync({
         userId,
@@ -2919,7 +3931,7 @@ async function cardMembers(userId, doc, fieldNames, modifier) {
   if (modifier.$pull && modifier.$pull.members) {
     memberId = modifier.$pull.members;
     const user = await ReactiveCache.getUser(memberId);
-    const username = user.username;
+    const username = user && user.username;
     // Check that the former member is member of the card
     if ((doc.members || []).includes(memberId)) {
       await Activities.insertAsync({
@@ -2943,7 +3955,7 @@ async function cardAssignees(userId, doc, fieldNames, modifier) {
   if (modifier.$addToSet && modifier.$addToSet.assignees) {
     assigneeId = modifier.$addToSet.assignees;
     const user = await ReactiveCache.getUser(assigneeId);
-    const username = user.username;
+    const username = user && user.username;
     if (!(doc.assignees || []).includes(assigneeId)) {
       await Activities.insertAsync({
         userId,
@@ -2961,7 +3973,7 @@ async function cardAssignees(userId, doc, fieldNames, modifier) {
   if (modifier.$pull && modifier.$pull.assignees) {
     assigneeId = modifier.$pull.assignees;
     const user = await ReactiveCache.getUser(assigneeId);
-    const username = user.username;
+    const username = user && user.username;
     // Check that the former assignee is assignee of the card
     if ((doc.assignees || []).includes(assigneeId)) {
       await Activities.insertAsync({
@@ -3017,98 +4029,88 @@ async function cardLabels(userId, doc, fieldNames, modifier) {
   }
 }
 
-async function cardCustomFields(userId, doc, fieldNames, modifier) {
-  if (!fieldNames.includes('customFields')) return;
+async function cardCustomFields(userId, doc, fieldNames, previous) {
+  if (!fieldNames.includes('customFields') || !previous) return;
 
-  // Say hello to the new customField value
-  if (modifier.$set) {
-    for (const [key, value] of Object.entries(modifier.$set)) {
-      if (key.startsWith('customFields')) {
-        const dotNotation = key.split('.');
-
-        // only individual changes are registered
-        if (dotNotation.length > 1) {
-          const customFieldId = doc.customFields[dotNotation[1]]._id;
-          const act = {
-            userId,
-            customFieldId,
-            value,
-            activityType: 'setCustomField',
-            boardId: doc.boardId,
-            cardId: doc._id,
-            listId: doc.listId,
-            swimlaneId: doc.swimlaneId,
-          };
-          await Activities.insertAsync(act);
-        }
-      }
-    }
-  }
-
-  // Say goodbye to the former customField value
-  if (modifier.$unset) {
-    for (const [key, value] of Object.entries(modifier.$unset)) {
-      if (key.startsWith('customFields')) {
-        const dotNotation = key.split('.');
-
-        // only individual changes are registered
-        if (dotNotation.length > 1) {
-          const customFieldId = doc.customFields[dotNotation[1]]._id;
-          const act = {
-            userId,
-            customFieldId,
-            activityType: 'unsetCustomField',
-            boardId: doc.boardId,
-            cardId: doc._id,
-          };
-          await Activities.insertAsync(act);
-        }
-      }
-    }
+  // Compare field identities, not array positions: Sync replaces the array,
+  // while the editor uses dotted writes and assignment uses push/pull.
+  const values = card => new Map((card.customFields || [])
+    .filter(field => field && typeof field._id === 'string')
+    .map(field => [field._id, field.value ?? null]));
+  const before = values(previous);
+  const after = values(doc);
+  for (const customFieldId of new Set([...before.keys(), ...after.keys()])) {
+    const oldValue = before.get(customFieldId) ?? null;
+    const value = after.get(customFieldId) ?? null;
+    if (EJSON.equals(oldValue, value)) continue;
+    await Activities.insertAsync({
+      userId,
+      customFieldId,
+      ...(value === null ? {} : { value }),
+      activityType: value === null ? 'unsetCustomField' : 'setCustomField',
+      boardId: doc.boardId,
+      cardId: doc._id,
+      listId: doc.listId,
+      swimlaneId: doc.swimlaneId,
+    });
   }
 }
 
 async function cardCreation(userId, doc) {
   const list = await ReactiveCache.getList(doc.listId);
   const swimlane = await ReactiveCache.getSwimlane(doc.swimlaneId);
-  await Activities.insertAsync({
-    userId,
-    activityType: 'createCard',
-    boardId: doc.boardId,
-    listName: list.title,
-    listId: doc.listId,
-    cardId: doc._id,
-    cardTitle: doc.title,
-    swimlaneName: swimlane.title,
-    swimlaneId: doc.swimlaneId,
-  });
+  const { cardCreationActivity } = require('./lib/cardCreationActivity');
+  await Activities.insertAsync(cardCreationActivity(userId, doc, list, swimlane));
 }
 
 async function cardRemover(userId, doc) {
-  await ChecklistItems.removeAsync({
-    cardId: doc._id,
-  });
-  await Checklists.removeAsync({
-    cardId: doc._id,
-  });
-  await Cards.removeAsync({
-    parentId: doc._id,
-  });
-  await CardComments.removeAsync({
-    cardId: doc._id,
-  });
-  await Attachments.removeAsync({
-    cardId: doc._id,
-  });
+  // Keep timestamped Activities for board reports (#1598). Remove children
+  // directly to avoid one notification/history write per child (#3252/#5322).
+  // The card deletion itself gets one snapshot and the normal delete activity.
+  await ChecklistItems.direct.removeAsync({ cardId: doc._id });
+  await Checklists.direct.removeAsync({ cardId: doc._id });
+  await CardComments.direct.removeAsync({ cardId: doc._id });
+  // #1598: keep the timestamped board activity trail after deleting its card.
+  // A single snapshot preserves report inputs without per-child hook storms.
+  if (userId) {
+    const ChangeHistory = require('/models/changeHistory').default;
+    await ChangeHistory.record({
+      boardId: doc.boardId, listId: doc.listId, swimlaneId: doc.swimlaneId,
+      cardId: doc._id, entityType: 'card', entityId: doc._id,
+      group: 'lifecycle', changeType: 'removed', userId,
+      previousContent: { document: JSON.parse(JSON.stringify(doc)) }, newContent: null,
+    });
+  }
+  // Subcards go through the hooked remove so each subcard's own children cascade
+  // and its delete activity / webhook fire. #3626: only the subcards this card
+  // is the one parent of; one that has another parent too just loses this one.
+  for (const shared of await Cards.find(sharedChildrenSelector(doc._id), { fields: { parentId: 1, parentIds: 1 } }).fetchAsync()) {
+    await Cards.direct.updateAsync(shared._id, { $set: withParentRemoved(shared, doc._id) });
+  }
+  await Cards.removeAsync(onlyChildrenSelector(doc._id));
+  // Attachments keep the normal remove so the underlying file is deleted from the
+  // configured storage backend.
+  await Attachments.removeAsync({ cardId: doc._id });
 }
 
-const findDueCards = async days => {
-  const seekDue = async ($from, $to, activityType) => {
+// #5323: `envDays` is the server default (NOTIFY_DUE_DAYS_BEFORE_AND_AFTER);
+// a board with its own offsets (Board Settings -> Notifications) uses those
+// instead, and an empty list there turns its reminders off.
+const findDueCards = async envDays => {
+  const { dueDaysToScan, effectiveDueDays } = require('/models/lib/dueNotificationConfig');
+  const overrides = await ReactiveCache.getBoards(
+    { dueReminderDays: { $exists: true } },
+    { fields: { dueReminderDays: 1 } },
+  );
+  const boardDays = new Map((overrides || []).map(board => [board._id, effectiveDueDays(board, envDays)]));
+  const daysFor = boardId => (boardDays.has(boardId) ? boardDays.get(boardId) : envDays || []);
+  const seekDue = async ($from, $to, activityType, day) => {
     const cards = await ReactiveCache.getCards({
       archived: false,
       dueAt: { $gte: $from, $lt: $to },
     });
     for (const card of cards) {
+      if (!daysFor(card.boardId).includes(day)) continue;
       const user = await ReactiveCache.getUser(card.userId);
       if (!user) {
         console.warn('Due date notification: user not found for card', card._id, 'userId', card.userId);
@@ -3134,9 +4136,7 @@ const findDueCards = async days => {
   startOfToday.setHours(0, 0, 0, 0);
   const aday = 3600 * 24 * 1e3;
   const then = day => new Date(startOfToday.getTime() + day * aday);
-  if (!days) return;
-  if (!days.map) days = [days];
-  for (const day of days) {
+  for (const day of dueDaysToScan(envDays, overrides)) {
     let args = [];
     if (day === 0) {
       args = [then(0), then(1), 'duenow'];
@@ -3146,29 +4146,21 @@ const findDueCards = async days => {
     } else {
       args = [then(day), then(0), 'pastdue'];
     }
-    await seekDue(...args);
+    await seekDue(...args, day);
   }
 };
 const addCronJob = debounce(
   function findDueCardsDebounced() {
-    const envValue = process.env.NOTIFY_DUE_DAYS_BEFORE_AND_AFTER;
-    if (!envValue) {
-      return;
-    }
-    const notifydays = envValue
-      .split(',')
-      .map(value => {
-        const iValue = parseInt(value, 10);
-        // Allow -14..14: positive = days before due, 0 = due today, negative = days past due
-        if (isNaN(iValue) || iValue < -14 || iValue > 14) {
-          return false;
-        }
-        return iValue;
-      })
-      .filter(v => v !== false);
-    const notifyitvl = process.env.NOTIFY_DUE_AT_HOUR_OF_DAY; //passed in the itvl has to be a number standing for the hour of current time
-    const defaultitvl = 8; // default every morning at 8am, if the passed env variable has parsing error use default
-    const itvl = parseInt(notifyitvl, 10) || defaultitvl;
+    const { parseNotifyDueDays, parseNotifyDueHour } = require('/models/lib/dueNotificationConfig');
+    // -14..14: positive = days before due, 0 = due today, negative = days past due.
+    // #5323: the scan runs even without the environment variable, because a
+    // board can set its own offsets; with neither, it finds nothing to scan.
+    const notifydays = parseNotifyDueDays(process.env.NOTIFY_DUE_DAYS_BEFORE_AND_AFTER);
+    const defaultitvl = 8; // default every morning at 8am if the env var is missing/invalid
+    // #3192: parseNotifyDueHour keeps a configured hour of 0 (midnight) instead of
+    // the old `parseInt(..) || 8` that turned the falsy 0 into 8, and rejects
+    // out-of-range hours.
+    const itvl = parseNotifyDueHour(process.env.NOTIFY_DUE_AT_HOUR_OF_DAY, defaultitvl);
     const scheduler = (job => () => {
       const now = new Date();
       const hour = 3600 * 1e3;
@@ -3178,10 +4170,15 @@ const addCronJob = debounce(
         }
       }
       Meteor.setTimeout(scheduler, hour);
-    })(() => {
-      findDueCards(notifydays).catch(error => {
+    })(async () => {
+      try {
+        // Once per day for the whole installation, not once per server.
+        const { claimDueScanDay } = require('/models/lib/dueScanClaim');
+        if (!(await claimDueScanDay(Cards.rawDatabase()))) return;
+        await findDueCards(notifydays);
+      } catch (error) {
         console.error('Due card notification scan failed:', error);
-      });
+      }
     });
     scheduler();
   },
@@ -3199,6 +4196,7 @@ export {
   cardCreation,
   cardRemover,
   addCronJob,
+  findDueCards,
 };
 
 // Position history tracking methods
@@ -3260,8 +4258,8 @@ Cards.helpers({
   /**
    * Get a description of the original position
    */
-  getOriginalPositionDescription() {
-    const history = this.getOriginalPosition();
+  async getOriginalPositionDescription() {
+    const history = await this.getOriginalPosition();
     if (!history) return 'No original position data';
 
     const swimlaneInfo = history.originalSwimlaneId ?
@@ -3274,4 +4272,44 @@ Cards.helpers({
   },
 });
 
+if (Meteor.isServer) {
+  // #6595-adjacent, and the "still slow on loading cards" reports: the cards
+  // collection had NO index at all, so every query the board and the card make
+  // was a collection scan. That is invisible on a demo board and expensive
+  // everywhere else - and worse on FerretDB, whose SQLite backend has to walk
+  // the same documents. One user on a test server is enough to feel it, because
+  // it is not contention: it is the scan.
+  //
+  // Each of these is a selector the app really uses, with the sort it uses:
+  //   boardId + archived   the board and every window publication
+  //   listId + sort        a list's cards, in the order they are drawn
+  //   swimlaneId + sort    the swimlane view's rows
+  //   parentId             subtasks of a card
+  //   parentIds            subtasks of a card with several parents (#6770):
+  //                        childrenSelector asks { $or: [{ parentId }, { parentIds }] },
+  //                        and a $or uses indexes only when EVERY branch has
+  //                        one - without this it was a collection scan on every
+  //                        card removal, copy and export
+  //   boardId + cardNumber searching by card number (#5006)
+  const { ensureIndex } = require('/server/lib/mongoStartup');
+  Meteor.startup(async () => {
+    await ensureIndex(Cards, { boardId: 1, archived: 1 });
+    await ensureIndex(Cards, { listId: 1, sort: 1 });
+    await ensureIndex(Cards, { swimlaneId: 1, sort: 1 });
+    await ensureIndex(Cards, { parentId: 1 });
+    await ensureIndex(Cards, { parentIds: 1 });
+    await ensureIndex(Cards, { boardId: 1, cardNumber: 1 });
+  });
+}
+
 export default Cards;
+
+// Prevent direct DDP writes bypassing Scrum reference and lifecycle validation.
+if (Meteor.isServer) {
+  Cards.deny({
+    insert(userId, doc) { return doc.scrum !== undefined || doc.scrumRevision !== undefined; },
+    update(userId, doc, fields) {
+      return fields.some(field => field === 'scrum' || field.startsWith('scrum.') || field === 'scrumRevision');
+    },
+  });
+}

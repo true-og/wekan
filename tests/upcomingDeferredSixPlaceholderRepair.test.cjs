@@ -1,0 +1,75 @@
+'use strict';
+
+// The Upcoming release repairs Italian and two wrongly seeded six-mismatch files.
+// Run: node tests/upcomingDeferredSixPlaceholderRepair.test.cjs
+
+const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
+
+const ROOT = path.resolve(__dirname, '..');
+const readLanguage = code => JSON.parse(fs.readFileSync(
+  path.join(ROOT, 'imports/i18n/data', `${code}.i18n.json`),
+  'utf8',
+));
+const english = readLanguage('en');
+const repairedLanguages = ['it', 've-CC', 'vo'];
+// URL percent encoding is data, not a printf placeholder.
+const { translationTokens: inventory } = require('../releases/translations/placeholder-tokens.mjs');
+
+let passed = 0;
+function test(name, fn) { fn(); passed += 1; console.log('  ok -', name); }
+
+test('every repaired locale has the English placeholder inventory', () => {
+  for (const language of repairedLanguages) {
+    const translated = readLanguage(language);
+    for (const [key, source] of Object.entries(english)) {
+      assert.deepStrictEqual(
+        inventory(translated[key] || ''), inventory(source),
+        `${language}:${key} changed a placeholder`,
+      );
+    }
+  }
+});
+
+// ve-CC is Venetian ("Vèneto" in imports/i18n/languages.js), not Venda: this
+// repair once put Venda words into it, and on 2026-10-14 the file was
+// rewritten in Venetian (tests/wrongLanguageLocales.test.cjs). Still no
+// Italian seed prose.
+test('Venetian repairs reject their Italian seed prose', () => {
+  const translated = readLanguage('ve-CC');
+  const values = [
+    translated['act-addChecklist'],
+    translated['act-createCustomField'],
+    translated['act-deleteCustomField'],
+    translated['activity-changedListTitle'],
+    translated['activity-checklist-uncompleted'],
+    translated['act-a-dueAt'],
+  ].join('\n');
+  assert.match(values, /zont|quadro|corsia|lista de contro|scheda/);
+  assert.doesNotMatch(values, /mutevhe|tshimu|bodo|Lini|Ngafhi/, 'no Venda in a Venetian file');
+  assert.doesNotMatch(values, /aggiunta|campo personalizzato|lista rinominata|Scadenza/);
+});
+
+test('Volapük repairs reject Esperanto and French seed prose', () => {
+  const translated = readLanguage('vo');
+  const values = [
+    translated['act-addLabel'],
+    translated['act-removeChecklistItem'],
+    translated['act-setCustomField'],
+    translated['globalSearch-instructions-operator-at'],
+    translated['globalSearch-instructions-operator-has'],
+  ].join('\n');
+  assert.match(values, /pelüükon|pämoükon|pevotükon|gebanem/);
+  assert.doesNotMatch(values, /Aldonita|etikedo|a supprimé|a édité|raccourci|recherche/);
+});
+
+test('due-time activities retain when, where and previous values', () => {
+  for (const language of ['it', 've-CC']) {
+    assert.deepStrictEqual(inventory(readLanguage(language)['act-a-dueAt']), [
+      '__card__', '__timeOldValue__', '__timeValue__',
+    ]);
+  }
+});
+
+console.log(`\nupcomingDeferredSixPlaceholderRepair: ${passed} tests passed`);

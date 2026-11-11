@@ -10,43 +10,58 @@ because WeKan is NOT Big Tech. WeKan is FLOSS.
 - **Report**: Click "New draft security advisory" at [WeKan Security Advisories](https://github.com/wekan/wekan/security/advisories).
   More info at [GitHub Docs about reporting privately](https://docs.github.com/en/code-security/how-tos/report-and-fix-vulnerabilities/report-privately).
 - **Proof of Concept (PoC)**: If possible, include a fix or a reproduction script/code.
-- **If GitHub does not work**: Please send report to **security@wekan.fi**
-- **Optional Email Encryption**: An optional PGP key is available at [security-at-wekan.fi.asc](security-at-wekan.fi.asc).
+- DO NOT EMAIL [security@wekan.fi](security-at-wekan.fi.asc), because:
+  - Email is NOT secure or private.
+  - Using GitHub directly verifies that:
+    - You are:
+      - Saving my time by filling all details at GitHub, so that I can easily click request CVE at GitHub
+      - A correct GitHub user
+      - Really reading this SECURITY.md
+      - Knowing what you are doing
+    - You are not:
+      - Someone that tries to waste my time
+      - Trying to impersonate as some other GitHub user
+      - Spammer
+      - Bot
 
 ### 2. WeKan Security Team:
 
 - **Remediation**: Please wait for a new WeKan release that addresses the issue.
   Fixes are announced at the top of the [ChangeLog](https://github.com/wekan/wekan/blob/main/CHANGELOG.md).
 - **Recognition**: We will acknowledge your contribution by adding you to our
-  [Hall of Fame](https://wekan.fi/hall-of-fame/).
+  [Hall of Fame](https://wekan.fi/hall-of-fame/). The stars follow the
+  [Stars Audit](https://github.com/wekan/wekan.fi/blob/main/hall-of-fame/Audit-Stars.md):
+  a GitHub security advisory (GHSA) with details and a suggested fix gets 5 stars,
+  a report sent to security@wekan.fi or some other way, with a suggested fix, gets 3.
+- **Adding the GHSA later**: if you sent your report to security@wekan.fi, or some
+  other way, and are later able to add it as a "New draft security advisory" at
+  [WeKan Security Advisories](https://github.com/wekan/wekan/security/advisories),
+  please do. The maintainer of WeKan then requests the CVE through that GHSA, and
+  your Hall of Fame row is upgraded from 3 stars to 5.
 - **CVE Policy**: WeKan Security requests CVE at GitHub when releasing Security Advisory.
 
 ### 3. Post-Release and Public Disclosure:
 
-- Publicity: If you publish blog posts, give talks, or write articles about the
-  reported vulnerabilities, please send the links to us. We will link them
-  to your entry in the [Hall of Fame](https://wekan.fi/hall-of-fame/) for additional context.
 - Advisories reported at GitHub are listed at [WeKan Security Advisories](https://github.com/wekan/wekan/security/advisories).
-
-## How Should Reports Be Formatted?
-
-```
-Name: %name
-Twitter: %twitter
-Bug type: %bugtype
-Domain: %domain
-Severity: %severity
-URL: %url
-PoC: %poc
-CVSS (optional): %cvss
-CWSS (optional): %cwss
-```
+- DO NOT EMAIL [security@wekan.fi](security-at-wekan.fi.asc), because:
+  - Email is NOT secure or private.
+  - Using GitHub directly verifies that:
+    - You are:
+      - Saving my time by filling all details at GitHub, so that I can easily click request CVE at GitHub
+      - A correct GitHub user
+      - Really reading this SECURITY.md
+      - Knowing what you are doing
+    - You are not:
+      - Someone that tries to waste my time
+      - Trying to impersonate as some other GitHub user
+      - Spammer
+      - Bot
 
 ## Who can participate in the program
 
 Anyone who reports a unique security issue in scope and does not disclose it to
-a third party before we have patched and updated may be upon their approval
-added to the WeKan Hall of Fame https://wekan.fi/hall-of-fame/
+a third party before we have patched, and is able to add
+"New draft security advisory" at [WeKan Security Advisories](https://github.com/wekan/wekan/security/advisories).
 
 ## Which domains are in scope?
 
@@ -257,13 +272,13 @@ Meteor.startup(() => {
 
 On the Sandstorm platform, Standalone WeKan features like the Admin Panel are turned off using environment variables, because Sandstorm platform provides SSO for all apps running on Sandstorm.
 
-[Sandstorm](https://sandstorm.io) is a separate Open Source platform that has been
-[security audited](https://sandstorm.io/news/2017-03-02-security-review) and found bugs fixed.
+[Sandstorm](https://sandstorm.org) is a separate Open Source platform that has been
+[security audited](https://sandstorm.org/news/2017-03-02-security-review) and found bugs fixed.
 Sandstorm also has passwordless login, LDAP, SAML, Google, and other auth options already.
 On Sandstorm, code is read-only and signed by app maintainers; only grain content can be modified.
 WeKan on Sandstorm runs in a sandboxed grain; it does not have access elsewhere without a user-visible PowerBox request or opening a randomly-generated API key URL.
-Also read [Sandstorm Security Practices](https://docs.sandstorm.io/en/latest/using/security-practices/) and
-[Sandstorm Security non-events](https://docs.sandstorm.io/en/latest/using/security-non-events/).
+Also read [Sandstorm Security Practices](https://docs.sandstorm.org/en/latest/using/security-practices/) and
+[Sandstorm Security non-events](https://docs.sandstorm.org/en/latest/using/security-non-events/).
 For Sandstorm specific security issues you can contact [kentonv](https://github.com/kentonv) by email.
 
 ## What WeKan bugs are eligible?

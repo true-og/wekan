@@ -78,23 +78,53 @@ git clone git@github.com:YourGithubUsername/wekan.git
 
 cd wekan
 ```
-### 3. Select option 1 to install dependencies, and then Enter.
+### 3. Run the menu: Setup -> Install dependencies, then Setup -> Build WeKan, then Dev server -> localhost:3000
+
+`build.sh` shows a two-level menu. The top level is:
+
 ```
-./rebuild-wekan.sh
-
-1
-
-./rebuild-wekan.sh
-
-2
-
-./rebuild-wekan.sh
-
-3
+1) Setup   2) Dev server   3) Tests   4) Docker   5) Tools   6) Quit
 ```
-That does: 1 install dependencies, 2 builds wekan, 3 starts wekan in development mode with command `meteor`, so it can detect if some file changes and try to rebuild automatically and reload webbroser. But, still sometimes, it may need stopping with Ctrl-c and full build with option 2.
 
-And then [register and login](Adding-users) at http://localhost:4000
+Pick a category number, then the item number inside it (each submenu also has a `Back` entry to return to the top level). To build from source and run it:
+
+```
+# Install dependencies: Setup -> Install dependencies
+./build.sh
+1        # Setup
+1        # Install dependencies
+
+# Build WeKan: Setup -> Build WeKan
+./build.sh
+1        # Setup
+2        # Build WeKan
+
+# Run in development mode: Dev server -> localhost:3000
+./build.sh
+2        # Dev server
+1        # localhost:3000
+```
+
+The **Setup -> Build WeKan** step compiles WeKan, and **Dev server -> localhost:3000** starts it in development mode with the `meteor` command, so it detects file changes and tries to rebuild automatically and reload the web browser. Still, sometimes it may need stopping with Ctrl-c and a full **Setup -> Build WeKan** again.
+
+Building writes two directories, and the names are close enough to be worth
+telling apart:
+
+| | what it is |
+| --- | --- |
+| `.build/` | the RELEASE bundle, from `meteor build .build --directory`. `.build/bundle` is what gets deployed, tested and packaged. |
+| `_build/` | rspack's compiled output, written by ANY Meteor compile — a dev run, a test run, a release build. Meteor reads the app's main modules from `_build/main-prod/`, so it is a HANDOFF rather than a leftover. |
+
+Both are generated and gitignored; neither is ever edited or committed. `_build/`
+must **not** be added to `.meteorignore` — ignoring it breaks the build outright,
+and that file says why. It also holds a bundled second copy of every source
+file, so any script that walks the repository should skip it.
+
+If a dev server is already running, the **Dev server** options now stop it automatically before starting a fresh one — freeing **both** the app port and the rspack dev server's port `8080` (a leftover rspack dev server on 8080 otherwise makes the new server crash with `Error: listen EADDRINUSE ... :8080`), so you don't have to kill the old processes yourself.
+
+The other **Dev server** options run WeKan the same way on different addresses/ports: `localhost:3000 + trace warnings`, `localhost:3000 + bundle visualizer`, `CURRENT-IP:3000`, `CURRENT-IP:3000 + MONGO_URL 27019`, and `CUSTOM-IP:PORT` (which asks you for the IP and port). There is also a **Kill all dev servers** option that frees every dev/test port the script uses at once (3000/3001, 3100/3101, 4000/4001 and 8080) — handy if a previous run left something behind.
+
+And then [register and login](../Features/Login-Page/Adding-users.md) at http://localhost:3000
 
 ### OPTIONAL, NOT NEEDED: 5. Add new plugin package
 ```
@@ -145,19 +175,19 @@ Change to Meteor 3 branch:
 ```
 git checkout feature-meteor3
 ```
-Build wekan:
+Build wekan (Setup -> Build WeKan):
 ```
-./rebuild-wekan.sh
-
-2
+./build.sh
+1        # Setup
+2        # Build WeKan
 ```
 If there are errors, try to fix them.
 
-Or try to run wekan:
+Or try to run wekan (Dev server -> localhost:3000):
 ```
-./rebuild-wekan.sh
-
-3
+./build.sh
+2        # Dev server
+1        # localhost:3000
 ```
 # Updating
 
@@ -202,3 +232,63 @@ If you are changing Meteor and Node.js versions, you may need to reset Meteor:
 meteor reset
 ```
 Or alternatively, delete wekan repo (if you did not need any changes you made), and clone wekan repo again, and then build etc.
+
+The `build.sh` development bundle option announces cache removal, compilation to resolve Meteor plugin npm
+dependencies, dependency installation and compilation before each starts.
+Each stage streams its output to the terminal and the printed build log:
+`.tools/log/build-dev-bundle/YYYY-MM-DD_HH-MM-SS/dev.txt` for development bundles and
+`.tools/log/build-release-bundle/YYYY-MM-DD_HH-MM-SS/release.txt` for release bundles.
+Both scripts print the selected build log path again when the build finishes, including
+failed builds. Successful shell builds also append that completion message to the log.
+Each build gets its own time directory, keeping earlier runs separate. Same-second
+builds reserve a directory with a numeric suffix to avoid collisions. EVERYTHING also keeps its existing run-level `wekan-build.log`. Quiet stages report elapsed time and their process ID every
+15 seconds; this indicates that the command is running, rather than a percentage
+of completion. Required cache removal or dependency installation failures stop
+the build. Meteor plugin npm dependency compilation remains best effort and reports a warning
+when it fails. Release bundle preparation uses the same progress reporting and makes
+Meteor’s read-only server package manifest writable before updating node-gyp and
+installing the server dependencies, matching the release workflow.
+
+Build stages print the exact command before it starts. npm uses verbose logging
+and runs dependency lifecycle scripts in the foreground so their output is
+visible. Meteor bundle compilation uses its supported `--verbose` option;
+`meteor update --npm` has no verbose option and compiles the app to resolve
+plugin npm dependencies. `METEOR_PROFILE` defaults to 100 milliseconds, exposing
+Meteor tool timing diagnostics when available. Profiling output may appear only
+when a measured operation finishes; elapsed status still appears while it is quiet.
+
+Node module debugging, which prints every module resolution as it happens, is
+off unless `WEKAN_BUILD_TRACE_MODULES=1` is set: a Meteor build writes that trace
+at gigabytes a minute (1.1 GB in the first three minutes of a dev build). The
+local `tools/build-command-output.cjs` preload prints resolver subprocess commands
+and echoes their captured stdout and stderr while preserving exit codes and callback
+results. Both terminal and build log receive this output. Command arguments redact
+common credential fields; the tracer does not print the process environment.
+
+All logging managed by `build.sh` and `build.bat` uses
+`.tools/log/<operation>/YYYY-MM-DD_HH-MM-SS/`. Both honor `WEKAN_LOG_ROOT`.
+Same-second runs reserve a numeric suffix; previous run directories stay intact.
+
+| Operation | Directory type | Main log |
+| --- | --- | --- |
+| Development bundle | `build-dev-bundle` | `dev.txt` |
+| Release bundle | `build-release-bundle` | `release.txt` |
+| Development server | `dev-server` | `wekan-dev-server.log` (shell), `dev.txt` (Windows) |
+| Single test | `test-<test-name>` | `wekan-<test-name>.log` |
+| Full test matrix | `test-all-<mode>` | Existing per-job logs |
+| EVERYTHING (shell or Windows via Bash) | `test-everything-<mode>` | Existing per-stage logs |
+| All browsers (shell) | `test-playwright-all` | Existing per-browser logs |
+
+`WEKAN_LOGDIR` keeps child test jobs in the parent run directory. Windows build
+commands stream through PowerShell to the selected log; command exit status is
+retained. Native Windows execution was not available for this change; directory
+reservation logic and Windows menu/logger wiring are tested locally.
+
+Log directory naming is shared by Unix and Windows builds and release tools:
+`.tools/log/<operation>/YYYY-MM-DD_HH-MM-SS/`, using local time. Same-second
+starts reserve distinct directories with `-1`, `-2`, etc. to preserve earlier
+logs. Translation upload reports use `translations-push`, mirror archive/sync
+reports use `mirror-data`, mirror launcher output uses `mirror`, database
+conformance uses `test-db-conformance`, and speed diagnostics use `debug-speed`.
+Existing log directories remain where they were written. Dates inside JSON
+records retain their data format; this naming rule applies to log directories.

@@ -1,7 +1,7 @@
 import { CardSearchPaged } from '../../lib/cardSearch';
 import { Utils } from '/client/lib/utils';
 
-Template.myCardsHeaderBar.helpers({
+Template.myCardsControls.helpers({
   myCardsSort() {
     // eslint-disable-next-line no-console
     // console.log('sort:', Utils.myCardsSort());
@@ -15,7 +15,7 @@ Template.myCardsHeaderBar.helpers({
   },
 });
 
-Template.myCardsHeaderBar.events({
+Template.myCardsControls.events({
   'click .js-toggle-my-cards-choose-sort': Popup.open(
     'myCardsSortChange',
   ),
@@ -39,6 +39,9 @@ Template.myCards.onCreated(function () {
   search.runGlobalSearch(null);
   Meteor.subscribe('setting');
 });
+
+// Drag-to-scroll is handled centrally for all non-board pages by
+// defaultLayout's route-aware autorun (see client/components/main/layouts.js).
 
 Template.myCards.helpers({
   userId() {
@@ -172,6 +175,30 @@ Template.myCards.events({
   'click .js-previous-page'(evt, tpl) {
     evt.preventDefault();
     tpl.search.previousPage();
+  },
+
+  // #3640: My Cards spans many boards, so a plain `<a href="board-url">`
+  // navigates the browser away to the card's own board and loses the user's
+  // place in this list. Open the card details POPUP in place instead, using
+  // the same cross-board mechanism resultCard.js (global search results) and
+  // tableView.js (Board Table view) already use: subscribe the popup-only
+  // publication, then open the shared `cardDetails` popup template.
+  'click .js-minicard'(evt) {
+    if (evt.button !== 0 || evt.ctrlKey || evt.metaKey || evt.shiftKey || evt.altKey) return;
+    // `each card in ...` binds a lexical variable, not a Blaze data context.
+    // Read the identifiers from the link even when its child was clicked (#6702).
+    const { cardId, boardId } = evt.currentTarget.dataset;
+    if (!cardId || !boardId) return;
+    evt.preventDefault();
+    Meteor.subscribe('popupCardData', cardId, {
+      onReady() {
+        Session.set('popupCardId', cardId);
+        Session.set('popupCardBoardId', boardId);
+        if (!Popup.isOpen()) {
+          Popup.open('cardDetails')(evt);
+        }
+      },
+    });
   },
 });
 

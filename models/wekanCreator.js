@@ -1,11 +1,25 @@
+import { membersMode, membersMappingFor } from '/models/lib/importMembersMode';
 import { Meteor } from 'meteor/meteor';
 import { ReactiveCache } from '/imports/reactiveCache';
 import Actions from '/models/actions';
 import Activities from '/models/activities';
 import Attachments from '/models/attachments';
 import Boards from '/models/boards';
+import { boardPermissionUnderPolicy } from '/server/lib/boardVisibilityPolicy';
+import { BOARD_COLORS, CARD_COLORS, SWIMLANE_COLORS } from '/models/metadata/colors';
 import Users from '/models/users';
 import { generateUniversalAttachmentUrl } from '/models/lib/universalUrlGenerator';
+import { planImportedBoardMember } from '/models/lib/importedBoardMemberPlan';
+import { importedAttachmentsByCard } from '/models/lib/importedAttachmentsByCard';
+import { importedCardDates } from '/models/lib/importedCardDates';
+import { importedBoardPermission } from '/models/lib/importedBoardPermission';
+import {
+  getImportExportSecuritySettings,
+  anonymizedUserWord,
+  buildUserAnonymizationMap,
+  anonymizeUserDoc,
+  anonymizeBoardTextInPlace,
+} from '/models/lib/importExportSecurity';
 import CardComments from '/models/cardComments';
 import Cards from '/models/cards';
 import ChecklistItems from '/models/checklistItems';
@@ -36,7 +50,9 @@ import {
   calendar
 } from '/imports/lib/dateUtils';
 import getSlug from 'limax';
-import { validateAttachmentUrl } from './lib/attachmentUrlValidation';
+import { fetchImportedAttachment } from './lib/importAttachmentDownload';
+import { plannedBoardFields, runImportPipeline, writeImportedEntity } from './lib/importPipeline';
+const { cardParentIds, parentFields } = require('/models/lib/cardParents');
 
 const DateString = Match.Where(function(dateAsString) {
   check(dateAsString, String);
@@ -86,7 +102,10 @@ export class WekanCreator {
     // Map of rules Wekan ID => Wekan ID
     this.rules = {};
     // the members, indexed by Wekan member id => Wekan user ID
-    this.members = data.membersMapping ? data.membersMapping : {};
+    // Who the file's people become - chosen users, placeholders, or the
+    // person importing - the same for every source (models/lib/importMembersMode.js).
+    this.membersMode = membersMode(data);
+    this.members = membersMappingFor(data, () => Meteor.userId());
     // Map of triggers Wekan ID => Wekan ID
     this.triggers = {};
     // Map of actions Wekan ID => Wekan ID
@@ -180,7 +199,7 @@ export class WekanCreator {
         // allowed values (is it worth the maintenance?)
         color: String,
         permission: Match.Where(value => {
-          return ['private', 'public'].indexOf(value) >= 0;
+          return ['private', 'instance', 'public'].indexOf(value) >= 0;
         }),
       }),
     );
@@ -264,39 +283,6 @@ export class WekanCreator {
     ]);
   }
 
-  async getMembersToMap(data) {
-    // we will work on the list itself (an ordered array of objects) when a
-    // mapping is done, we add a 'wekan' field to the object representing the
-    // imported member
-    const membersToMap = data.members || [];
-    const users = data.users || [];
-    // auto-map based on username
-    const mappable = [];
-    for (const importedMember of membersToMap) {
-      importedMember.id = importedMember.userId;
-      delete importedMember.userId;
-      const user = users.filter(user => {
-        return user._id === importedMember.id;
-      })[0];
-      // Skip dangling user references (e.g. a board member whose account was
-      // deleted): the export only includes users that still exist, so `user`
-      // can be undefined here. Dereferencing it would throw and abort import.
-      if (!user) {
-        continue;
-      }
-      if (user.profile && user.profile.fullname) {
-        importedMember.fullName = user.profile.fullname;
-      }
-      importedMember.username = user.username;
-      const wekanUser = await ReactiveCache.getUser({ username: importedMember.username });
-      if (wekanUser) {
-        importedMember.wekanId = wekanUser._id;
-      }
-      mappable.push(importedMember);
-    }
-    return mappable;
-  }
-
   checkActions(wekanActions) {
     // XXX More check based on action type
     check(wekanActions, [
@@ -310,8 +296,14 @@ export class WekanCreator {
   // You must call parseActions before calling this one.
   async createBoardAndLabels(boardToImport) {
     const boardToCreate = {
+      ...plannedBoardFields(this),
       archived: boardToImport.archived,
-      color: boardToImport.color,
+      // Imported exports may carry a non-WeKan/legacy color (e.g. Trello's
+      // 'bgnone'); fall back to the default so collection2 validation does not
+      // reject the whole board insert.
+      color: BOARD_COLORS.includes(boardToImport.color)
+        ? boardToImport.color
+        : BOARD_COLORS[0],
       // very old boards won't have a creation activity so no creation date
       createdAt: this._now(boardToImport.createdAt),
       labels: [],
@@ -327,9 +319,20 @@ export class WekanCreator {
         },
       ],
       presentParentTask: boardToImport.presentParentTask,
+      // #3392: carry over the "Red Strings" dependency-overlay toggle.
+      showDependencies: boardToImport.showDependencies || false,
+      // #6409: carry over the board's list-width scope (Shared vs Personal) and
+      // the shared auto-width mode so imported boards keep the same behaviour.
+      // Per-list widths themselves are restored from each list's `width` in
+      // createLists().
+      allowsPersonalListWidth: !!boardToImport.allowsPersonalListWidth,
+      autoWidth: !!boardToImport.autoWidth,
       // Standalone Export has modifiedAt missing, adding modifiedAt to fix it
       modifiedAt: this._now(boardToImport.modifiedAt),
-      permission: boardToImport.permission,
+      // #1991: old Sandstorm exports have no permission field. Import those
+      // privately, and fail closed for malformed legacy values; only an
+      // explicit `public` export may create a public board.
+      permission: importedBoardPermission(boardToImport.permission),
       slug: getSlug(boardToImport.title) || 'board',
       stars: 0,
       title: await Boards.uniqueTitle(boardToImport.title),
@@ -339,20 +342,20 @@ export class WekanCreator {
     if (boardToImport.backgroundImageURL && !boardToImport.backgroundImageId) {
       boardToCreate.backgroundImageURL = boardToImport.backgroundImageURL;
     }
-    // now add other members
-    if (boardToImport.members) {
+    // now add other members. Without an explicit (deliberate, later) mapping we keep
+    // each ORIGINAL member: the placeholder created in createPlaceholderUsers reuses the
+    // original _id, so use wekanId if a mapping exists, else the original id. Imported
+    // members are added inactive and non-admin so they are visible in the board's member
+    // list but hold no permissions until reconciled — a wrong/auto mapping must never
+    // silently grant board access. The importer stays the sole active admin.
+    // When everyone is the person importing, nobody else joins the board.
+    if (boardToImport.members && this.membersMode !== 'me') {
+      const importerId = Meteor.userId();
       boardToImport.members.forEach(wekanMember => {
-        // is it defined and do we already have it in our list?
-        if (
-          wekanMember.wekanId &&
-          !boardToCreate.members.some(
-            member => member.wekanId === wekanMember.wekanId,
-          )
-        )
-          boardToCreate.members.push({
-            ...wekanMember,
-            userId: wekanMember.wekanId,
-          });
+        const entry = planImportedBoardMember(wekanMember, importerId);
+        if (entry && !boardToCreate.members.some(member => member.wekanId === entry.wekanId)) {
+          boardToCreate.members.push(entry);
+        }
       });
     }
 
@@ -370,7 +373,8 @@ export class WekanCreator {
       });
     }
 
-    const boardId = await Boards.direct.insertAsync(boardToCreate);
+    boardToCreate.permission = await boardPermissionUnderPolicy(boardToCreate.permission);
+    const boardId = await writeImportedEntity(Boards, boardToCreate);
     await Boards.direct.updateAsync(boardId, {
       $set: {
         modifiedAt: this._now(),
@@ -393,7 +397,7 @@ export class WekanCreator {
   }
 
   /**
-   * Create the Wekan cards corresponding to the supplied Wekan cards,
+   * Create the WeKan cards corresponding to the supplied WeKan cards,
    * as well as all linked data: activities, comments, and attachments
    * @param wekanCards
    * @param boardId
@@ -414,25 +418,49 @@ export class WekanCreator {
       if (!listId) {
         listId = await this._createDefaultList(boardId);
       }
+      // #1992: restore every card date carried in the export. createdAt
+      // prefers the export's createCard activity but falls back to the
+      // card's own createdAt (Sandstorm and old/pruned exports have no
+      // createCard activity, which used to reset the creation date to the
+      // import time); receivedAt and endAt were previously dropped entirely.
+      const cardDates = importedCardDates(
+        card,
+        this.createdAt.cards[card._id],
+        this._now(),
+      );
       const cardToCreate = {
         archived: card.archived,
         boardId,
         cardNumber: card.cardNumber || (await boardObj.getNextCardNumber()),
-        // very old boards won't have a creation activity so no creation date
-        createdAt: this._now(this.createdAt.cards[card._id]),
+        createdAt: cardDates.createdAt,
         dateLastActivity: this._now(),
         description: card.description,
         listId,
         swimlaneId: this.swimlanes[card.swimlaneId] || this._defaultSwimlaneId,
         sort: card.sort,
         title: card.title,
-        // we attribute the card to its creator if available
-        userId: this._user(this.createdBy.cards[card._id]),
+        // we attribute the card to its creator if available: the createCard
+        // activity's author when present, else the userId stored on the
+        // exported card itself (again, Sandstorm/old exports lack activities).
+        userId: this._user(this.createdBy.cards[card._id] || card.userId),
         isOvertime: card.isOvertime || false,
-        startAt: card.startAt ? this._now(card.startAt) : null,
-        dueAt: card.dueAt ? this._now(card.dueAt) : null,
+        receivedAt: cardDates.receivedAt,
+        startAt: cardDates.startAt,
+        dueAt: cardDates.dueAt,
+        endAt: cardDates.endAt,
         spentTime: card.spentTime || null,
+        // The two free-text "by" fields. They are exported - the JSON, the
+        // .zip, the CSV and both card exports all carry them - and were not
+        // imported, so a card came back having forgotten who asked for it and
+        // who assigned it. A round trip that loses a field is worse than one
+        // that never had it: the export looks complete.
+        requestedBy: card.requestedBy || '',
+        assignedBy: card.assignedBy || '',
       };
+      for (const [source, target] of [['requesters', 'requesters'], ['assigners', 'assigners']]) {
+        cardToCreate[target] = [...new Set((card[source] || [])
+          .map(userId => this.members[userId]).filter(Boolean))];
+      }
       // add labels
       if (card.labelIds) {
         cardToCreate.labelIds = card.labelIds.map(wekanId => {
@@ -477,8 +505,9 @@ export class WekanCreator {
           cardToCreate.assignees = wekanAssignees;
         }
       }
-      // set color
-      if (card.color) {
+      // set color (only if it is a recognized card color, so an out-of-range
+      // value from a foreign/old export cannot fail collection2 validation)
+      if (card.color && CARD_COLORS.includes(card.color)) {
         cardToCreate.color = card.color;
       }
 
@@ -493,7 +522,7 @@ export class WekanCreator {
       }
 
       // insert card
-      const cardId = await Cards.direct.insertAsync(cardToCreate);
+      const cardId = await writeImportedEntity(Cards, cardToCreate);
       // keep track of Wekan id => Wekan id
       this.cards[card._id] = cardId;
       // // log activity
@@ -525,7 +554,7 @@ export class WekanCreator {
           };
           // dateLastActivity will be set from activity insert, no need to
           // update it ourselves
-          const commentId = await CardComments.direct.insertAsync(commentToCreate);
+          const commentId = await writeImportedEntity(CardComments, commentToCreate);
           this.commentIds[comment._id] = commentId;
           // Activities.direct.insert({
           //   activityType: 'addComment',
@@ -554,7 +583,21 @@ export class WekanCreator {
             }
           };
           try {
-            if (att.file) {
+            // A .zip export's files are streamed into storage as they are
+            // read (models/importZip.js sets attachmentStream), whatever their
+            // size, within only the Admin Panel's upload limit.
+            const stream = !att.file && this.attachmentStream ? this.attachmentStream(att) : null;
+            if (stream) {
+              const { writeImportedAttachment } = require('/server/lib/importAttachmentStream');
+              const fileRef = await writeImportedAttachment(stream, {
+                fileName: att.name || 'attachment',
+                type: att.type,
+                userId: this._user(att.userId),
+                meta,
+                declaredSize: att.size,
+              });
+              await setCover(fileRef && fileRef._id);
+            } else if (att.file) {
               // WeKan exports embed attachment bytes as base64. Insert them
               // with the server-side Meteor-Files API writeAsync (insertAsync
               // is client-only; the older Attachments.insert(..., cb, true) call
@@ -572,12 +615,18 @@ export class WekanCreator {
               );
               await setCover(fileRef && fileRef._id);
             } else if (att.url) {
-              const validation = await validateAttachmentUrl(att.url);
-              if (!validation.valid) {
+              // FollowBleed (GHSA-j9p2-jm73-p549): downloading through
+              // Attachments.loadAsync() meant downloading with the platform
+              // fetch(), which follows redirects, so a validated public URL
+              // could 302 the download to an internal address and that body
+              // became the attachment. fetchImportedAttachment validates and
+              // pins every hop and hands back the bytes.
+              const downloaded = await fetchImportedAttachment(att.url);
+              if (downloaded.blocked) {
                 if (process.env.DEBUG === 'true') {
                   console.warn(
                     'Blocked attachment URL during Wekan import:',
-                    validation.reason,
+                    downloaded.reason,
                     att.url,
                   );
                 }
@@ -585,9 +634,14 @@ export class WekanCreator {
                 // importing all remaining cards).
                 continue;
               }
-              const fileRef = await Attachments.loadAsync(
-                att.url,
-                { meta, fileName: att.name },
+              const fileRef = await Attachments.writeAsync(
+                downloaded.buffer,
+                {
+                  fileName: att.name || 'attachment',
+                  type: att.type || downloaded.type || 'application/octet-stream',
+                  userId: this._user(att.userId),
+                  meta,
+                },
                 true,
               );
               await setCover(fileRef && fileRef._id);
@@ -606,7 +660,7 @@ export class WekanCreator {
   }
 
   /**
-   * Create the Wekan custom fields corresponding to the supplied Wekan
+   * Create the WeKan custom fields corresponding to the supplied WeKan
    * custom fields.
    * @param wekanCustomFields
    * @param boardId
@@ -627,15 +681,11 @@ export class WekanCreator {
         modifiedAt: field.modifiedAt,
       };
       //insert copy of custom field
-      const fieldId = await CustomFields.direct.insertAsync(fieldToCreate);
-      //set modified date to now
-      await CustomFields.direct.updateAsync(fieldId, {
-        $set: {
-          modifiedAt: this._now(),
-        },
+      await writeImportedEntity(CustomFields, fieldToCreate, {
+        ids: this.customFields,
+        sourceId: field._id,
+        touch: { modifiedAt: this._now() },
       });
-      //store mapping of old id to new id
-      this.customFields[field._id] = fieldId;
     }
   }
 
@@ -657,15 +707,14 @@ export class WekanCreator {
   // Create a single fallback list for cards that have no valid list to live
   // in (export contained no lists, or only dangling listId references).
   async _createDefaultList(boardId) {
-    const listId = await Lists.direct.insertAsync({
+    const listId = await writeImportedEntity(Lists, {
       archived: false,
       boardId,
       createdAt: this._now(),
       title: 'Default',
       sort: 0,
-    });
-    await Lists.direct.updateAsync(listId, {
-      $set: { updatedAt: this._now() },
+    }, {
+      touch: { updatedAt: this._now() },
     });
     this._defaultListId = listId;
     return listId;
@@ -684,30 +733,24 @@ export class WekanCreator {
         title: list.title,
         sort: list.sort ? list.sort : listIndex,
       };
-      const listId = await Lists.direct.insertAsync(listToCreate);
-      await Lists.direct.updateAsync(listId, {
-        $set: {
-          updatedAt: this._now(),
-        },
+      // #6409: preserve per-list settings that are shared across the board.
+      if (typeof list.width === 'number' && list.width >= 100 && list.width <= 1000) {
+        listToCreate.width = list.width;
+      }
+      if (list.color) {
+        listToCreate.color = list.color;
+      }
+      if (typeof list.collapsed === 'boolean') {
+        listToCreate.collapsed = list.collapsed;
+      }
+      const listId = await writeImportedEntity(Lists, listToCreate, {
+        ids: this.lists,
+        sourceId: list._id,
+        touch: { updatedAt: this._now() },
       });
-      this.lists[list._id] = listId;
       if (!this._defaultListId) {
         this._defaultListId = listId;
       }
-      // // log activity
-      // Activities.direct.insert({
-      //   activityType: 'importList',
-      //   boardId,
-      //   createdAt: this._now(),
-      //   listId,
-      //   source: {
-      //     id: list._id,
-      //     system: 'Wekan',
-      //   },
-      //   // We attribute the import to current user,
-      //   // not the creator of the original object
-      //   userId: this._user(),
-      // });
     }
   }
 
@@ -721,11 +764,8 @@ export class WekanCreator {
         title: 'Default',
         sort: 0,
       };
-      const created = await Swimlanes.direct.insertAsync(swimlaneToCreate);
-      await Swimlanes.direct.updateAsync(created, {
-        $set: {
-          updatedAt: this._now(),
-        },
+      const created = await writeImportedEntity(Swimlanes, swimlaneToCreate, {
+        touch: { updatedAt: this._now() },
       });
       this._defaultSwimlaneId = created;
       return;
@@ -743,17 +783,16 @@ export class WekanCreator {
         title: swimlane.title,
         sort: swimlane.sort ? swimlane.sort : swimlaneIndex,
       };
-      // set color
-      if (swimlane.color) {
+      // set color (only if it is a recognized swimlane color, so an out-of-range
+      // value from a foreign/old export cannot fail collection2 validation)
+      if (swimlane.color && SWIMLANE_COLORS.includes(swimlane.color)) {
         swimlaneToCreate.color = swimlane.color;
       }
-      const swimlaneId = await Swimlanes.direct.insertAsync(swimlaneToCreate);
-      await Swimlanes.direct.updateAsync(swimlaneId, {
-        $set: {
-          updatedAt: this._now(),
-        },
+      const swimlaneId = await writeImportedEntity(Swimlanes, swimlaneToCreate, {
+        ids: this.swimlanes,
+        sourceId: swimlane._id,
+        touch: { updatedAt: this._now() },
       });
-      this.swimlanes[swimlane._id] = swimlaneId;
       if (!this._defaultSwimlaneId) {
         this._defaultSwimlaneId = swimlaneId;
       }
@@ -773,19 +812,67 @@ export class WekanCreator {
       //        When importing boards between instances the IDs are definitely
       //        lost if source and parent are two different boards
       //        This is not the place to fix it, the entire subtask system needs to be rethought there.
-      const parentIdInNewBoard = this.cards[card.parentId]
-        ? this.cards[card.parentId]
-        : card.parentId;
+      // #3626: every parent of the card, each mapped the same way; a parent
+      // that does not exist here is dropped, and the first one kept is primary.
+      const parentsInNewBoard = [];
+      for (const sourceParentId of cardParentIds(card)) {
+        const parentIdInNewBoard = this.cards[sourceParentId]
+          ? this.cards[sourceParentId]
+          : sourceParentId;
+        if (await ReactiveCache.getCard(parentIdInNewBoard)) parentsInNewBoard.push(parentIdInNewBoard);
+      }
 
-      //if the parent card exists, proceed
-      if (await ReactiveCache.getCard(parentIdInNewBoard)) {
-        //set parent id of the card in the new board to the new id of the parent
+      //if a parent card exists, proceed
+      if (parentsInNewBoard.length) {
+        //set the parents of the card in the new board to the new ids
         await Cards.direct.updateAsync(cardIdInNewBoard, {
-          $set: {
-            parentId: parentIdInNewBoard,
-          },
+          $set: parentFields(parentsInNewBoard),
         });
       }
+    }
+  }
+
+  // #3392: PI Program Board "Red Strings". Remap each card's cardDependencies
+  // from the source card ids to the newly-created card ids, dropping any whose
+  // target card was not part of the imported board.
+  async createCardDependencies(wekanCards) {
+    for (const card of wekanCards) {
+      if (!card.cardDependencies || card.cardDependencies.length === 0) {
+        continue;
+      }
+      const newCardId = this.cards[card._id];
+      if (!newCardId) {
+        continue;
+      }
+      const remapped = card.cardDependencies
+        .map(dep => {
+          // Tolerate legacy bare-string entries as well as { cardId, ... }.
+          const oldDepId = typeof dep === 'string' ? dep : dep.cardId;
+          const newDepId = this.cards[oldDepId];
+          if (!newDepId) return null;
+          return typeof dep === 'string'
+            ? { cardId: newDepId }
+            : { ...dep, cardId: newDepId };
+        })
+        .filter(Boolean);
+      if (remapped.length > 0) {
+        await Cards.direct.updateAsync(newCardId, {
+          $set: { cardDependencies: remapped },
+        });
+      }
+    }
+  }
+
+  // #3257: the cards attached to a card follow the cards that came in the same
+  // export to their new ids; one that did not is dropped rather than left
+  // pointing at a card of the installation the export came from.
+  async createAttachedCards(wekanCards) {
+    const { remapAttachedCardIds } = require('/models/lib/attachedCards');
+    for (const card of wekanCards) {
+      const newCardId = this.cards[card._id];
+      if (!newCardId || !Array.isArray(card.attachedCardIds) || !card.attachedCardIds.length) continue;
+      const remapped = remapAttachedCardIds(card.attachedCardIds, this.cards, newCardId);
+      if (remapped.length) await Cards.direct.updateAsync(newCardId, { $set: { attachedCardIds: remapped } });
     }
   }
 
@@ -808,8 +895,10 @@ export class WekanCreator {
         createdAt: checklist.createdAt,
         sort: checklist.sort ? checklist.sort : checklistIndex,
       };
-      const checklistId = await Checklists.direct.insertAsync(checklistToCreate);
-      this.checklists[checklist._id] = checklistId;
+      const checklistId = await writeImportedEntity(Checklists, checklistToCreate, {
+        ids: this.checklists,
+        sourceId: checklist._id,
+      });
       result.push(checklistId);
     }
     return result;
@@ -849,8 +938,7 @@ export class WekanCreator {
     for (const rule of wekanRules) {
       // Create the rule
       rule.boardId = boardId;
-      rule.triggerId = this.triggers[rule.triggerId];
-      rule.actionId = this.actions[rule.actionId];
+      require('/models/lib/ruleParts').remapRuleParts(rule, this.triggers, this.actions);
       delete rule._id;
       await Rules.direct.insertAsync(rule);
     }
@@ -881,29 +969,9 @@ export class WekanCreator {
   }
 
   parseActivities(wekanBoard) {
+    this.attachments = importedAttachmentsByCard(wekanBoard);
     wekanBoard.activities.forEach(activity => {
       switch (activity.activityType) {
-        case 'addAttachment': {
-          // We have to be cautious, because the attachment could have been removed later.
-          // In that case Wekan still reports its addition, but removes its 'url' field.
-          // So we test for that
-          const wekanAttachment = wekanBoard.attachments.filter(attachment => {
-            return attachment._id === activity.attachmentId;
-          })[0];
-
-          if (typeof wekanAttachment !== 'undefined' && wekanAttachment) {
-            if (wekanAttachment.url || wekanAttachment.file) {
-              // we cannot actually create the Wekan attachment, because we don't yet
-              // have the cards to attach it to, so we store it in the instance variable.
-              const wekanCardId = activity.cardId;
-              if (!this.attachments[wekanCardId]) {
-                this.attachments[wekanCardId] = [];
-              }
-              this.attachments[wekanCardId].push(wekanAttachment);
-            }
-          }
-          break;
-        }
         case 'addComment': {
           const wekanComment = wekanBoard.comments.filter(comment => {
             return comment._id === activity.commentId;
@@ -1054,29 +1122,10 @@ export class WekanCreator {
     }
   }
 
-  //check(board) {
-  check() {
-    //try {
-    // check(data, {
-    //   membersMapping: Match.Optional(Object),
-    // });
-    // this.checkActivities(board.activities);
-    // this.checkBoard(board);
-    // this.checkLabels(board.labels);
-    // this.checkLists(board.lists);
-    // this.checkSwimlanes(board.swimlanes);
-    // this.checkCards(board.cards);
-    //this.checkChecklists(board.checklists);
-    // this.checkRules(board.rules);
-    // this.checkActions(board.actions);
-    //this.checkTriggers(board.triggers);
-    //this.checkChecklistItems(board.checklistItems);
-    //} catch (e) {
-    //  throw new Meteor.Error('error-json-schema');
-    // }
-  }
-
   async create(board, currentBoardId) {
+    // Validate every Scrum reference before even placeholder users are created.
+    const { validateScrumImport } = require('/server/lib/scrumTransferImport');
+    validateScrumImport(board);
     // TODO : Make isSandstorm variable global
     const isSandstorm =
       Meteor.settings &&
@@ -1086,23 +1135,42 @@ export class WekanCreator {
       const currentBoard = await ReactiveCache.getBoard(currentBoardId);
       await currentBoard.archive();
     }
-    this.parseActivities(board);
-    const boardId = await this.createBoardAndLabels(board);
-    await this.createLists(board.lists, boardId);
-    await this.createSwimlanes(board.swimlanes, boardId);
-    await this.createCustomFields(board.customFields, boardId);
-    await this.createCards(board.cards, boardId);
-    await this.createSubtasks(board.cards);
-    await this.createChecklists(board.checklists, boardId);
-    await this.createChecklistItems(board.checklistItems, boardId);
-    await this.importActivities(board.activities, boardId);
-    await this.createTriggers(board.triggers, boardId);
-    await this.createActions(board.actions, boardId);
-    await this.createRules(board.rules, boardId);
-    await this.recordImportedUsernames(board, boardId);
-    await this.recreateBackgrounds(board, boardId);
-    // XXX add members
-    return boardId;
+    // Admin Panel / Features / Security: scrub the incoming board data BEFORE any
+    // placeholder user, card or comment is created, so every downstream step reads
+    // already-anonymized / avatar-free data.
+    await this.applyImportSecurity(board);
+    // Preserve the ORIGINAL members instead of mapping them onto existing accounts at
+    // import time (a wrong mapping attaches the wrong person and can leak board
+    // permissions). This creates an inert placeholder user for each original member,
+    // reusing the original _id so every card/comment/activity reference resolves to the
+    // right person, and restores their avatar. Deliberate mapping/merging to real
+    // accounts (and LDAP reconciliation) happens later, not here.
+    return runImportPipeline(this, board, [
+      { method: 'createPlaceholderUsers' },
+      { method: 'parseActivities' },
+      { method: 'createBoardAndLabels', createsBoard: true },
+      { method: 'createLists', source: 'lists' },
+      { method: 'createSwimlanes', source: 'swimlanes' },
+      { method: 'createCustomFields', source: 'customFields' },
+      { method: 'createCards', source: 'cards' },
+      { method: 'createSubtasks', source: 'cards' },
+      { method: 'createCardDependencies', source: 'cards' },
+      { method: 'createAttachedCards', source: 'cards' },
+      { method: 'createScrumData' },
+      { method: 'createChecklists', source: 'checklists' },
+      { method: 'createChecklistItems', source: 'checklistItems' },
+      { method: 'importActivities', source: 'activities' },
+      { method: 'createTriggers', source: 'triggers' },
+      { method: 'createActions', source: 'actions' },
+      { method: 'createRules', source: 'rules' },
+      { method: 'recordImportedUsernames' },
+      { method: 'recreateBackgrounds' },
+    ]);
+  }
+
+  async createScrumData(board, boardId) {
+    const { importScrumTransfer } = require('/server/lib/scrumTransferImport');
+    await importScrumTransfer(this, board, boardId);
   }
 
   // Re-create the board's background images, which are exported as board-level
@@ -1112,23 +1180,32 @@ export class WekanCreator {
   async recreateBackgrounds(board, boardId) {
     if (!Meteor.isServer) return;
     const backgrounds = (board.attachments || []).filter(
-      att => att && att.source === 'board-background' && att.file && !att.cardId,
+      att => att && att.source === 'board-background' && !att.cardId && (att.file || this.attachmentStream),
     );
     if (!backgrounds.length) return;
     const idMap = {};
     for (const bg of backgrounds) {
       try {
-        const buffer = Buffer.from(bg.file, 'base64');
-        const fileRef = await Attachments.writeAsync(
-          buffer,
-          {
+        const stream = !bg.file && this.attachmentStream ? this.attachmentStream(bg) : null;
+        if (!bg.file && !stream) continue;
+        const fileRef = stream
+          ? await require('/server/lib/importAttachmentStream').writeImportedAttachment(stream, {
             fileName: bg.name || 'background',
             type: bg.type || 'image/jpeg',
             userId: this._user(),
             meta: { boardId, source: 'board-background' },
-          },
-          true,
-        );
+            declaredSize: bg.size,
+          })
+          : await Attachments.writeAsync(
+            Buffer.from(bg.file, 'base64'),
+            {
+              fileName: bg.name || 'background',
+              type: bg.type || 'image/jpeg',
+              userId: this._user(),
+              meta: { boardId, source: 'board-background' },
+            },
+            true,
+          );
         if (fileRef && fileRef._id && bg._id) {
           idMap[bg._id] = fileRef._id;
         }
@@ -1155,6 +1232,131 @@ export class WekanCreator {
   // user's importUsernames (so future imports auto-map); unmapped members'
   // usernames are stored on the board's importUsernames for an admin to assign
   // to real users later via the People panel.
+  // Pick a free username: keep the original if it is not taken, else suffix it so we
+  // never rename/steal a different existing account's username. The placeholder still
+  // keeps the original _id, so member references resolve to it regardless of username.
+  async _uniquePlaceholderUsername(base) {
+    const name = (String(base || '').trim()) || 'imported';
+    let candidate = name;
+    let n = 0;
+    // eslint-disable-next-line no-await-in-loop
+    while (await Meteor.users.findOneAsync({ username: candidate }, { fields: { _id: 1 } })) {
+      n += 1;
+      candidate = `${name}-${n}`;
+    }
+    return candidate;
+  }
+
+  // Admin Panel / Features / Security: scrub the incoming board data in place.
+  //  - disableImportAvatars: drop every avatar carried in board.users so no avatar
+  //    is restored on import.
+  //  - anonymizeImportUsers: replace each imported user's username/fullname/initials
+  //    (and any avatar) with counter placeholders (user1, user2, ...) and rewrite
+  //    @username mentions + requestedBy/assignedBy in the imported card/comment text.
+  //    Because this runs before createPlaceholderUsers and member mapping, the
+  //    imported board is fully anonymized: placeholders are named user1/user2 and no
+  //    real account is auto-matched by the original username.
+  // The placeholder word is translated to the importing user's language.
+  async applyImportSecurity(board) {
+    if (!Meteor.isServer) return;
+    const security = await getImportExportSecuritySettings();
+    const users = Array.isArray(board.users) ? board.users : [];
+
+    if (security.disableImportAvatars) {
+      users.forEach(u => {
+        if (u && u.profile) {
+          delete u.profile.avatarFile;
+          delete u.profile.avatarFileName;
+          delete u.profile.avatarFileType;
+          delete u.profile.avatarUrl;
+        }
+      });
+    }
+
+    if (security.anonymizeImportUsers) {
+      let language = 'en';
+      try {
+        const uid = Meteor.userId();
+        if (uid) {
+          const currentUser = await ReactiveCache.getUser(uid);
+          language = (currentUser && currentUser.profile && currentUser.profile.language) || 'en';
+        }
+      } catch (e) { /* default to English */ }
+      const map = buildUserAnonymizationMap(users, anonymizedUserWord(language));
+      users.forEach(u => anonymizeUserDoc(u, map));
+      anonymizeBoardTextInPlace(board, map.byUsername);
+    }
+  }
+
+  // Create an inert placeholder user for each original member carried in board.users,
+  // reusing the original _id so all references resolve, and populate this.members as an
+  // identity map (id -> id) so _user() keeps the original person instead of collapsing
+  // to the importer. Placeholders cannot log in (loginDisabled), are inactive until
+  // reconciled (isActive:false), and carry no secrets. Their avatar file (embedded as
+  // base64 by the exporter) is restored to files/avatars. Server-only; best-effort.
+  async createPlaceholderUsers(board) {
+    if (!Meteor.isServer) return;
+    const users = Array.isArray(board.users) ? board.users : [];
+    let localizeAvatarFromBuffer = null;
+    try {
+      ({ localizeAvatarFromBuffer } = await import('/server/lib/localizeAvatar'));
+    } catch (e) { /* avatar restore unavailable; users still imported */ }
+
+    for (const u of users) {
+      if (!u || !u._id) continue;
+      // #6506: a member the map-members step mapped to an EXISTING WeKan user is
+      // already in this.members (id -> real user id); keep that and do NOT create a
+      // placeholder or overwrite it with the identity mapping below.
+      if (this.members[u._id]) continue;
+      const profile = u.profile || {};
+      let existing = await ReactiveCache.getUser(u._id);
+      if (!existing) {
+        const username = await this._uniquePlaceholderUsername(u.username || `imported-${u._id}`);
+        try {
+          // .direct bypasses the after.insert hooks (Sandstorm identity sync, the
+          // disableRegistration/invitation-code gate) that would otherwise reject or
+          // mis-handle a non-account placeholder.
+          await Users.direct.insertAsync({
+            _id: u._id,
+            username,
+            profile: {
+              fullname: profile.fullname || '',
+              initials: profile.initials || '',
+            },
+            authenticationMethod: 'imported',
+            loginDisabled: true,
+            isActive: false,
+            importedFromBoardId: board._id || null,
+            importedAt: new Date(),
+            createdAt: new Date(),
+            services: {},
+          });
+        } catch (e) {
+          // _id/username race: another concurrent insert won — carry on and use it.
+          if (process.env.DEBUG === 'true') console.warn('placeholder user insert:', u._id, e && e.message);
+        }
+      }
+
+      // Restore the original avatar file (base64) into files/avatars and set a local
+      // profile.avatarUrl, so the original member's picture shows and is exportable
+      // again — works on Sandstorm too (writes a local file, no fetch).
+      if (localizeAvatarFromBuffer && profile.avatarFile) {
+        try {
+          const buffer = Buffer.from(profile.avatarFile, 'base64');
+          await localizeAvatarFromBuffer(u._id, buffer, {
+            type: profile.avatarFileType || 'image/png',
+            name: profile.avatarFileName || `${u._id}.png`,
+          });
+        } catch (e) {
+          if (process.env.DEBUG === 'true') console.warn('placeholder avatar restore:', u._id, e && e.message);
+        }
+      }
+
+      // Identity mapping: keep the original member (do NOT remap to the importer).
+      this.members[u._id] = u._id;
+    }
+  }
+
   async recordImportedUsernames(board, boardId) {
     if (!Meteor.isServer) return;
     const usersById = {};
@@ -1169,8 +1371,13 @@ export class WekanCreator {
       const username = (sourceUser && sourceUser.username) || member.username;
       if (!username) continue;
       const wekanId = this.members[sourceId];
-      if (wekanId) {
-        await Users.updateAsync(wekanId, {
+      // Only record the imported username on a Wekan user that actually exists;
+      // a stale/bogus mapping target is treated as unmapped. Use `.direct` so
+      // this bookkeeping write bypasses collection2 validation and can never
+      // abort the whole import.
+      const mappedUser = wekanId ? await ReactiveCache.getUser(wekanId) : null;
+      if (mappedUser) {
+        await Users.direct.updateAsync(wekanId, {
           $addToSet: { importUsernames: username },
         });
       } else if (!unmapped.includes(username)) {

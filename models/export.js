@@ -1,12 +1,60 @@
 import { ReactiveCache } from '/imports/reactiveCache';
 import { Exporter } from './exporter';
+import { EXTERNAL_EXPORT_FORMATS } from './lib/externalExporters';
+import {
+  BOARD_EXPORT_FIELD_KEYS,
+  parseExportFields,
+  parseExportScope,
+} from './lib/exportFields';
 import { Meteor } from 'meteor/meteor';
 import ImpersonatedUsers from '/models/impersonatedUsers';
 
 if (Meteor.isServer) {
   const { WebApp } = require('meteor/webapp');
-  const { sendJsonResult } = require('/server/apiMiddleware');
+  const { sendJsonResult, safeRoute } = require('/server/apiMiddleware');
   const { Authentication } = require('/server/authentication');
+
+  // Record an export authorization denial to the Admin Panel security log
+  // (best-effort, never breaks the response). See docs/Security/Remediation/WeKan.md.
+  // Record an export authorization denial to the Admin Panel security log
+  // (best-effort, never breaks the response). Only when the caller cannot see
+  // the board at all: an assigned-only member reaches the export menus and is
+  // refused in ordinary use, and recording that (high, blocked) disabled their
+  // account. See docs/Security/Remediation/WeKan.md.
+  function logExportDenied(user, boardId) {
+    (async () => {
+      try {
+        const Boards = require('/models/boards').default;
+        const board = await Boards.findOneAsync({ _id: boardId });
+        if (board && user && board.isVisibleBy(user)) return;
+        require('/server/lib/securityLog').record({
+          key: 'authz.export', action: 'blocked', source: 'export',
+          detail: 'export denied (no board visibility)',
+        });
+      } catch (e) { /* logging must never break the response */ }
+    })();
+  }
+
+  // Stream a full board export straight to the response (a card/attachment at a
+  // time) instead of buffering the whole board object — see Exporter.buildStream.
+  async function streamJsonBoardExport(res, exporter) {
+    res.statusCode = 200;
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Content-Type', 'application/json');
+    try {
+      await exporter.buildStream(res);
+      res.end();
+    } catch (error) {
+      console.error('board export stream failed:', error);
+      // If we have not flushed any body yet the headers are still mutable, so we
+      // can return a clean JSON error; otherwise the partial body is already on
+      // the wire. Abort the transfer so clients cannot mistake it for a
+      // successfully downloaded backup.
+      if (!res.headersSent) sendJsonResult(res, { code: 500, data: { error: 'Export failed' } });
+      else res.destroy();
+    }
+  }
 
   // todo XXX once we have a real API in place, move that route there
   // todo XXX also  share the route definition between the client and the server
@@ -29,7 +77,9 @@ if (Meteor.isServer) {
    * @param {string} boardId the ID of the board we are exporting
    * @param {string} authToken the loginToken
    */
-  WebApp.handlers.get('/api/boards/:boardId/export', async function (req, res) {
+  WebApp.handlers.get('/api/boards/:boardId/export', safeRoute(async function (req, res) {
+    // Before anything else: Admin Panel can turn all export off (CrossBoardExportBleed).
+    if (await require('/models/lib/importExportSecurity').refuseDisabledExport(res)) return;
     const boardId = req.params.boardId;
     let user = null;
     let impersonateDone = false;
@@ -38,18 +88,28 @@ if (Meteor.isServer) {
     // First check if board exists and is public to avoid unnecessary authentication
     const board = await ReactiveCache.getBoard(boardId);
     if (!board) {
-      sendJsonResult(res, 404);
+      sendJsonResult(res, { code: 404, data: { error: 'Not found' } });
       return;
     }
+
+    // #5870: ?attachments=false exports the board without the base64 attachment
+    // file data, so very large boards can be exported without overflowing the
+    // JSON serializer. Default (omitted/any other value) keeps the full export.
+    // #1173: the same two the PDF, Excel and .zip exports read - WHICH cards
+    // (a swimlane, a list, a card, a checklist, or the whole board) and WHICH
+    // PARTS of them, from the one selection popup. Parsed by the shared reader
+    // so a menu's `listId` means the same thing at every export route.
+    const exportOptions = {
+      excludeAttachments: req.query.attachments === 'false',
+      scope: parseExportScope(req.query),
+      fields: parseExportFields(req.query && req.query.fields, BOARD_EXPORT_FIELD_KEYS),
+    };
 
     // If board is public, skip expensive authentication operations
     if (board.isPublic()) {
       // Public boards don't require authentication - skip hash operations
-      const exporter = new Exporter(boardId);
-      sendJsonResult(res, {
-        code: 200,
-        data: await exporter.build(),
-      });
+      const exporter = new Exporter(boardId, undefined, exportOptions);
+      await streamJsonBoardExport(res, exporter);
       return;
     }
 
@@ -61,29 +121,42 @@ if (Meteor.isServer) {
         if (process.env.DEBUG === 'true') {
           console.warn('Suspiciously long auth token received, rejecting to prevent resource abuse');
         }
-        sendJsonResult(res, 400);
+        sendJsonResult(res, { code: 400, data: { error: 'Bad request' } });
         return;
       }
 
-      const hashToken = Accounts._hashLoginToken(loginToken);
-      user = await ReactiveCache.getUser({
-        'services.resume.loginTokens.hashedToken': hashToken,
-      });
+      user = await require('/server/lib/activeUser').activeUserByToken(loginToken, 'export', req);
+      if (!user) {
+        // GHSA-3gcg-g6rf-w2rx: an authToken that matches no login token makes the
+        // lookup answer `undefined`, and `user._id` on that threw a TypeError out of
+        // an async route handler - an unhandled rejection, which this app turns into
+        // a process crash (see the note in server/ldapGroupSync.js). One crafted GET
+        // took the whole server down. The same guard already existed in
+        // models/exportPDF.js and models/exportExcelCard.js; these handlers were
+        // missed.
+        sendJsonResult(res, { code: 401, data: { error: 'Invalid token' } });
+        return;
+      }
       adminId = user._id.toString();
       impersonateDone = await ReactiveCache.getImpersonatedUser({ adminId: adminId });
     } else if (!Meteor.settings.public.sandstorm) {
       try {
-        await Authentication.checkUserId(req.userId);
+        // Any logged-in user may request an export; board-level access is
+        // enforced below by exporter.canExport() (board.isVisibleBy).
+        Authentication.checkLoggedIn(req.userId);
       } catch (error) {
-        sendJsonResult(res, error.statusCode || 403);
+        sendJsonResult(res, { code: error.statusCode || 403, data: { error: (error && error.reason) || 'Forbidden' } });
         return;
       }
-      user = await ReactiveCache.getUser({ _id: req.userId, isAdmin: true });
+      user = await ReactiveCache.getUser({ _id: req.userId });
     }
 
-    const exporter = new Exporter(boardId);
-    if (await exporter.canExport(user) || impersonateDone) {
-      if (impersonateDone) {
+    // Anonymized user placeholders ("user1"/"käyttäjä1") follow the exporting
+    // user's language.
+    exportOptions.userLanguage = (user && user.profile && user.profile.language) || 'en';
+    const exporter = new Exporter(boardId, undefined, exportOptions);
+    if (await exporter.canExport(user)) {
+      if (impersonateDone && adminId) {
         await ImpersonatedUsers.insertAsync({
           adminId: adminId,
           boardId: boardId,
@@ -91,15 +164,268 @@ if (Meteor.isServer) {
         });
       }
 
-      sendJsonResult(res, {
-        code: 200,
-        data: await exporter.build(),
-      });
+      await streamJsonBoardExport(res, exporter);
     } else {
       // we could send an explicit error message, but on the other hand the only
       // way to get there is by hacking the UI so let's keep it raw.
-      sendJsonResult(res, 403);
+      logExportDenied(user, boardId);
+      sendJsonResult(res, { code: 403, data: { error: 'Forbidden' } });
     }
+  }));
+
+  /**
+   * @operation exportCalendarIcs
+   * @tag Boards
+   *
+   * @summary Subscribable iCalendar (.ics) feed of a board's card dates.
+   *
+   * @description Answers GitHub issue #2836 ("CalDAV or iCal Support") - #808
+   * added the in-app Calendar VIEW, this is the separate EXPORT/subscribe
+   * feed the issue actually asked for. One VEVENT per Received / Start-End
+   * span / Due date a card has, the same four dates the Calendar view (#808)
+   * draws (see models/lib/calendarFilter.js and models/lib/icalExport.js).
+   * This is one-way and read-only: paste the URL into a calendar app's
+   * "subscribe to URL" feature. Full two-way CalDAV sync is a much larger,
+   * separate, stateful sync protocol and is out of scope.
+   *
+   * @param {string} boardId the ID of the board whose card dates to export
+   * @param {string} authToken the loginToken (omit for a public board)
+   */
+  WebApp.handlers.get('/api/boards/:boardId/calendar.ics', safeRoute(async function (req, res) {
+    // Before anything else: Admin Panel can turn all export off (CrossBoardExportBleed).
+    if (await require('/models/lib/importExportSecurity').refuseDisabledExport(res)) return;
+    const boardId = req.params.boardId;
+    let user = null;
+
+    const board = await ReactiveCache.getBoard(boardId);
+    if (!board) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Board not found');
+      return;
+    }
+
+    if (!board.isPublic()) {
+      const loginToken = req.query.authToken;
+      if (loginToken) {
+        if (loginToken.length > 10000) {
+          res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end('Invalid token');
+          return;
+        }
+        user = await require('/server/lib/activeUser').activeUserByToken(loginToken, 'export', req);
+        if (!user) {
+          // GHSA-3gcg-g6rf-w2rx - see the note above: an unknown token answers
+          // `undefined`, and dereferencing it crashed the server.
+          res.writeHead(401, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end('Invalid token');
+          return;
+        }
+      } else if (!Meteor.settings.public.sandstorm) {
+        try {
+          Authentication.checkLoggedIn(req.userId);
+        } catch (error) {
+          res.writeHead(error.statusCode || 403, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end((error && error.reason) || 'Forbidden');
+          return;
+        }
+        user = await ReactiveCache.getUser({ _id: req.userId });
+      }
+    }
+
+    const exportOptions = { scope: parseExportScope(req.query) };
+    const exporter = new Exporter(boardId, undefined, exportOptions);
+    if (!(await exporter.canExport(user))) {
+      logExportDenied(user, boardId);
+      res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Forbidden');
+      return;
+    }
+
+    const { cardsToIcs } = require('/models/lib/icalExport');
+    const cardSelector = await exporter._scopedCardSelector(boardId);
+    cardSelector.archived = false;
+    const cards = await ReactiveCache.getCards(cardSelector);
+    // Admin Panel / Anonymize export users: @mentions in what the feed carries
+    // (CrossBoardExportBleed - only the JSON export anonymized).
+    await require('/models/lib/importExportSecurity').anonymizeExportIdentities({ boardId, cards });
+    const cardShapes = cards
+      .filter(card => card.startAt || card.dueAt || card.endAt || card.receivedAt)
+      .map(card => ({
+        _id: card._id,
+        title: card.title,
+        description: card.description,
+        startAt: card.startAt,
+        dueAt: card.dueAt,
+        endAt: card.endAt,
+        receivedAt: card.receivedAt,
+        url: typeof card.absoluteUrl === 'function' ? card.absoluteUrl(board) : undefined,
+      }));
+
+    const icsText = cardsToIcs(cardShapes, { calendarName: `WeKan - ${board.title}` });
+    res.writeHead(200, {
+      'Content-Type': 'text/calendar; charset=utf-8',
+      'Content-Disposition': `inline; filename="${board.slug || board._id}.ics"`,
+      'Cache-Control': 'no-store',
+    });
+    res.end(icsText);
+  }));
+
+  /**
+   * @operation exportZip
+   * @tag Boards
+   * @summary Export as a .zip - the JSON document, and the attachments as files.
+   * @description The same export the JSON route produces, with the attachments
+   * beside it as the files they are instead of base64 inside the document, so a
+   * board whose attachments are too large for one JSON string still exports.
+   * Takes the same `fields`, `swimlaneId`, `listId`, `cardId` and `checklistId`
+   * parameters as every other export.
+   * @param {string} boardId the ID of the board we are exporting
+   * @param {string} authToken the loginToken
+   */
+  WebApp.handlers.get('/api/boards/:boardId/exportZip', safeRoute(async function (req, res) {
+    // Before anything else: Admin Panel can turn all export off (CrossBoardExportBleed).
+    if (await require('/models/lib/importExportSecurity').refuseDisabledExport(res)) return;
+    const boardId = req.params.boardId;
+    let user = null;
+
+    const board = await ReactiveCache.getBoard(boardId);
+    if (!board) {
+      sendJsonResult(res, { code: 404, data: { error: 'Not found' } });
+      return;
+    }
+
+    const options = {
+      scope: parseExportScope(req.query),
+      fields: parseExportFields(req.query && req.query.fields, BOARD_EXPORT_FIELD_KEYS),
+    };
+
+    if (!board.isPublic()) {
+      const loginToken = req.query.authToken;
+      if (loginToken) {
+        if (loginToken.length > 10000) {
+          sendJsonResult(res, { code: 400, data: { error: 'Bad request' } });
+          return;
+        }
+        user = await require('/server/lib/activeUser').activeUserByToken(loginToken, 'export', req);
+        if (!user) {
+          sendJsonResult(res, { code: 401, data: { error: 'Invalid token' } });
+          return;
+        }
+      } else if (!Meteor.settings.public.sandstorm) {
+        try {
+          Authentication.checkLoggedIn(req.userId);
+        } catch (error) {
+          sendJsonResult(res, {
+            code: error.statusCode || 403,
+            data: { error: (error && error.reason) || 'Forbidden' },
+          });
+          return;
+        }
+        user = await ReactiveCache.getUser({ _id: req.userId });
+      }
+    }
+
+    options.userLanguage = (user && user.profile && user.profile.language) || 'en';
+    const { ExporterZip } = require('./server/ExporterZip');
+    const exporter = new ExporterZip(boardId, options);
+    if (await exporter.canExport(user)) {
+      const name = String(board.title || 'export-board')
+        .replace(/[^a-z0-9._-]+/gi, '-').replace(/-+/g, '-').replace(/^-|-$/g, '')
+        .slice(0, 80) || 'export-board';
+      // AWAITED: an un-awaited build(res) is #6591 - a rejection that goes
+      // nowhere and a response that is never ended.
+      await exporter.build(res, `${name}.zip`);
+    } else {
+      logExportDenied(user, boardId);
+      sendJsonResult(res, { code: 403, data: { error: 'Forbidden' } });
+    }
+  }));
+
+  // Kanboard is one of the formats below: GET /api/boards/:boardId/export/kanboard
+  // is served by serveExternalExport, with the export selection and the
+  // admin-only custom field check every other format has.
+
+  // Generalized export to other tools: NextCloud Deck, Kanboard, OpenProject,
+  // GitHub, GitLab, Gitea, Forgejo, Jira, Asana, Zenkit, Trello, Markdown, Leo. One shared auth handler, one route per
+  // format. Every one of these formats is JSON except Markdown and Leo, which are
+  // plain text meant to be read/edited directly or opened by the tool they
+  // belong to - wrapping them in `{"data": "..."}` would defeat that.
+  async function serveExternalExport(req, res, format) {
+    const boardId = req.params.boardId;
+    const board = await ReactiveCache.getBoard(boardId);
+    if (!board) {
+      sendJsonResult(res, { code: 404, data: { error: 'Not found' } });
+      return;
+    }
+    let user = null;
+    const respond = async () => {
+      await require('/server/lib/adminOnlyCustomFields').assertFieldExport(boardId, user?._id);
+      // The bytes for this format (server/lib/renderExternalExport.js), shared
+      // with "Export all boards" (server/lib/exportAllBoards.js).
+      const rendered = await require('/server/lib/renderExternalExport').renderExternalExport(boardId, format,
+        parseExportFields(req.query && req.query.fields, BOARD_EXPORT_FIELD_KEYS));
+      if (rendered.json !== undefined) {
+        sendJsonResult(res, { code: 200, data: rendered.json });
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': rendered.contentType });
+      res.end(rendered.body);
+    };
+    if (board.isPublic()) {
+      await respond();
+      return;
+    }
+    const loginToken = req.query.authToken;
+    if (loginToken) {
+      if (loginToken.length > 10000) {
+        sendJsonResult(res, { code: 400, data: { error: 'Bad request' } });
+        return;
+      }
+      user = await require('/server/lib/activeUser').activeUserByToken(loginToken, 'export', req);
+      if (!user) {
+        // GHSA-3gcg-g6rf-w2rx: this handler does not dereference the user - it hands
+        // it to canExport(), which answers false - so an unknown token got a 403
+        // rather than a crash. It is guarded all the same: one rule for every token
+        // lookup is what keeps the next handler from being the one that is missed,
+        // and "your token is invalid" is the honest answer to an invalid token.
+        sendJsonResult(res, { code: 401, data: { error: 'Invalid token' } });
+        return;
+      }
+    } else if (!Meteor.settings.public.sandstorm) {
+      try {
+        // Any logged-in user may request an export; board-level access is
+        // enforced below by exporter.canExport() (board.isVisibleBy).
+        Authentication.checkLoggedIn(req.userId);
+      } catch (error) {
+        sendJsonResult(res, { code: error.statusCode || 403, data: { error: (error && error.reason) || 'Forbidden' } });
+        return;
+      }
+      user = await ReactiveCache.getUser({ _id: req.userId });
+    }
+    const exporter = new Exporter(boardId);
+    if (await exporter.canExport(user)) {
+      await respond();
+    } else {
+      logExportDenied(user, boardId);
+      sendJsonResult(res, { code: 403, data: { error: 'Forbidden' } });
+    }
+  }
+
+  EXTERNAL_EXPORT_FORMATS.forEach(format => {
+    /**
+     * @operation exportExternal
+     * @tag Boards
+     * @summary Export the board as a NextCloud Deck / Kanboard / OpenProject /
+     * GitHub / GitLab / Gitea / Forgejo / Jira / Asana / Zenkit / Trello style
+     * JSON, a Taiga project dump (JSON), or Markdown.
+     * @param {string} boardId the ID of the board we are exporting
+     * @param {string} authToken the loginToken
+     */
+    WebApp.handlers.get(`/api/boards/:boardId/export/${format}`, safeRoute(async function (req, res) {
+      // Before anything else: Admin Panel can turn all export off (CrossBoardExportBleed).
+      if (await require('/models/lib/importExportSecurity').refuseDisabledExport(res)) return;
+      await serveExternalExport(req, res, format);
+    }));
   });
 
   // todo XXX once we have a real API in place, move that route there
@@ -124,7 +450,9 @@ if (Meteor.isServer) {
    */
   WebApp.handlers.get(
     '/api/boards/:boardId/attachments/:attachmentId/export',
-    async function (req, res) {
+    safeRoute(async function (req, res) {
+      // Before anything else: Admin Panel can turn all export off (CrossBoardExportBleed).
+      if (await require('/models/lib/importExportSecurity').refuseDisabledExport(res)) return;
       const boardId = req.params.boardId;
       const attachmentId = req.params.attachmentId;
       let user = null;
@@ -134,7 +462,7 @@ if (Meteor.isServer) {
       // First check if board exists and is public to avoid unnecessary authentication
       const board = await ReactiveCache.getBoard(boardId);
       if (!board) {
-        sendJsonResult(res, 404);
+        sendJsonResult(res, { code: 404, data: { error: 'Not found' } });
         return;
       }
 
@@ -157,28 +485,38 @@ if (Meteor.isServer) {
           if (process.env.DEBUG === 'true') {
             console.warn('Suspiciously long auth token received, rejecting to prevent resource abuse');
           }
-          sendJsonResult(res, 400);
+          sendJsonResult(res, { code: 400, data: { error: 'Bad request' } });
           return;
         }
 
-        const hashToken = Accounts._hashLoginToken(loginToken);
-        user = await ReactiveCache.getUser({
-          'services.resume.loginTokens.hashedToken': hashToken,
-        });
+        user = await require('/server/lib/activeUser').activeUserByToken(loginToken, 'export', req);
+        if (!user) {
+          // GHSA-3gcg-g6rf-w2rx: an authToken that matches no login token makes the
+          // lookup answer `undefined`, and `user._id` on that threw a TypeError out of
+          // an async route handler - an unhandled rejection, which this app turns into
+          // a process crash (see the note in server/ldapGroupSync.js). One crafted GET
+          // took the whole server down. The same guard already existed in
+          // models/exportPDF.js and models/exportExcelCard.js; these handlers were
+          // missed.
+          sendJsonResult(res, { code: 401, data: { error: 'Invalid token' } });
+          return;
+        }
         adminId = user._id.toString();
         impersonateDone = await ReactiveCache.getImpersonatedUser({ adminId: adminId });
       } else if (!Meteor.settings.public.sandstorm) {
         try {
-          await Authentication.checkUserId(req.userId);
+          // Any logged-in user may request an export; board-level access is
+        // enforced below by exporter.canExport() (board.isVisibleBy).
+        Authentication.checkLoggedIn(req.userId);
         } catch (error) {
-          sendJsonResult(res, error.statusCode || 403);
+          sendJsonResult(res, { code: error.statusCode || 403, data: { error: (error && error.reason) || 'Forbidden' } });
           return;
         }
         user = await ReactiveCache.getUser({ _id: req.userId, isAdmin: true });
       }
 
       const exporter = new Exporter(boardId, attachmentId);
-      if (await exporter.canExport(user) || impersonateDone) {
+      if (await exporter.canExport(user)) {
         if (impersonateDone) {
           await ImpersonatedUsers.insertAsync({
             adminId: adminId,
@@ -194,9 +532,10 @@ if (Meteor.isServer) {
       } else {
         // we could send an explicit error message, but on the other hand the only
         // way to get there is by hacking the UI so let's keep it raw.
-        sendJsonResult(res, 403);
+        logExportDenied(user, boardId);
+        sendJsonResult(res, { code: 403, data: { error: 'Forbidden' } });
       }
-    },
+    }),
   );
 
   /**
@@ -214,7 +553,9 @@ if (Meteor.isServer) {
    * @param {string} authToken the loginToken
    * @param {string} delimiter delimiter to use while building export. Default is comma ','
    */
-  WebApp.handlers.get('/api/boards/:boardId/export/csv', async function (req, res) {
+  WebApp.handlers.get('/api/boards/:boardId/export/csv', safeRoute(async function (req, res) {
+    // Before anything else: Admin Panel can turn all export off (CrossBoardExportBleed).
+    if (await require('/models/lib/importExportSecurity').refuseDisabledExport(res)) return;
     const boardId = req.params.boardId;
     let user = null;
     let impersonateDone = false;
@@ -228,10 +569,15 @@ if (Meteor.isServer) {
       return;
     }
 
+    // The same column selection applies to public and private boards.
+    const exportOptions = {
+      fields: parseExportFields(req.query && req.query.fields, BOARD_EXPORT_FIELD_KEYS),
+    };
+
     // If board is public, skip expensive authentication operations
     if (board.isPublic()) {
       // Public boards don't require authentication - skip hash operations
-      const exporter = new Exporter(boardId);
+      const exporter = new Exporter(boardId, undefined, exportOptions);
 
       if( req.query.delimiter == "\t" ) {
         // TSV file
@@ -248,7 +594,7 @@ if (Meteor.isServer) {
         // use Uint8Array to prevent from converting bytes to string
         res.write(new Uint8Array([0xEF, 0xBB, 0xBF]));
       }
-      res.write(await exporter.buildCsv(req.query.delimiter, 'en'));
+      await exporter.buildCsvStream(res, req.query.delimiter, 'en');
       res.end();
       return;
     }
@@ -266,17 +612,23 @@ if (Meteor.isServer) {
         return;
       }
 
-      const hashToken = Accounts._hashLoginToken(loginToken);
-      user = await ReactiveCache.getUser({
-        'services.resume.loginTokens.hashedToken': hashToken,
-      });
+      user = await require('/server/lib/activeUser').activeUserByToken(loginToken, 'export', req);
+      if (!user) {
+        // GHSA-3gcg-g6rf-w2rx - see the note in models/export.js: an unknown token
+        // answers `undefined`, and dereferencing it crashed the server.
+        res.writeHead(401, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Invalid token');
+        return;
+      }
       adminId = user._id.toString();
       impersonateDone = await ReactiveCache.getImpersonatedUser({ adminId: adminId });
     } else if (!Meteor.settings.public.sandstorm) {
       try {
-        await Authentication.checkUserId(req.userId);
+        // Any logged-in user may request an export; board-level access is
+        // enforced below by exporter.canExport() (board.isVisibleBy).
+        Authentication.checkLoggedIn(req.userId);
       } catch (error) {
-        sendJsonResult(res, error.statusCode || 403);
+        sendJsonResult(res, { code: error.statusCode || 403, data: { error: (error && error.reason) || 'Forbidden' } });
         return;
       }
       user = await ReactiveCache.getUser({
@@ -285,8 +637,8 @@ if (Meteor.isServer) {
       });
     }
 
-    const exporter = new Exporter(boardId);
-    if (await exporter.canExport(user) || impersonateDone) {
+    const exporter = new Exporter(boardId, undefined, exportOptions);
+    if (await exporter.canExport(user)) {
       if (impersonateDone) {
         let exportType = 'exportCSV';
         if( req.query.delimiter == "\t" ) {
@@ -301,7 +653,7 @@ if (Meteor.isServer) {
 
       let userLanguage = 'en';
       if (user && user.profile) {
-        userLanguage = user.profile.language
+        userLanguage = user.profile.language;
       }
 
       if( req.query.delimiter == "\t" ) {
@@ -319,11 +671,11 @@ if (Meteor.isServer) {
         // use Uint8Array to prevent from converting bytes to string
         res.write(new Uint8Array([0xEF, 0xBB, 0xBF]));
       }
-      res.write(await exporter.buildCsv(req.query.delimiter, userLanguage));
+      await exporter.buildCsvStream(res, req.query.delimiter, userLanguage);
       res.end();
     } else {
       res.writeHead(403);
       res.end('Permission Error');
     }
-  });
+  }));
 }

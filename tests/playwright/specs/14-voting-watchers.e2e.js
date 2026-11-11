@@ -17,18 +17,14 @@ const BoardPage = require('../pages/BoardPage');
 const CardPage = require('../pages/CardPage');
 
 test.describe('Voting & watchers', () => {
-  test('positive vote button is clickable and registers the voted state', async ({ boardPage, board }) => {
+  test('positive vote button is clickable and registers the voted state', async ({ boardPage, board, user }) => {
     const errors = [];
     boardPage.on('pageerror', e => errors.push(e.message));
 
     // Enable vote on the card via MongoDB so the vote section renders
-    db.mongoEval(`
-      db.cards.updateOne(
-        { boardId: ${JSON.stringify(board.boardId)}, title: 'Alpha Card' },
-        { $set: { 'vote.question': 'Approve this?', 'vote.public': true } }
-      );
-    `);
-    await boardPage.reload({ waitUntil: 'networkidle' });
+    db.updateOne('cards', { boardId: board.boardId, title: 'Alpha Card' },
+      { $set: { 'vote.question': 'Approve this?', 'vote.public': true } });
+    await boardPage.reload({ waitUntil: 'domcontentloaded' });
 
     const bp = new BoardPage(boardPage);
     const cp = new CardPage(boardPage);
@@ -39,15 +35,11 @@ test.describe('Voting & watchers', () => {
 
     // Vote section: button.js-vote.js-vote-positive
     const voteBtn = cp.root.locator('button.js-vote-positive').first();
-    if (await voteBtn.count() > 0) {
-      await voteBtn.click();
-      await boardPage.waitForTimeout(600);
-      // After voting, the button should carry the "voted" class
-      await expect(voteBtn).toHaveClass(/voted/, { timeout: 5_000 });
-    } else {
-      // Vote section not rendered (board may not have voting enabled)
-      console.log('Note: vote-positive button not found; board may not enable voting');
-    }
+    await expect(voteBtn).toBeVisible();
+    await voteBtn.click();
+    await expect(voteBtn).toHaveClass(/voted/, { timeout: 10_000 });
+    await expect.poll(() => db.findOne('cards', { boardId: board.boardId, title: 'Alpha Card' }).vote.positive)
+      .toContain(user.id);
 
     const critical = errors.filter(
       e => !e.includes('ResizeObserver') && !e.includes('Non-Error promise rejection'),
@@ -55,14 +47,10 @@ test.describe('Voting & watchers', () => {
     expect(critical).toHaveLength(0);
   });
 
-  test('negative vote button is clickable and registers the voted state', async ({ boardPage, board }) => {
-    db.mongoEval(`
-      db.cards.updateOne(
-        { boardId: ${JSON.stringify(board.boardId)}, title: 'Alpha Card' },
-        { $set: { 'vote.question': 'Reject this?', 'vote.public': true } }
-      );
-    `);
-    await boardPage.reload({ waitUntil: 'networkidle' });
+  test('negative vote button is clickable and registers the voted state', async ({ boardPage, board, user }) => {
+    db.updateOne('cards', { boardId: board.boardId, title: 'Alpha Card' },
+      { $set: { 'vote.question': 'Reject this?', 'vote.public': true } });
+    await boardPage.reload({ waitUntil: 'domcontentloaded' });
 
     const bp = new BoardPage(boardPage);
     const cp = new CardPage(boardPage);
@@ -72,13 +60,11 @@ test.describe('Voting & watchers', () => {
     await cp.waitForOpen();
 
     const voteBtn = cp.root.locator('button.js-vote-negative').first();
-    if (await voteBtn.count() > 0) {
-      await voteBtn.click();
-      await boardPage.waitForTimeout(600);
-      await expect(voteBtn).toHaveClass(/voted/, { timeout: 5_000 });
-    } else {
-      console.log('Note: vote-negative button not found');
-    }
+    await expect(voteBtn).toBeVisible();
+    await voteBtn.click();
+    await expect(voteBtn).toHaveClass(/voted/, { timeout: 10_000 });
+    await expect.poll(() => db.findOne('cards', { boardId: board.boardId, title: 'Alpha Card' }).vote.negative)
+      .toContain(user.id);
   });
 
   test('toggling watch on a card succeeds without errors', async ({ boardPage, board }) => {
@@ -140,13 +126,9 @@ test.describe('Voting & watchers', () => {
 
   test('vote counts update in the card after voting', async ({ boardPage, board, user }) => {
     // Seed a card with an active vote question
-    db.mongoEval(`
-      db.cards.updateOne(
-        { boardId: ${JSON.stringify(board.boardId)}, title: 'Beta Card' },
-        { $set: { 'vote.question': 'Ship it?', 'vote.public': true, 'vote.positive': [], 'vote.negative': [] } }
-      );
-    `);
-    await boardPage.reload({ waitUntil: 'networkidle' });
+    db.updateOne('cards', { boardId: board.boardId, title: 'Beta Card' },
+      { $set: { 'vote.question': 'Ship it?', 'vote.public': true, 'vote.positive': [], 'vote.negative': [] } });
+    await boardPage.reload({ waitUntil: 'domcontentloaded' });
 
     const bp = new BoardPage(boardPage);
     const cp = new CardPage(boardPage);
@@ -156,21 +138,49 @@ test.describe('Voting & watchers', () => {
     await cp.waitForOpen();
 
     const votePositiveBtn = cp.root.locator('button.js-vote-positive').first();
-    if (await votePositiveBtn.count() > 0) {
-      // Get initial count label
-      const countLabel = cp.root.locator('.js-show-positive-votes, .card-label-green').first();
-      const before = await countLabel.innerText().catch(() => '0');
-
-      await votePositiveBtn.click();
-      await boardPage.waitForTimeout(800);
-
-      // Count should have changed (Blaze reactive update)
-      const after = await countLabel.innerText().catch(() => '0');
-      // Either the count increased or the voted class was applied
-      const voted = await votePositiveBtn.evaluate(el => el.classList.contains('voted'));
-      expect(voted || after !== before).toBeTruthy();
-    } else {
-      console.log('Note: voting section not rendered for Beta Card');
-    }
+    await expect(votePositiveBtn).toBeVisible();
+    const countLabel = cp.root.locator('.js-show-positive-votes').first();
+    await expect(countLabel).toHaveText('0');
+    await votePositiveBtn.click();
+    await expect(votePositiveBtn).toHaveClass(/voted/);
+    await expect(countLabel).toHaveText('1');
+    await expect.poll(() => db.findOne('cards', { boardId: board.boardId, title: 'Beta Card' }).vote.positive)
+      .toContain(user.id);
   });
 });
+
+test('Corsican Planning Poker shows literal scores without progress prefixes', async ({ boardPage: page, board }) => {
+  db.updateOne('boards', { _id: board.boardId }, { $set: { allowsPoker: true } });
+  db.updateOne('cards', { boardId: board.boardId, title: 'Alpha Card' }, { $set: {
+    'poker.question': 'Estimate this card', 'poker.end': new Date(Date.now() + 86400000),
+  } });
+  await page.evaluate(() => Meteor.callAsync('setLanguage', 'co'));
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  const bp = new BoardPage(page), cp = new CardPage(page);
+  await bp.clickCard(board.listIds[0], 'Alpha Card');
+  await cp.waitForOpen();
+  // The section's shared heading (cardSectionHeader), as every section of the card has.
+  await expect(cp.root.locator('.js-toggle-card-section[data-section="poker"]')).toContainText('Planning Poker');
+  for (const [name, value] of [['one','1'],['two','2'],['three','3'],['five','5'],['eight','8'],['thirteen','13'],['twenty','20'],['forty','40'],['one-hundred','100'],['unsure','?']]) {
+    await expect(cp.root.locator('.js-poker-vote-' + name)).toHaveText(value);
+  }
+  await expect(cp.root.locator('.poker-deck')).not.toContainText(['In corsu']);
+});
+
+for (const [direction, label] of [['positive', 'pro'], ['negative', 'contra']]) {
+  test(`Latin ${direction} vote label records the matching vote`, async ({ boardPage, board, user }) => {
+    await boardPage.evaluate(() => Meteor.callAsync('setLanguage', 'la'));
+    db.updateOne('cards', { boardId: board.boardId, title: 'Alpha Card' },
+      { $set: { 'vote.question': 'Approve this?', 'vote.public': true } });
+    await boardPage.reload({ waitUntil: 'domcontentloaded' });
+    await new BoardPage(boardPage).clickCard(board.listIds[0], 'Alpha Card');
+    const cp = new CardPage(boardPage);
+    await cp.waitForOpen();
+    const button = cp.root.locator(`button.js-vote-${direction}`).first();
+    await expect(button).toContainText(label);
+    await expect(button).not.toContainText('Latine:');
+    await button.click();
+    await expect(button).toHaveClass(/voted/);
+    await expect.poll(() => db.findOne('cards', { boardId: board.boardId, title: 'Alpha Card' }).vote[direction]).toContain(user.id);
+  });
+}

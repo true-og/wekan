@@ -1,0 +1,240 @@
+import { Template } from 'meteor/templating';
+import { ReactiveVar } from 'meteor/reactive-var';
+import { Tracker } from 'meteor/tracker';
+import { ReactiveCache } from '/imports/reactiveCache';
+import { TAPi18n } from '/imports/i18n';
+import { formatDate } from '/imports/lib/dateUtils';
+import { formatDateForDisplay, dateDisplayPreferences } from '/client/lib/dateDisplay';
+const { CALENDAR_SYSTEMS, nativeCalendarParts } = require('/imports/lib/calendarSystems');
+const {
+  calendarMonthDays, calendarMonthRange, shiftedDay, shiftCalendarMonth, shiftCalendarYear,
+  calendarSignedYear, dateInCalendarYear, calendarYearMonths, sameDayInMonth,
+} = require('/imports/lib/calendarMonth');
+
+function fromInput(value) {
+  if (!value) return null;
+  const date = new Date(value.length === 10 ? `${value}T12:00:00` : value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+Template.calendarDateInput.onCreated(function () {
+  this.selectedDate = new ReactiveVar(null);
+  this.shownDate = new ReactiveVar(new Date());
+  this.expanded = new ReactiveVar(false);
+  this.focusedDate = new ReactiveVar(null);
+  this.autorun(() => {
+    const selected = fromInput(Template.currentData().value);
+    this.selectedDate.set(selected);
+    if (selected) this.shownDate.set(selected);
+  });
+});
+
+function selectedSystem() {
+  const selected = dateDisplayPreferences().calendarSystem;
+  return CALENDAR_SYSTEMS.find(item => item.value === selected) || CALENDAR_SYSTEMS[0];
+}
+
+function writeValue(tpl, date) {
+  const input = tpl.find('.js-calendar-native-value');
+  const withTime = tpl.data.withTime;
+  let value = date ? formatDate(date) : '';
+  if (date && withTime) {
+    const time = tpl.find('.js-calendar-time').value || '12:00';
+    const [hours, minutes] = time.split(':').map(Number);
+    date = new Date(date);
+    date.setHours(hours, minutes, 0, 0);
+    value += `T${time}`;
+  }
+  tpl.selectedDate.set(date);
+  input.value = value;
+  // Existing parents receive the native value and keep their existing save
+  // methods, validation and notification behavior.
+  input.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+Template.calendarDateInput.helpers({
+  useNativeInput() { return !this.inline && dateDisplayPreferences().calendarSystem === 'gregorian'; },
+  inputType() { return this.withTime ? 'datetime-local' : 'date'; },
+  selectedDateText() { return formatDateForDisplay(Template.instance().selectedDate.get(), false); },
+  // #6853: the year, month and day drop-downs under the calendar. Each option
+  // carries a date as its value, found in the selected calendar system, so any
+  // past, present or future year, month and day is one pick away.
+  // The year as a number any year can be typed or stepped to, also one before
+  // the era (0 is 1 BC) or thousands of years away.
+  yearValue() { return calendarSignedYear(Template.instance().shownDate.get(), selectedSystem().intl); },
+  monthOptions() {
+    const tpl = Template.instance();
+    const calendar = selectedSystem().intl;
+    const language = TAPi18n.getLanguage() || 'en';
+    return calendarYearMonths(tpl.shownDate.get(), calendar).map(month => {
+      let label;
+      try {
+        label = new Intl.DateTimeFormat(language, { calendar, month: 'long', numberingSystem: 'latn' }).format(month.date);
+      } catch (error) { label = formatDateForDisplay(month.date, false); }
+      return { _id: formatDate(month.date), value: formatDate(month.date), label, selected: month.selected };
+    });
+  },
+  dayOptions() {
+    const tpl = Template.instance();
+    const calendar = selectedSystem().intl;
+    const { start, end } = calendarMonthRange(tpl.shownDate.get(), calendar);
+    const selected = tpl.selectedDate.get();
+    const selectedIso = selected ? formatDate(selected) : '';
+    const days = [];
+    for (let day = shiftedDay(start, 0); day < end; day = shiftedDay(day, 1)) {
+      days.push({
+        _id: formatDate(day), value: formatDate(day),
+        label: nativeCalendarParts(day, calendar).day, selected: formatDate(day) === selectedIso,
+      });
+    }
+    return days;
+  },
+  noDaySelected() {
+    const tpl = Template.instance();
+    const selected = tpl.selectedDate.get();
+    if (!selected) return true;
+    const { start, end } = calendarMonthRange(tpl.shownDate.get(), selectedSystem().intl);
+    return selected < start || selected >= end;
+  },
+  expanded() { return !!Template.instance().data.inline || Template.instance().expanded.get(); },
+  calendarName() { return TAPi18n.__(selectedSystem().labelKey); },
+  monthLabel() {
+    const date = Template.instance().shownDate.get();
+    try {
+      return new Intl.DateTimeFormat(TAPi18n.getLanguage() || 'en', {
+        // #6853: the year is always shown, also in the popup: month and year
+        // above the calendar, never the YYYY-MM-DD of the selected day.
+        calendar: selectedSystem().intl, month: 'long', year: 'numeric', numberingSystem: 'latn',
+        // A year before the era needs its era, or 3000 BC reads as 3000.
+        ...(calendarSignedYear(date, selectedSystem().intl) <= 0 ? { era: 'short' } : {}),
+      }).format(date);
+    } catch (error) { return formatDateForDisplay(date, false); }
+  },
+  weekdays() {
+    const user = ReactiveCache.getCurrentUser();
+    const firstDay = user ? user.getStartDayOfWeek() : 1;
+    const names = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+    return Array.from({ length: 7 }, (_, index) => TAPi18n.__(names[(firstDay + index) % 7]));
+  },
+  weeks() {
+    const tpl = Template.instance();
+    const user = ReactiveCache.getCurrentUser();
+    const firstDay = user ? user.getStartDayOfWeek() : 1;
+    const { days } = calendarMonthDays(tpl.shownDate.get(), selectedSystem().intl, firstDay);
+    const wantedFocus = tpl.focusedDate.get() || tpl.selectedDate.get();
+    const focusDate = wantedFocus && days.some(date => date && formatDate(date) === formatDate(wantedFocus))
+      ? wantedFocus : days.find(Boolean);
+    // #6751: today's cell is marked so the user can find it at a glance. It is
+    // the browser's local day, the same local calendar day formatDate() gives
+    // every other cell, so it is the cell the user means by "today".
+    const todayIso = formatDate(new Date());
+    // #6838: every row and every cell - an empty one too - has its own _id.
+    // Blaze matches list items by _id; without one, going from one month to
+    // another reused cells by position and the empty cells, all alike, were
+    // moved around: October came back as "29, empty, 30, empty", without the
+    // 31st. The month is part of each id, so a new month is new cells.
+    const month = days.find(Boolean);
+    const monthId = month ? formatDate(month) : 'empty';
+    const rows = [];
+    for (let index = 0; index < days.length; index += 7) {
+      rows.push({ _id: `${monthId}-week-${index / 7}`, days: days.slice(index, index + 7).map((date, cell) => (date ? {
+        _id: formatDate(date),
+        iso: formatDate(date),
+        today: formatDate(date) === todayIso,
+        // null omits the attribute: only today's button carries aria-current.
+        ariaCurrent: formatDate(date) === todayIso ? 'date' : null,
+        label: nativeCalendarParts(date, selectedSystem().intl).day,
+        title: formatDateForDisplay(date, false),
+        selected: tpl.selectedDate.get() && formatDate(tpl.selectedDate.get()) === formatDate(date),
+        tabIndex: focusDate && formatDate(focusDate) === formatDate(date) ? 0 : -1,
+      } : { _id: `${monthId}-empty-${index + cell}`, empty: true })) });
+    }
+    return rows;
+  },
+  timeValue() {
+    const date = Template.instance().selectedDate.get();
+    return date ? `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}` : '12:00';
+  },
+});
+
+Template.calendarDateInput.events({
+  'click .js-calendar-toggle'(event, tpl) {
+    event.preventDefault();
+    tpl.expanded.set(!tpl.expanded.get());
+    if (tpl.expanded.get()) Tracker.afterFlush(() => tpl.find('.js-calendar-day[tabindex="0"]')?.focus());
+  },
+  'click .js-calendar-previous'(event, tpl) {
+    event.preventDefault();
+    tpl.shownDate.set(shiftedDay(calendarMonthRange(tpl.shownDate.get(), selectedSystem().intl).start, -1));
+  },
+  'click .js-calendar-next'(event, tpl) {
+    event.preventDefault();
+    tpl.shownDate.set(calendarMonthRange(tpl.shownDate.get(), selectedSystem().intl).end);
+  },
+  'click .js-calendar-today'(event, tpl) {
+    event.preventDefault();
+    tpl.shownDate.set(new Date());
+    Tracker.afterFlush(() => tpl.find('.js-calendar-day.is-today')?.focus());
+  },
+  'click .js-calendar-year-previous'(event, tpl) { event.preventDefault(); tpl.shownDate.set(shiftCalendarYear(tpl.shownDate.get(), -1, selectedSystem().intl)); },
+  'click .js-calendar-year-next'(event, tpl) { event.preventDefault(); tpl.shownDate.set(shiftCalendarYear(tpl.shownDate.get(), 1, selectedSystem().intl)); },
+  // #6853: a pick in a drop-down selects that date and shows its month.
+  'change .js-calendar-year'(event, tpl) {
+    const input = event.currentTarget;
+    const target = dateInCalendarYear(tpl.shownDate.get(), Number(input.value), selectedSystem().intl);
+    if (!target || input.value.trim() === '') {
+      // A year that is not a whole number, or beyond what a date can hold:
+      // the field goes back to the year being shown.
+      input.value = calendarSignedYear(tpl.shownDate.get(), selectedSystem().intl);
+      return;
+    }
+    tpl.shownDate.set(target); tpl.focusedDate.set(target); writeValue(tpl, target);
+  },
+  // Enter in the year field applies the year, not the popup's Save.
+  'keydown .js-calendar-year'(event) {
+    if (event.key !== 'Enter') return;
+    event.preventDefault(); event.stopPropagation();
+    event.currentTarget.dispatchEvent(new Event('change', { bubbles: true }));
+  },
+  'change .js-calendar-month'(event, tpl) {
+    const target = sameDayInMonth(tpl.selectedDate.get() || tpl.shownDate.get(), fromInput(event.currentTarget.value), selectedSystem().intl);
+    tpl.shownDate.set(target); tpl.focusedDate.set(target); writeValue(tpl, target);
+  },
+  'change .js-calendar-day-select'(event, tpl) {
+    const target = fromInput(event.currentTarget.value);
+    if (!target) return;
+    tpl.shownDate.set(target); tpl.focusedDate.set(target); writeValue(tpl, target);
+  },
+  'click .js-calendar-day'(event, tpl) {
+    event.preventDefault();
+    writeValue(tpl, fromInput(event.currentTarget.dataset.date));
+    tpl.focusedDate.set(fromInput(event.currentTarget.dataset.date));
+    tpl.expanded.set(false);
+    Tracker.afterFlush(() => tpl.find(tpl.data.inline
+      ? '.js-calendar-day[tabindex="0"]' : '.js-calendar-toggle')?.focus());
+  },
+  'keydown .js-calendar-day'(event, tpl) {
+    const date = fromInput(event.currentTarget.dataset.date);
+    let next;
+    const horizontal = getComputedStyle(tpl.firstNode).direction === 'rtl' ? -1 : 1;
+    const offsets = { ArrowLeft: -horizontal, ArrowRight: horizontal, ArrowUp: -7, ArrowDown: 7 };
+    if (event.key in offsets) next = shiftedDay(date, offsets[event.key]);
+    else if (event.key === 'PageUp' || event.key === 'PageDown') {
+      next = (event.shiftKey ? shiftCalendarYear : shiftCalendarMonth)(date, event.key === 'PageUp' ? -1 : 1, selectedSystem().intl);
+    } else if (event.key === 'Home' || event.key === 'End') {
+      const user = ReactiveCache.getCurrentUser();
+      const firstDay = user ? user.getStartDayOfWeek() : 1;
+      const offset = (date.getDay() - firstDay + 7) % 7;
+      next = shiftedDay(date, event.key === 'Home' ? -offset : 6 - offset);
+    } else if (event.key === 'Escape' && !tpl.data.inline) {
+      event.preventDefault(); event.stopPropagation(); tpl.expanded.set(false);
+      Tracker.afterFlush(() => tpl.find('.js-calendar-toggle')?.focus());
+      return;
+    } else return;
+    event.preventDefault(); event.stopPropagation();
+    tpl.focusedDate.set(next); tpl.shownDate.set(next);
+    Tracker.afterFlush(() => tpl.find(`.js-calendar-day[data-date="${formatDate(next)}"]`)?.focus());
+  },
+  'change .js-calendar-time'(event, tpl) { if (tpl.selectedDate.get()) writeValue(tpl, tpl.selectedDate.get()); },
+  'click .js-calendar-clear'(event, tpl) { event.preventDefault(); writeValue(tpl, null); },
+});

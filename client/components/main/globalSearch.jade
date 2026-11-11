@@ -1,14 +1,35 @@
-template(name="globalSearchHeaderBar")
-  if currentUser
-    h1
-      i.fa.fa-search
-      | {{_ 'globalSearch-title'}}
+template(name="globalSearchControls")
+  //- The controls of this page. They were a group in its second header bar,
+    beside a title the first bar now carries; they are a view of the shared
+    page sidebar. models/lib/pageSidebar.js, docs/Features/Header-Bar/Header.md
+  a.board-header-btn.js-global-search-view-change(title="{{_ 'globalSearchViewChange-title'}}")
+    i.fa.fa-caret-down
+    if $eq globalSearchView 'me'
+      i.fa.fa-user
+      | {{_ 'globalSearchViewChange-choice-me'}}
+    if $eq globalSearchView 'all'
+      i.fa.fa-users
+      | {{_ 'globalSearchViewChange-choice-all'}}
 
-template(name="globalSearchModalTitle")
+template(name="globalSearchViewChangePopup")
   if currentUser
-    h2
-      i.fa.fa-keyboard-o
-      | {{_ 'globalSearch-title'}}
+    ul.pop-over-list
+      li
+        a.js-global-search-view-me
+          i.fa.fa-user
+          | {{_ 'globalSearchViewChange-choice-me'}}
+          if $eq Utils.globalSearchView "me"
+            i.fa.fa-check
+      hr
+      li
+        a.js-global-search-view-all
+          i.fa.fa-users
+          | {{_ 'globalSearchViewChange-choice-all'}}
+          span.sub-name
+            +viewer
+              | {{_ 'globalSearchViewChange-choice-all-description' }}
+          if $eq Utils.globalSearchView "all"
+            i.fa.fa-check
 
 template(name="resultsPaged")
   if resultsHeading
@@ -28,8 +49,14 @@ template(name="resultsPaged")
 
 template(name="globalSearch")
   if currentUser
-    .wrapper(class=boardColorClass)
-      form.global-search-page.js-search-query-form(onsubmit="return false;")
+    //- `global-search-wrapper` gives this page a scoped hook so its CSS can undo
+      the `height: 100vh; overflow: hidden` that the All Boards stylesheet pins on
+      the GLOBAL `.wrapper` at phone widths - that clip is what hid this page's
+      lower content. With the clip gone the page's existing scroller (#content)
+      scrolls it, natively on touch, so no per-element dragscroll is needed.
+    .wrapper.global-search-wrapper(class=boardColorClass)
+      form.global-search-page.js-search-query-form(role="search" onsubmit="return false;")
+        label.sr-only(for="global-search-input") {{_ 'globalSearch-title'}}
         input.global-search-query-input(
           style="display: inline-block;"
           id="global-search-input"
@@ -37,14 +64,18 @@ template(name="globalSearch")
           name="searchQuery"
           placeholder="{{_ 'search-example'}}"
           value="{{ queryValue }}"
+          aria-label="{{_ 'globalSearch-title'}}"
           autofocus dir="auto"
         )
-        button.js-new-search.board-color-belize(type="button" style="background: #216694 !important; background-color: #216694 !important; color: #fff !important; border: none !important;")
-          | 🧹
+        button.primary.js-new-search(type="submit" aria-label="{{_ 'trello-clear-job'}}")
+          | {{_ 'trello-clear-job'}}
+      //- Search phrases (docs/Features/Pages/Search-Phrases.md).
+      if phrasedQuery
+        .global-search-phrased.js-search-phrased {{_ 'search-phrases-searching' query=phrasedQuery}}
       if searching
         +spinner
       else if hasResults
-        .global-search-results-list-wrapper
+        .global-search-results-list-wrapper.global-search-results-list
           if hasQueryErrors
             ul
               each msg in errorMessages

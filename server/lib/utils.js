@@ -1,7 +1,40 @@
+import { Meteor } from 'meteor/meteor';
 import Boards from '/models/boards';
+import Cards from '/models/cards';
+import Checklists from '/models/checklists';
+const { memberCan } = require('/models/lib/boardRoleCapabilities');
 
 export function allowIsBoardAdmin(userId, board) {
   return board && board.hasAdmin(userId);
+}
+
+// Issue #3249: a board created by a user who has since left the organization
+// (or was removed) ends up with no member who can edit its settings or add
+// new members - not even a global Admin Panel admin, because the plain
+// allowIsBoardAdmin check above only looks at the board's OWN member list.
+// This variant additionally accepts the global `isAdmin` flag on the calling
+// user's account (Admin Panel > Users), matching the bypass already used by
+// inviteUserToBoard (server/models/users.js) so a site admin can take over
+// and manage ANY board, not only ones they already belong to. Only used
+// where the whole-board update/remove rule is granted (server/permissions/
+// boards.js) - it is deliberately NOT wired into the narrower allowIsBoardAdmin
+// checks that gate rules/actions/triggers/comments on other collections.
+// Pure decision logic, split out so it is unit-testable without Meteor (see
+// tests/boardAdminOrSiteAdmin.test.cjs): true when the user is the board's own
+// admin OR carries the global `isAdmin` flag looked up by the async wrapper
+// below.
+export function isBoardAdminOrSiteAdmin(userId, board, isSiteAdmin) {
+  if (allowIsBoardAdmin(userId, board)) return true;
+  return !!(userId && isSiteAdmin);
+}
+
+export async function allowIsBoardAdminOrSiteAdmin(userId, board) {
+  if (allowIsBoardAdmin(userId, board)) return true;
+  if (!userId) return false;
+  const user = await Meteor.users.findOneAsync(userId, {
+    fields: { isAdmin: 1 },
+  });
+  return isBoardAdminOrSiteAdmin(userId, board, !!(user && user.isAdmin));
 }
 
 export function allowIsBoardMember(userId, board) {
@@ -14,8 +47,13 @@ export function allowIsAnyBoardMember(userId, boards) {
   });
 }
 
+// May the user COMMENT on this board (a card comment or a comment reaction)?
+//
+// The name is historical - it reads as "comment-only members are allowed here",
+// which is what it means: everyone except the roles whose capability table says
+// they may not comment.
 export function allowIsBoardMemberCommentOnly(userId, board) {
-  return board && board.hasMember(userId) && !board.hasReadOnly(userId) && !board.hasReadAssignedOnly(userId) && !board.hasNoComments(userId);
+  return !!(board && memberCan(board, userId, 'comment'));
 }
 
 export function allowIsBoardMemberNoComments(userId, board) {
@@ -23,8 +61,28 @@ export function allowIsBoardMemberNoComments(userId, board) {
 }
 
 // Check if user has write access to board (can create/edit cards and lists)
+//
+// Both of these used to spell the rule out as a list of flags, and that list had
+// drifted from the roles' own names in three ways (see
+// docs/Features/Board-Sidebar/Members/Roles.md):
+//
+//   * it excluded `isNoComments`, so the role that is meant to stop COMMENTING
+//     stopped writing as well - a second read-only role under a name that says
+//     otherwise, and one the UI still offered the edit buttons for;
+//   * it did NOT exclude `isCommentAssignedOnly`, so the "comment only, on
+//     assigned cards" role could create and edit cards, lists and checklists -
+//     it was "normal, assigned only" under another name;
+//   * it read the RAW flags with no `isAdmin` exemption, unlike every has*()
+//     helper on the board - so a board admin who also carried one of those flags
+//     (which the Web UI cannot produce, but the REST API can) silently lost write
+//     access.
+//
+// The rule now comes from models/lib/boardRoleCapabilities.js, which is the same
+// table the client's canModify* helpers, the Admin Panel's Roles Status pane and
+// the documentation are built from - so there is nowhere for a fourth opinion to
+// appear.
 export function allowIsBoardMemberWithWriteAccess(userId, board) {
-  return board && board.members && board.members.some(e => e.userId === userId && e.isActive && !e.isNoComments && !e.isCommentOnly && !e.isWorker && !e.isReadOnly && !e.isReadAssignedOnly);
+  return !!(board && memberCan(board, userId, 'write'));
 }
 
 // Write-access variant of allowIsAnyBoardMember: true if the user has write
@@ -53,6 +111,82 @@ export async function denyCrossBoardMove(userId, modifier) {
   return !allowIsBoardMemberWithWriteAccess(userId, await Boards.findOneAsync(newBoardId));
 }
 
+// Shared destination gate for the checklist deny rules below: returns true to
+// DENY when boardId names a board the caller cannot write to. An unknown/missing
+// board id also denies, matching denyCrossBoardMove's fail-closed behavior.
+// #6813: the board the document is already on is not a destination. Dragging
+// a checklist item within its card sets cardId and checklistId to where the
+// item already is; for a comment-only member or a Worker their own board is "a
+// board they cannot write to", so that ordinary drag tripped the cross-board
+// canary and named them in Admin Panel / Problems as if they had attacked
+// another board. Staying on the board is no cross-board move, and whether the
+// caller may edit there is the allow rule's question, unchanged.
+//
+// `sourceBoardId` must be the board of the document's SOURCE CARD - what the
+// allow rule decides on (sourceBoardOfCardChild below) - never the document's
+// own denormalized boardId: that one a client could set on insert, and an item
+// on its own card carrying a victim board's id would then pass as "staying"
+// while being moved onto a victim card.
+async function denyMoveToUnwritableBoard(userId, boardId, sourceBoardId) {
+  if (typeof boardId !== 'string' || !boardId) return false;
+  if (typeof sourceBoardId === 'string' && sourceBoardId && boardId === sourceBoardId) return false;
+  return !allowIsBoardMemberWithWriteAccess(userId, await Boards.findOneAsync(boardId));
+}
+
+// The board of the card a checklist, checklist item or text note is attached
+// to - the source the allow rules check write access on (canEditCardOrLinkedCard
+// on doc.cardId). Null when the card is gone: then nothing is skipped.
+export async function sourceBoardOfCardChild(doc) {
+  if (!doc || typeof doc.cardId !== 'string' || !doc.cardId) return null;
+  const card = await Cards.findOneAsync(doc.cardId, { fields: { boardId: 1 } });
+  return (card && card.boardId) || null;
+}
+
+// Security (GHSA-gv8h-5p3p-6hx7): Checklists and ChecklistItems are attached to a
+// card and carry a denormalized boardId. They are MOVED between cards by setting a
+// new cardId (and, for items, a new checklistId) in a direct collection update; a
+// before.update hook then re-derives boardId from the destination card. The allow
+// rules only authorize against the document's CURRENT (source) cardId, so a DDP
+// client with write access to its own board can relocate a checklist/item it owns
+// onto a card in a private board it is not a member of. This is the same class as
+// denyCrossBoardMove / BoardBleed, but for the card-attached checklist documents
+// that the boardId-only deny rule does not cover.
+//
+// Returns true to DENY any update whose destination board — resolved from a new
+// boardId or a new cardId in the modifier — the caller cannot write to.
+// Legitimate moves (destination writable) and same-card edits are unaffected, and
+// server-side Meteor methods bypass allow/deny entirely, so the trusted
+// moveChecklist method still works.
+export async function denyCrossBoardMoveByCard(userId, modifier, sourceBoardId) {
+  const set = modifier && modifier.$set;
+  if (!set) return false;
+  // Direct boardId change (defense in depth, same as denyCrossBoardMove).
+  if (await denyMoveToUnwritableBoard(userId, set.boardId, sourceBoardId)) return true;
+  // cardId change: resolve the destination card's board.
+  if (typeof set.cardId === 'string' && set.cardId) {
+    const card = await Cards.findOneAsync(set.cardId);
+    if (!card) return true;
+    if (await denyMoveToUnwritableBoard(userId, card.boardId, sourceBoardId)) return true;
+  }
+  return false;
+}
+
+// As denyCrossBoardMoveByCard, plus the ChecklistItem-only checklistId move: an
+// item can be re-parented to another checklist, which (via that checklist's card)
+// may live on a board the caller cannot write to. Returns true to DENY.
+export async function denyCrossBoardMoveByChecklistItem(userId, modifier, sourceBoardId) {
+  if (await denyCrossBoardMoveByCard(userId, modifier, sourceBoardId)) return true;
+  const set = modifier && modifier.$set;
+  if (set && typeof set.checklistId === 'string' && set.checklistId) {
+    const checklist = await Checklists.findOneAsync(set.checklistId);
+    if (!checklist) return true;
+    const card = await Cards.findOneAsync(checklist.cardId);
+    if (!card) return true;
+    if (await denyMoveToUnwritableBoard(userId, card.boardId, sourceBoardId)) return true;
+  }
+  return false;
+}
+
 // Check if user has write access via a card's board
 export async function allowIsBoardMemberWithWriteAccessByCard(userId, card) {
   const board = card && await Boards.findOneAsync(card.boardId);
@@ -67,10 +201,39 @@ export async function allowIsBoardMemberByCard(userId, card) {
 // Policy: can a user update a board's 'sort' field?
 // Requirements:
 //  - user must be authenticated
-//  - update must include 'sort' field
+//  - update must touch ONLY the 'sort' field (nothing else)
 //  - user must be a member of the board
+//
+// Security (SortBleed, GHSA-xm8x-c8wg-jhmf): this rule is OR'd with the
+// admin-only `allowIsBoardAdmin` update rule (server/permissions/boards.js) so
+// that any board member can drag-reorder boards. Meteor applies the WHOLE
+// modifier once any allow rule approves and no deny rule rejects, and it does
+// NOT scope the approving rule to the field that satisfied it. If this helper
+// merely checked that 'sort' was AMONG the modified fields, a low-privilege
+// (comment-only / read-only) member could smuggle arbitrary board mutations
+// (members, permission, title, ...) into the same $set as sort and take over
+// the board. Requiring 'sort' to be the SOLE modified field means this rule can
+// never approve a modifier that also changes any other field.
 export function canUpdateBoardSort(userId, board, fieldNames) {
-  return !!userId && (fieldNames || []).includes('sort') && allowIsBoardMember(userId, board);
+  const fields = fieldNames || [];
+  return !!userId && fields.length === 1 && fields[0] === 'sort' && allowIsBoardMember(userId, board);
+}
+
+// #6680: same SOLE-FIELD shape as canUpdateBoardSort, and for the same
+// reason - the board-wide "same width for all lists" VALUE is dragged by any
+// board member with write access (like the shared per-list `lists.width`
+// already is), but that must never be the door a lower-privilege member uses
+// to smuggle a members/permission/title change through. Turning
+// sameWidthForAllLists itself on/off stays admin-only via the default
+// allowIsBoardAdmin rule; this only ever touches its stored width.
+export function canUpdateBoardSameWidthValue(userId, board, fieldNames) {
+  const fields = fieldNames || [];
+  return (
+    !!userId &&
+    fields.length === 1 &&
+    fields[0] === 'sameWidthForAllListsValue' &&
+    !!(board && memberCan(board, userId, 'write'))
+  );
 }
 
 // Issue #5998: the REST board-member endpoints historically took eight separate

@@ -14,19 +14,26 @@
       # Change Streams require MongoDB to run as a replica set.
       # This checks if the replica set is already initialized, and if not, initializes it.
       # MongoDB must already be running at 127.0.0.1:27017.
-      if command -v mongosh > /dev/null 2>&1; then
+      # Replica-set init/readiness use db-eval (Node.js + the `mongodb` driver from
+      # node_modules) instead of mongosh, so no mongosh binary is required.
+      SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+      NODE_BIN="$(command -v node || true)"
+      DB_EVAL_JS="$SCRIPT_DIR/snap-src/bin/db-eval.mjs"
+      RS_URL="mongodb://127.0.0.1:27017/?directConnection=true"
+      db_eval() { NODE_PATH="$SCRIPT_DIR/node_modules" "$NODE_BIN" "$DB_EVAL_JS" "$@"; }
+      if [ -n "$NODE_BIN" ] && [ -f "$DB_EVAL_JS" ]; then
           echo "Checking MongoDB replica set status..."
-          if mongosh --port 27017 --quiet --eval 'rs.status().ok' 2>/dev/null | grep -q 1; then
+          if db_eval rs-conf-host "$RS_URL" 2>/dev/null | grep -q "^OK:"; then
               echo "Replica set already initialized."
           else
               echo "Initializing replica set rs0..."
-              mongosh --port 27017 --eval 'rs.initiate({_id: "rs0", members: [{_id: 0, host: "127.0.0.1:27017"}]})'
+              db_eval rs-initiate "$RS_URL" "127.0.0.1:27017" || true
               sleep 3
               echo "Replica set rs0 initialized."
           fi
           USE_CHANGE_STREAMS=true
       else
-          echo "mongosh not found. Skipping replica set initialization. Using polling."
+          echo "node/db-eval not found. Skipping replica set initialization. Using polling."
           USE_CHANGE_STREAMS=false
       fi
       #----------------------------------------------------------------------
@@ -35,12 +42,12 @@
       # otherwise the first index creation crashes with "Topology is closed".
       # After WEKAN_DB_WAIT_TIMEOUT seconds (default 120) the upgrade guidance
       # below is printed once (English only); WeKan keeps retrying after that.
-      if command -v mongosh > /dev/null 2>&1; then
+      if [ -n "$NODE_BIN" ] && [ -f "$DB_EVAL_JS" ]; then
           WEKAN_DB_WAIT_TIMEOUT=${WEKAN_DB_WAIT_TIMEOUT:-120}
           db_waited=0
           db_hint_shown=false
           echo "Waiting for MongoDB to be ready at 127.0.0.1:27017..."
-          until mongosh --port 27017 --quiet --eval 'try { quit(db.hello().isWritablePrimary ? 0 : 1) } catch (e) { quit(1) }' > /dev/null 2>&1; do
+          until db_eval primary "$RS_URL" > /dev/null 2>&1; do
               if [ "$db_hint_shown" != "true" ] && [ "$db_waited" -ge "$WEKAN_DB_WAIT_TIMEOUT" ]; then
                   echo ""
                   echo "========================================================================"
@@ -84,13 +91,14 @@
       #export METEOR_REACTIVITY_ORDER=polling
       # https://forums.meteor.com/t/meteor-3-5-beta-change-streams-performance-improvements/64461#change-streams-setup-3
       # https://github.com/meteor/meteor/blob/release-3.5/v3-docs/docs/performance/change-streams-observer-driver.md#choosing-the-reactivity-driver-order
-      # Use oplog,polling to fix performance until changeStreams is fixed at next release of Meteor 3.5 Beta:
+      # Keep oplog/polling fallback available for deployments that cannot use Change Streams:
       # https://github.com/wekan/wekan/issues/6307#issuecomment-4299349231
       # Later change to: METEOR_REACTIVITY_ORDER=changeStreams,oplog,polling
       if [ "$USE_CHANGE_STREAMS" = "true" ]; then
           export METEOR_REACTIVITY_ORDER=changeStreams,oplog,polling
-          export DDP_TRANSPORT=uws
-          #export DDP_TRANSPORT=sockjs
+          # sockjs is the only transport WeKan ships: no bundle carries
+          # uWebSockets.js, and uws is coerced to sockjs at startup.
+          export DDP_TRANSPORT=sockjs
       else
           export METEOR_REACTIVITY_ORDER=polling
       fi
@@ -100,9 +108,10 @@
       #-----------------------------------------------------------------
       # MongoDB database URL required
       export MONGO_URL=mongodb://127.0.0.1:27017/wekan
-      # MONGO_PASSWORD_FILE : MongoDB password file (Docker secrets)
-      # example : export MONGO_PASSWORD_FILE=/run/secrets/mongo_password
-      #export MONGO_PASSWORD_FILE=
+      # MONGO_URL_FILE : a file holding the whole MongoDB URL, password included
+      # (Docker secrets). Comment out MONGO_URL above to use it.
+      # example : export MONGO_URL_FILE=/run/secrets/mongo_url
+      #export MONGO_URL_FILE=
       #-----------------------------------------------------------------
       # MONGO_OPLOG_URL: MongoDB oplog connection for real-time reactivity
       # Required for Change Streams and OpLog tailing to work.
@@ -140,21 +149,23 @@
       #   ap-southeast-1,ap-northeast-1,sa-east-1
       #
       #export S3='{"s3":{"key": "xxx", "secret": "xxx", "bucket": "xxx", "region": "xxx"}}'
-      # S3_SECRET_FILE : S3 secret file (Docker secrets)
-      # example : export S3_SECRET_FILE=/run/secrets/s3_secret
-      #export S3_SECRET_FILE=
+      # S3_SECRET_KEY_FILE : a file holding S3_SECRET_KEY, the S3 secret access key (Docker secrets)
+      # example : export S3_SECRET_KEY_FILE=/run/secrets/s3_secret_key
+      #export S3_SECRET_KEY_FILE=
       #-----------------------------------------------------------------
       # https://github.com/wekan/wekan/wiki/Troubleshooting-Mail
       # https://github.com/wekan/wekan-mongodb/blob/master/docker-compose.yml
+      # In Admin Panel / People / Email, enable "Enable below email settings"
+      # to reveal additional email sending options below the checkbox.
       export MAIL_URL=smtp://user:pass@mailserver.example.com:25/
       export MAIL_FROM='Wekan Boards <info@example.com>'
       # Currently MAIL_SERVICE is not in use.
       #export MAIL_SERVICE=Outlook365
       #export MAIL_SERVICE_USER=firstname.lastname@hotmail.com
       #export MAIL_SERVICE_PASSWORD=SecretPassword
-      # MAIL_SERVICE_PASSWORD_FILE : Password file for mail service (Docker secrets)
-      # example : export MAIL_SERVICE_PASSWORD_FILE=/run/secrets/mail_service_password
-      #export MAIL_SERVICE_PASSWORD_FILE=
+      # MAIL_URL_FILE : a file holding the whole MAIL_URL, password included (Docker secrets)
+      # example : export MAIL_URL_FILE=/run/secrets/mail_url
+      #export MAIL_URL_FILE=
       #---------------------------------------------
       #export KADIRA_OPTIONS_ENDPOINT=http://127.0.0.1:11011
       #---------------------------------------------
@@ -184,6 +195,63 @@
       # https://docs.meteor.com/api/accounts-multi.html#AccountsCommon-config
       # Defaults below. Uncomment to change. wekan/server/accounts-common.js
       # - ACCOUNTS_COMMON_LOGIN_EXPIRATION_IN_DAYS=90
+      # Disable accounts unused for this many days (admins never). Unset or 0 = off.
+      #export USERS_DISABLE_INACTIVE_AFTER_DAYS=180
+      # LOGOUT_IDLE_MINUTES : Sign a browser session out after this many minutes without a key press, click,
+      # touch or scroll. Empty or 0 = off (default). REST API tokens are not affected.
+      #export LOGOUT_IDLE_MINUTES=30
+      # REQUIRE_2FA : Compulsory two-factor authentication for accounts that sign in with a WeKan password:
+      # off (default), admins or all. They must set it up right after signing in.
+      #export REQUIRE_2FA=admins
+      # PASSWORD_MIN_LENGTH : Minimum password length, in characters. Default 8. A sign-in with a shorter
+      # password is listed in Admin Panel / Problems / Password length; nothing is refused unless enforced:
+      #export PASSWORD_MIN_LENGTH=12
+      # PASSWORD_MIN_LENGTH_ENFORCE : true = refuse a shorter new password, and make an account that
+      # signs in with a shorter one change it; the change signs every session out. Off by default.
+      #export PASSWORD_MIN_LENGTH_ENFORCE=true
+      # PASSWORD_CHECK_PWNED : true = refuse a new password found in a known data breach. Off by default.
+      # Only 5 hex digits of its SHA-1 are sent to api.pwnedpasswords.com.
+      #export PASSWORD_CHECK_PWNED=true
+      # HSTS_MAX_AGE : Strict-Transport-Security max-age in seconds, sent only when ROOT_URL is https.
+      # Default 15552000 (180 days). 0 = do not send it.
+      #export HSTS_MAX_AGE=31536000
+      # HSTS_INCLUDE_SUBDOMAINS : true = HSTS covers every subdomain too. Only when ALL of them have HTTPS.
+      #export HSTS_INCLUDE_SUBDOMAINS=false
+      # HSTS_PRELOAD : true = add the preload token (needs includeSubDomains and max-age >= 31536000).
+      #export HSTS_PRELOAD=false
+      # Keep Admin Panel filesystem backups this many days (newest always kept).
+      # Unset or 0 = all. Admin Panel / Attachments / Backup can set it too.
+      #export BACKUP_KEEP_DAYS=7
+      # ACCOUNTS_COOKIE_REFRESH_RATE_LIMIT: Login-cookie refreshes allowed per 10 seconds from one address (Meteor default 30); raise it behind a reverse proxy that is not trusted for the client address. Admin Panel / People / Login overrides it; applies from the next start.
+      #export ACCOUNTS_COOKIE_REFRESH_RATE_LIMIT=100
+      # INBOUND_IMAP_POLL_SECONDS: Email to card: how often IMAP mailboxes are read, in seconds (default 60, at least 15).
+      #export INBOUND_IMAP_POLL_SECONDS=60
+      # INBOUND_EMAIL_PER_ADDRESS_PER_HOUR: Email to card: cards one sender address can make per hour (default 60).
+      #export INBOUND_EMAIL_PER_ADDRESS_PER_HOUR=60
+      # INBOUND_EMAIL_WEBHOOK_SECRET: Email to card: the secret the mail provider must send with each webhook POST, if not set in Admin Panel / People / Notification Settings / Email to card.
+      #export INBOUND_EMAIL_WEBHOOK_SECRET=long-random-value
+      # INBOUND_EMAIL_MAX_BYTES: Email to card: largest message in bytes (default 31457280, 30 MB).
+      #export INBOUND_EMAIL_MAX_BYTES=31457280
+      # INBOUND_EMAIL_MAX_ATTACHMENT_BYTES: Email to card: largest attachment in bytes (default 26214400, 25 MB).
+      #export INBOUND_EMAIL_MAX_ATTACHMENT_BYTES=26214400
+      # EMAIL_VIEW_SENDS_PER_HOUR: Emails one user can send from the email view per hour (default 50).
+      #export EMAIL_VIEW_SENDS_PER_HOUR=50
+      # INBOUND_IMAP_DISABLED: true stops THIS server process from reading IMAP mailboxes - for a multi-pod deployment where one pod should read them. Environment only: an Admin Panel value would be shared by every pod.
+      #export INBOUND_IMAP_DISABLED=true
+      # WEKAN_DISK_MONITOR: false turns off the disk-usage monitor of this server (Admin Panel / Problems / Disk usage). Default on.
+      #export WEKAN_DISK_MONITOR=false
+      # WEKAN_DISK_WATCH_PATHS: Comma-separated paths on this server whose disk usage is watched, instead of the data and files directories.
+      #export WEKAN_DISK_WATCH_PATHS=/data,/var/lib/wekan
+      # WEKAN_RAM_MONITOR: false turns off the memory monitor of this server (Admin Panel / Problems / Memory usage). Default on.
+      #export WEKAN_RAM_MONITOR=false
+      # WEKAN_IMPORT_RUN_STALE_MS: Milliseconds after which an import with no progress counts as interrupted and can be resumed or discarded (at least 60000).
+      #export WEKAN_IMPORT_RUN_STALE_MS=600000
+      # Attachment retention, off unless set (docs/Features/Cards/Attachments/Attachments.md):
+      #export ATTACHMENTS_RETENTION_DAYS=730
+      #export ATTACHMENTS_RETENTION_MODE=uploaded
+      #export ATTACHMENTS_PURGE_DELETED_AFTER_DAYS=30
+      #export ATTACHMENTS_RETENTION_DRY_RUN=true
+      #export ATTACHMENTS_RETENTION_MAX_PER_RUN=1000
       #---------------------------------------------------------------
       # ==== Allow configuration to validate uploaded attachments ====
       #export ATTACHMENTS_UPLOAD_EXTERNAL_PROGRAM="/usr/local/bin/avscan {file}"
@@ -194,10 +262,10 @@
       #export AVATARS_UPLOAD_EXTERNAL_PROGRAM="/usr/local/bin/avscan {file}"
       #export AVATARS_UPLOAD_MIME_TYPES="image/*"
       #export AVATARS_UPLOAD_MAX_SIZE=500000
+      # DEFAULT_AVATAR_URL : avatar of users who have not set one, a URL with {username},
+      # {userId}, {emailMd5} or {emailSha256} replaced. Example: http://192.168.1.200/avatars/{username}.png
+      #export DEFAULT_AVATAR_URL=
       #---------------------------------------------------------------
-      # ==== RICH TEXT EDITOR IN CARD COMMENTS ====
-      # https://github.com/wekan/wekan/pull/2560
-      export RICHER_CARD_COMMENT_EDITOR=false
       #---------------------------------------------------------------
       # ==== CARD OPENED, SEND WEBHOOK MESSAGE ====
       export CARD_OPENED_WEBHOOK_ENABLED=false
@@ -227,6 +295,11 @@
       #export BIGEVENTS_PATTERN=received|start|due|end
       # c) Disabled
       export BIGEVENTS_PATTERN=NONE
+      #---------------------------------------------------------------
+      # ==== NOTIFY ON ASSIGN =====
+      # Notify the user directly when they are added as a card member or
+      # assignee. Set false to disable.
+      #export NOTIFY_ON_ASSIGN=true
       #---------------------------------------------------------------
       # ==== EMAIL DUE DATE NOTIFICATION =====
       # https://github.com/wekan/wekan/pull/2536
@@ -286,6 +359,12 @@
       # ==== AUTOLOGIN WITH OIDC/OAUTH2 ====
       # https://github.com/wekan/wekan/wiki/autologin
       #export OIDC_REDIRECTION_ENABLED=true
+      # OIDC RP-initiated logout endpoint (end_session_endpoint). When set, "Log Out"
+      # ends the identity provider session and returns the user to Wekan (ROOT_URL)
+      # via post_logout_redirect_uri, instead of landing on the provider home page
+      # (which errors for non-admin users). See https://github.com/wekan/wekan/issues/6158
+      # Keycloak example:
+      #export OAUTH2_LOGOUT_ENDPOINT=/realms/<keycloak realm>/protocol/openid-connect/logout
       #---------------------------------------------
       # OAUTH2 ORACLE on premise identity manager OIM
       #export ORACLE_OIM_ENABLED=true
@@ -316,8 +395,16 @@
       # email_verified=true for the merge to happen.
       #export OAUTH2_MERGE_EXISTING_USERS=false
       #
+      # When false, OAuth2/OIDC login is refused for users that do not already
+      # have a Wekan account (matched by verified email).
+      #export OAUTH2_AUTO_REGISTRATION=true
+      #
+      # Comma/space separated OAuth2/OIDC group names whose members become Wekan
+      # admins. Empty = off.
+      #export OAUTH2_ADMIN_GROUPS=
+      #
       # OAuth2 docs: https://github.com/wekan/wekan/wiki/OAuth2
-      # OAuth2 login style: popup or redirect.
+      # OAuth2 login style: redirect (default) or popup.
       #export OAUTH2_LOGIN_STYLE=redirect
       #
       # Application GUID captured during app registration:
@@ -348,7 +435,7 @@
       # ==== OAUTH2 KEYCLOAK ====
       # https://github.com/wekan/wekan/wiki/Keycloak  <== MAPPING INFO, REQUIRED
       #export OAUTH2_ENABLED=true
-      # OAuth2 login style: popup or redirect.
+      # OAuth2 login style: redirect (default) or popup.
       #export OAUTH2_LOGIN_STYLE=redirect
       #export OAUTH2_CLIENT_ID=<Keycloak create Client ID>
       #export OAUTH2_SERVER_URL=<Keycloak server URL - https://keycloak.example.com>
@@ -368,7 +455,7 @@
       # Enable the OAuth2 connection
       #export OAUTH2_ENABLED=true
       #
-      # OAuth2 login style: popup or redirect.
+      # OAuth2 login style: redirect (default) or popup.
       #export OAUTH2_LOGIN_STYLE=redirect
       #
       # OAuth2 Client ID.
@@ -525,6 +612,11 @@
       # example :  export LDAP_BACKGROUND_SYNC_IMPORT_NEW_USERS=true
       #export LDAP_BACKGROUND_SYNC_IMPORT_NEW_USERS=false
       #
+      # LDAP_BACKGROUND_SYNC_DISABLE_NONEXISTANT_USERS : When true, the LDAP
+      # background sync disables users no longer present in LDAP (and re-enables
+      # them when they reappear).
+      #export LDAP_BACKGROUND_SYNC_DISABLE_NONEXISTANT_USERS=false
+      #
       # LDAP_ENCRYPTION : If using LDAPS
       # example :  export LDAP_ENCRYPTION=ssl
       #export LDAP_ENCRYPTION=false
@@ -584,6 +676,56 @@
       # LDAP_GROUP_FILTER_GROUP_MEMBER_FORMAT :
       # example :
       #export LDAP_GROUP_FILTER_GROUP_MEMBER_FORMAT=
+      #
+      # LDAP_GROUP_FILTER_NESTED : Active Directory nested groups (#6744). When true, a user who is a member of
+      # LDAP_GROUP_FILTER_GROUP_NAME through another group (team group -> access
+      # group) is a member too: the group searches use AD's
+      # LDAP_MATCHING_RULE_IN_CHAIN (1.2.840.113556.1.4.1941). Needs a DN-valued
+      # member attribute (member, with LDAP_GROUP_FILTER_GROUP_MEMBER_FORMAT=dn).
+      # Also applies to admin status, group->role and org/team sync. Default: false.
+      # example :  export LDAP_GROUP_FILTER_NESTED=true
+      #export LDAP_GROUP_FILTER_NESTED=false
+      #
+      # LDAP_MIGRATION_ALLOW_PASSWORD_LOGIN : Let users moved from local password login to LDAP still log in with their old local password (true). Default: false
+      #export LDAP_MIGRATION_ALLOW_PASSWORD_LOGIN=
+      #
+      # LDAP_USER_ATTRIBUTES : Comma separated LDAP attributes to read for a user. Empty: all attributes. Example: uid,cn,mail
+      #export LDAP_USER_ATTRIBUTES=
+      #
+      # LDAP_GROUP_BASEDN : Where the LDAP groups are, when they are not under LDAP_BASEDN. Empty: LDAP_BASEDN. Example: ou=groups,dc=example,dc=org
+      #export LDAP_GROUP_BASEDN=
+      #
+      # OAUTH2_AVATAR_MAP : The OIDC user info claim that holds the avatar URL. Default: picture
+      #export OAUTH2_AVATAR_MAP=
+      #
+      # OAUTH2_ALLOWED_EMAIL_DOMAINS : Comma separated e-mail domains allowed to log in with OAuth2/OIDC. Empty: every domain. Example: example.com,example.org
+      #export OAUTH2_ALLOWED_EMAIL_DOMAINS=
+      # OAUTH2_DEFAULT_ORGANIZATION : an existing organization (short name, display name or id) that every account created by an OAuth2/OIDC login joins.
+      #export OAUTH2_DEFAULT_ORGANIZATION=
+      #
+      # PROPAGATE_OIDC_DATA : Update groups, admin status, e-mail, full name and username from the OIDC provider at every login (true). Default: false
+      #export PROPAGATE_OIDC_DATA=
+      #
+      # OAUTH2_SECRET_JWT_KEY_PATH : Sign in with Apple: path to the private key (.p8) that signs the client secret JWT. Empty: OAUTH2_SECRET is used
+      #export OAUTH2_SECRET_JWT_KEY_PATH=
+      #
+      # OAUTH2_SECRET_JWT_ISSUER : Sign in with Apple: the Team ID, issuer of the client secret JWT
+      #export OAUTH2_SECRET_JWT_ISSUER=
+      #
+      # OAUTH2_SECRET_JWT_KEY_ID : Sign in with Apple: the Key ID of the private key
+      #export OAUTH2_SECRET_JWT_KEY_ID=
+      #
+      # OAUTH2_SECRET_JWT_AUDIENCE : Audience of the client secret JWT. Default: https://appleid.apple.com
+      #export OAUTH2_SECRET_JWT_AUDIENCE=
+      #
+      # OAUTH2_SECRET_JWT_SUBJECT : Subject of the client secret JWT. Default: OAUTH2_CLIENT_ID
+      #export OAUTH2_SECRET_JWT_SUBJECT=
+      #
+      # OAUTH2_SECRET_JWT_EXPIRES_IN : Lifetime of the client secret JWT in seconds. Default: 300
+      #export OAUTH2_SECRET_JWT_EXPIRES_IN=
+      #
+      # CAS_MERGE_EXISTING_USERS : Let a CAS login take over an existing local account with the same username (true). Default: false
+      #export CAS_MERGE_EXISTING_USERS=
       #
       # LDAP_GROUP_FILTER_GROUP_NAME :
       # example :
@@ -651,6 +793,20 @@
       #
       # Comma separated list of admin group names to sync.
       #export LDAP_SYNC_ADMIN_GROUPS=group1,group2
+      #
+      # LDAP_SYNC_ORGANIZATIONS : When true, sync a user's LDAP groups as Wekan Organizations.
+      #export LDAP_SYNC_ORGANIZATIONS=false
+      #
+      # LDAP_SYNC_ORGANIZATIONS_GROUPS : Comma separated allowlist of LDAP group
+      # names to sync as Organizations. Empty = all of the user's groups.
+      #export LDAP_SYNC_ORGANIZATIONS_GROUPS=
+      #
+      # LDAP_SYNC_TEAMS : When true, sync a user's LDAP groups as Wekan Teams.
+      #export LDAP_SYNC_TEAMS=false
+      #
+      # LDAP_SYNC_TEAMS_GROUPS : Comma separated allowlist of LDAP group names to
+      # sync as Teams. Empty = all of the user's groups.
+      #export LDAP_SYNC_TEAMS_GROUPS=
       #---------------------------------------------------------------------
       # Login to LDAP automatically with HTTP header.
       # In below example for siteminder, at right side of = is header name.
@@ -658,9 +814,18 @@
       #export HEADER_LOGIN_FIRSTNAME=HEADERFIRSTNAME
       #export HEADER_LOGIN_LASTNAME=HEADERLASTNAME
       #export HEADER_LOGIN_EMAIL=HEADEREMAILADDRESS
-    # Optional comma-separated trusted proxy source IPs for header login.
-    # If empty, all source IPs are accepted (not recommended).
-    #export HEADER_LOGIN_TRUSTED_IPS=127.0.0.1,10.0.0.2
+      # SECURITY (GHSA-jggc-qvfc-jr6x): comma-separated allowlist of source IPs
+      # allowed to use header login. The source IP is the real TCP peer of the
+      # connection (your reverse proxy), NOT the spoofable X-Forwarded-For header.
+      # REQUIRED when header login is enabled: if empty/unset, header login fails
+      # CLOSED and authenticates no one.
+      #export HEADER_LOGIN_TRUSTED_IPS=127.0.0.1,10.0.0.2
+      # Optional: if WeKan is behind MULTIPLE proxy hops, list the intermediate
+      # proxy IPs here. X-Forwarded-For is then honored ONLY when the immediate
+      # TCP peer is one of these trusted proxies, and the right-most hop that is
+      # not itself a trusted proxy (the real client) is matched against
+      # HEADER_LOGIN_TRUSTED_IPS above.
+      #export HEADER_LOGIN_TRUSTED_PROXIES=10.0.0.1,10.0.0.2
       #---------------------------------------------------------------------
       # LOGOUT_WITH_TIMER : Enables or not the option logout with timer
       # example : LOGOUT_WITH_TIMER=true
@@ -675,6 +840,12 @@
       #---------------------------------------------------------------------
       # PASSWORD_LOGIN_ENABLED : Enable or not the password login form.
       #export PASSWORD_LOGIN_ENABLED=true
+      #---------------------------------------------------------------------
+      # DEFAULT_AUTHENTICATION_METHOD : default authentication method used when a
+      # user does not exist, to create and authenticate. Can be set as ldap.
+      # (Set properly in the Admin Panel; changing this does not remove the
+      # Password login option.)
+      #export DEFAULT_AUTHENTICATION_METHOD=ldap
       #---------------------------------------------------------------------
       #export CAS_ENABLED=true
       #export CAS_BASE_URL=https://cas.example.com/cas
@@ -692,6 +863,79 @@
       #export SAML_IDENTIFIER_FORMAT=
       #export SAML_LOCAL_PROFILE_MATCH_ATTRIBUTE=
       #export SAML_ATTRIBUTES=
+      #export SAML_MERGE_EXISTING_USERS=false
+      #export SAML_IDP_PROFILE=standard
+      #export SAML_WANT_RESPONSE_SIGNED=
+      #export SAML_WANT_ASSERTIONS_SIGNED=
+      #export SAML_LOGIN_FLOW=
+      #---------------------------------------------------------------------
+      # Login with Meteor accounts providers, see docs/Features/Login-Page/OAuth-Providers.md
+      # and docs/Features/Login-Page/Passwordless.md. Every one of these can be overridden
+      # in Admin Panel / People / Login; a value set there wins over the environment
+      # variable. Register this callback URL at the provider:
+      #   <ROOT_URL>/_oauth/<service>  where service is google, github, facebook,
+      #   twitter, meteor-developer, weibo or meetup.
+      # ==== Google ==== create the app at https://console.cloud.google.com/apis/credentials
+      # callback URL: <ROOT_URL>/_oauth/google
+      #export OAUTH_GOOGLE_ENABLED=true
+      #export OAUTH_GOOGLE_CLIENT_ID=
+      #export OAUTH_GOOGLE_SECRET=
+      # OAUTH_GOOGLE_SECRET_FILE : read the secret from a file (Docker secrets) instead
+      #export OAUTH_GOOGLE_SECRET_FILE=/run/secrets/oauth_google_secret
+      # ==== GitHub ==== create the app at https://github.com/settings/developers
+      # callback URL: <ROOT_URL>/_oauth/github
+      #export OAUTH_GITHUB_ENABLED=true
+      #export OAUTH_GITHUB_CLIENT_ID=
+      #export OAUTH_GITHUB_SECRET=
+      # OAUTH_GITHUB_SECRET_FILE : read the secret from a file (Docker secrets) instead
+      #export OAUTH_GITHUB_SECRET_FILE=/run/secrets/oauth_github_secret
+      # ==== Facebook ==== create the app at https://developers.facebook.com/apps/
+      # callback URL: <ROOT_URL>/_oauth/facebook
+      #export OAUTH_FACEBOOK_ENABLED=true
+      #export OAUTH_FACEBOOK_APP_ID=
+      #export OAUTH_FACEBOOK_SECRET=
+      # OAUTH_FACEBOOK_SECRET_FILE : read the secret from a file (Docker secrets) instead
+      #export OAUTH_FACEBOOK_SECRET_FILE=/run/secrets/oauth_facebook_secret
+      # ==== Twitter / X ==== create the app at https://developer.x.com/en/portal/dashboard
+      # callback URL: <ROOT_URL>/_oauth/twitter
+      #export OAUTH_TWITTER_ENABLED=true
+      #export OAUTH_TWITTER_CONSUMER_KEY=
+      #export OAUTH_TWITTER_SECRET=
+      # OAUTH_TWITTER_SECRET_FILE : read the secret from a file (Docker secrets) instead
+      #export OAUTH_TWITTER_SECRET_FILE=/run/secrets/oauth_twitter_secret
+      # ==== Meteor Developer ==== create the app at https://www.meteor.com/
+      # callback URL: <ROOT_URL>/_oauth/meteor-developer
+      #export OAUTH_METEOR_DEVELOPER_ENABLED=true
+      #export OAUTH_METEOR_DEVELOPER_CLIENT_ID=
+      #export OAUTH_METEOR_DEVELOPER_SECRET=
+      # OAUTH_METEOR_DEVELOPER_SECRET_FILE : read the secret from a file (Docker secrets) instead
+      #export OAUTH_METEOR_DEVELOPER_SECRET_FILE=/run/secrets/oauth_meteor_developer_secret
+      # ==== Weibo ==== create the app at https://open.weibo.com/
+      # callback URL: <ROOT_URL>/_oauth/weibo
+      #export OAUTH_WEIBO_ENABLED=true
+      #export OAUTH_WEIBO_CLIENT_ID=
+      #export OAUTH_WEIBO_SECRET=
+      # OAUTH_WEIBO_SECRET_FILE : read the secret from a file (Docker secrets) instead
+      #export OAUTH_WEIBO_SECRET_FILE=/run/secrets/oauth_weibo_secret
+      # ==== Meetup ==== create the app at https://www.meetup.com/api/oauth/list/
+      # callback URL: <ROOT_URL>/_oauth/meetup
+      #export OAUTH_MEETUP_ENABLED=true
+      #export OAUTH_MEETUP_CLIENT_ID=
+      #export OAUTH_MEETUP_SECRET=
+      # OAUTH_MEETUP_SECRET_FILE : read the secret from a file (Docker secrets) instead
+      #export OAUTH_MEETUP_SECRET_FILE=/run/secrets/oauth_meetup_secret
+      # OAUTH_PROVIDERS_LOGIN_STYLE : redirect or popup, for all providers above. Default: redirect
+      #export OAUTH_PROVIDERS_LOGIN_STYLE=redirect
+      # OAUTH_PROVIDERS_MERGE_EXISTING_USERS : link a provider login to an existing WeKan
+      # account with the same email. Default: false = the login is refused, not merged,
+      # like OAUTH2_MERGE_EXISTING_USERS. Enable only if you trust the provider's emails.
+      #export OAUTH_PROVIDERS_MERGE_EXISTING_USERS=false
+      # OAUTH_PROVIDERS_ALLOWED_EMAIL_DOMAINS : only these email domains may sign in with
+      # the providers above, comma separated, like OAUTH2_ALLOWED_EMAIL_DOMAINS. Empty: all.
+      #export OAUTH_PROVIDERS_ALLOWED_EMAIL_DOMAINS=example.com
+      # PASSWORDLESS_ENABLED : email a one-time sign-in code instead of asking a
+      # password. Needs MAIL_URL. Also switchable in Admin Panel / People / Login.
+      #export PASSWORDLESS_ENABLED=true
       #---------------------------------------------------------------------
       # Wait spinner to use
       #export WAIT_SPINNER=Bounce
@@ -704,6 +948,34 @@
       #bash -c "ulimit -s 65500; exec node --stack-size=65500 main.js"
       #-------------------- OPTIONAL SETTINGS END ----------------------
       #bash -c "ulimit -s 65500; exec node --stack-size=65500 --max-old-space-size=8192 main.js"
+      if [ -z "${NODE_OPTIONS:-}" ]; then
+        _memory_mb=$(awk '/^MemTotal:/{print int($2/1024)}' /proc/meminfo 2>/dev/null || true)
+        # macOS and the BSDs have no /proc; hw.memsize (macOS), hw.physmem64 (NetBSD)
+        # and hw.physmem (BSD) are bytes. Only a number counts: OpenBSD answers a name
+        # it does not have with nothing and exit status 0, so an `||` chain stopped at
+        # hw.memsize and $(( / 1048576)) killed the script.
+        [ -n "$_memory_mb" ] || for _k in hw.memsize hw.physmem64 hw.physmem; do _b=$(sysctl -n "$_k" 2>/dev/null || true); case "$_b" in ''|*[!0-9]*) continue;; esac; _memory_mb=$((_b/1048576)); break; done
+        [ "$_memory_mb" -gt 0 ] 2>/dev/null || _memory_mb=2048
+        for _f in /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory/memory.limit_in_bytes; do [ -r "$_f" ] || continue; _b=$(cat "$_f" 2>/dev/null || true); case "$_b" in ''|max|*[!0-9]*) continue;; esac; _m=$((_b/1048576)); [ "$_m" -gt 0 ] && [ "$_m" -lt "$_memory_mb" ] && _memory_mb=$_m; break; done
+        _heap_mb=$((_memory_mb*3/5)); [ "$_heap_mb" -gt 4096 ] && _heap_mb=4096
+        export NODE_OPTIONS="--max-old-space-size=$_heap_mb"
+      fi
+      # MONGO_URL_FILE (#5724): a file holding the whole MongoDB URL, password
+      # included (Docker / Kubernetes secrets). Read here because Meteor connects
+      # with MONGO_URL before any WeKan code runs. MONGO_URL wins when both are set.
+      if [ -z "${MONGO_URL:-}" ] && [ -n "${MONGO_URL_FILE:-}" ]; then
+        if [ ! -r "$MONGO_URL_FILE" ]; then
+          echo "ERROR: MONGO_URL_FILE=$MONGO_URL_FILE cannot be read." >&2
+          exit 1
+        fi
+        MONGO_URL="$(cat "$MONGO_URL_FILE")"
+        if [ -z "$MONGO_URL" ]; then
+          echo "ERROR: MONGO_URL_FILE=$MONGO_URL_FILE is empty." >&2
+          exit 1
+        fi
+        export MONGO_URL
+        echo "Using MONGO_URL from MONGO_URL_FILE"
+      fi
       bash -c "ulimit -s 65500; exec node main.js"
       #node main.js
       #---------------------------------------------------------------------

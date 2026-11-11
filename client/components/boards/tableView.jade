@@ -1,0 +1,145 @@
+template(name="tableView")
+  if currentBoard
+    .wrapper.table-view-wrapper
+      .table-view-controls
+        .table-view-search-box
+          input.js-table-view-search(type="text" placeholder="{{_ 'search'}}" aria-label="{{_ 'search'}}")
+          button.js-table-view-search-button(type="button")
+            i.fa.fa-search
+            | {{_ 'search'}}
+        .table-view-pagination
+          button.js-table-view-prev-page(type="button" class="{{#unless hasPrevPage}}disabled{{/unless}}" aria-label="{{_ 'previous'}}")
+            i.fa.fa-chevron-left
+          span.table-view-page-info {{currentPage}} / {{totalPages}}
+          button.js-table-view-next-page(type="button" class="{{#unless hasNextPage}}disabled{{/unless}}" aria-label="{{_ 'next'}}")
+            i.fa.fa-chevron-right
+        button.js-table-view-toggle-card-title-wrap(type="button" class="{{#if wrapCardTitles}}active{{/if}}" title="{{#if wrapCardTitles}}{{_ 'board-table-card-title-wrap-on'}}{{else}}{{_ 'board-table-card-title-wrap-off'}}{{/if}}" aria-label="{{#if wrapCardTitles}}{{_ 'board-table-card-title-wrap-on'}}{{else}}{{_ 'board-table-card-title-wrap-off'}}{{/if}}" aria-pressed="{{wrapCardTitles}}")
+          i.fa(class="{{#if wrapCardTitles}}fa-align-left{{else}}fa-ellipsis-h{{/if}}")
+        button.js-table-view-toggle-swimlane-groups(type="button" class="{{#if groupBySwimlane}}active{{/if}}" title="{{#if groupBySwimlane}}{{_ 'board-table-group-by-swimlane-on'}}{{else}}{{_ 'board-table-group-by-swimlane-off'}}{{/if}}" aria-label="{{#if groupBySwimlane}}{{_ 'board-table-group-by-swimlane-on'}}{{else}}{{_ 'board-table-group-by-swimlane-off'}}{{/if}}" aria-pressed="{{groupBySwimlane}}")
+          i.fa(class="{{#if groupBySwimlane}}fa-object-group{{else}}fa-list{{/if}}")
+      table.my-cards-board-table.table-view-table(class="{{#if wrapCardTitles}}table-view-wrap-card-titles{{else}}table-view-ellipsis-card-titles{{/if}}")
+        caption.sr-only {{currentBoard.title}}
+        thead
+          tr
+            th(scope="col")
+            th(scope="col")
+              button.js-table-view-sort(type="button" data-field="title")
+                | {{_ "card"}}
+                i.fa(class="{{sortIcon 'title'}}")
+            th(scope="col")
+              button.js-table-view-sort(type="button" data-field="listTitle")
+                | {{_ "list"}}
+                i.fa(class="{{sortIcon 'listTitle'}}")
+            th(scope="col")
+              button.js-table-view-sort(type="button" data-field="swimlaneTitle")
+                | {{_ "swimlane"}}
+                i.fa(class="{{sortIcon 'swimlaneTitle'}}")
+            unless isMiniScreen
+              th(scope="col")
+                button.js-table-view-sort(type="button" data-field="assigneesKey") {{_ "assignees"}}
+              th(scope="col")
+                button.js-table-view-sort(type="button" data-field="membersKey") {{_ "members"}}
+              th(scope="col")
+                button.js-table-view-sort(type="button" data-field="labelsKey") {{_ "labels"}}
+              if showReceivedColumn
+                th(scope="col")
+                  button.js-table-view-sort(type="button" data-field="receivedAt") {{_ "card-received"}}
+              if showStartColumn
+                th(scope="col")
+                  button.js-table-view-sort(type="button" data-field="startAt") {{_ "card-start"}}
+              if showDueColumn
+                th(scope="col")
+                  button.js-table-view-sort(type="button" data-field="dueAt") {{_ "card-due"}}
+              if showEndColumn
+                th(scope="col")
+                  button.js-table-view-sort(type="button" data-field="endAt") {{_ "card-end"}}
+        tbody
+          each row in rows
+            if row.isGroupHeader
+              tr.table-view-swimlane-group
+                th(colspan=columnCount scope="rowgroup")
+                  +viewer
+                    = row.swimlaneTitle
+            else
+              //- #864: a row is dragged onto another to move its card there.
+              tr.js-table-view-row(draggable="{{#if canWrite}}true{{/if}}" data-card-id=row.card._id)
+                td.table-view-cell-edit
+                  a.edit-card.js-table-view-edit-card(href=row.card.originRelativeUrl data-card-id=row.card._id title="{{_ 'edit'}}")
+                    i.fa.fa-pencil-square-o
+                    | {{_ 'edit'}}
+                td.table-view-cell-wrap.table-view-cell-card-title(title=row.title)
+                  unless isMiniScreen
+                    .my-cards-board-badge(class=row.colorClass)
+                  .my-cards-card-title-table
+                    +viewer
+                      = row.title
+                td.table-view-cell-wrap
+                  +viewer
+                    = row.listTitle
+                td.table-view-cell-wrap
+                  +viewer
+                    = row.swimlaneTitle
+                unless isMiniScreen
+                  td
+                    .div
+                      each assignee in row.card.getAssignees
+                        a.name
+                          +userAvatar(userId=assignee noRemove=true)
+                  td
+                    .div
+                      each member in row.card.getMembers
+                        a.name
+                          +userAvatar(userId=member noRemove=true)
+                  td.table-view-cell-labels
+                    .div
+                      each label in row.labels
+                        span.card-label(class="{{labelColorClass label.color}}" style="{{labelColorStyle label.color}}" title="{{label.name}}")
+                          +viewer
+                            = label.name
+                  if showReceivedColumn
+                    td.table-view-cell-date
+                      with row.card
+                        if getReceived
+                          +cardReceivedDate
+                        else
+                          if canModifyCard
+                            a.card-label.add-label.js-received-date(title="{{_ 'card-received'}}")
+                              i.fa.fa-plus
+                  if showStartColumn
+                    td.table-view-cell-date
+                      with row.card
+                        if getStart
+                          +cardStartDate
+                        else
+                          if canModifyCard
+                            a.card-label.add-label.js-start-date(title="{{_ 'card-start'}}")
+                              i.fa.fa-plus
+                  if showDueColumn
+                    td.table-view-cell-date
+                      with row.card
+                        if getDue
+                          +cardDueDate
+                        else
+                          if canModifyCard
+                            a.card-label.add-label.js-due-date(title="{{_ 'card-due'}}")
+                              i.fa.fa-plus
+                  if showEndColumn
+                    td.table-view-cell-date
+                      with row.card
+                        if getEnd
+                          +cardEndDate
+                        else
+                          if canModifyCard
+                            a.card-label.add-label.js-end-date(title="{{_ 'card-end'}}")
+                              i.fa.fa-plus
+      //- #864: add a card from the table: its title, list and swimlane.
+      if canWrite
+        form.table-view-add-card.js-table-view-add-card
+          input.js-table-view-add-card-title(type="text" placeholder="{{_ 'add-card'}}" aria-label="{{_ 'add-card'}}" required)
+          select.js-table-view-add-card-list(aria-label="{{_ 'list'}}")
+            each boardLists
+              option(value=_id) {{title}}
+          select.js-table-view-add-card-swimlane(aria-label="{{_ 'swimlane'}}")
+            each boardSwimlanes
+              option(value=_id) {{title}}
+          button.primary.js-table-view-add-card-button(type="submit") {{_ 'add-card'}}

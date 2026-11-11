@@ -17,10 +17,83 @@ function sanitizeText(text) {
     previous = sanitized;
     sanitized = sanitized.replace(/<[^>]*>/g, '');
   } while (sanitized !== previous);
+
+  // A comment losing a `<b>` is an everyday thing and says nothing. A comment
+  // losing a SCRIPT TAG, an event handler or a javascript: URI is a stored-XSS
+  // attempt that this line defused, and an admin should be told who wrote it
+  // (docs/Security/Remediation/WeKan.md §12.6). The comment is stored sanitized
+  // either way; the author is told nothing.
+  if (Meteor.isServer && sanitized !== text) {
+    try {
+      const { removedActiveMarkup, CANARY_IDS } = require('/models/lib/injectionDetect');
+      if (removedActiveMarkup(text, sanitized)) {
+        require('/server/lib/canary').tripCanary(CANARY_IDS.text, {
+          detail: 'active markup removed from a comment',
+        });
+      }
+    } catch (e) { /* a canary must never break a comment */ }
+  }
+
   return sanitized;
 }
 
 const CardComments = new Mongo.Collection('card_comments');
+
+/**
+ * Pure permission decision for editing/deleting a comment.
+ *
+ * Kept as a standalone exported function so it can be unit-tested in isolation
+ * and reused by both the collection hooks (server) and the UI (client).
+ *
+ * @param {Object} opts
+ * @param {boolean} opts.isAuthor               is the acting user the comment author?
+ * @param {boolean} opts.isBoardAdmin           is the acting user a board admin?
+ * @param {boolean} opts.restrictCommentEditing board setting: when true, board
+ *                                               admins may NOT edit/delete comments
+ *                                               authored by others.
+ * @returns {boolean} whether the acting user may edit/delete the comment.
+ */
+/**
+ * Resolve the parentId a NEW comment should actually be stored with, capping
+ * threading at one level (issue #3011). A reply to a top-level comment keeps
+ * its parentId as-is; a reply to a REPLY is flattened onto that reply's own
+ * parent (the original top-level comment), so nesting never goes deeper than
+ * one level no matter how many times "Reply" is clicked down the chain.
+ *
+ * Kept standalone and pure (no collection access) so it can be unit-tested
+ * without a database, and reused by both the client (choosing what to send)
+ * and the server (defense in depth against a caller that sends its own
+ * parentId, e.g. a future API).
+ *
+ * @param {string} parentId    the _id of the comment being replied to, or ''.
+ * @param {function(string): ({parentId: string}|undefined)} getComment
+ *        looks up a comment by _id; returns the doc (or at least its
+ *        parentId) if found, undefined otherwise.
+ * @returns {string} the parentId to store, '' for a top-level comment.
+ */
+export function resolveParentId(parentId, getComment) {
+  if (!parentId) {
+    return '';
+  }
+  const parent = getComment(parentId);
+  if (parent && parent.parentId) {
+    return parent.parentId;
+  }
+  return parentId;
+}
+
+export function canEditComment({ isAuthor, isBoardAdmin, restrictCommentEditing }) {
+  // The author may always edit/delete their own comment.
+  if (isAuthor) {
+    return true;
+  }
+  // When editing is restricted, admins lose the ability to touch others' comments.
+  if (restrictCommentEditing) {
+    return false;
+  }
+  // Default (unrestricted) behaviour: board admins may edit/delete others' comments.
+  return !!isBoardAdmin;
+}
 
 /**
  * A comment on a card
@@ -45,6 +118,19 @@ CardComments.attachSchema(
        * the text of the comment
        */
       type: String,
+    },
+    // Server-only recovery evidence. Ordinary reads exclude these fields and
+    // DDP deny rules reject writes (including rename destinations).
+    webhookResponsePending: { type: Object, optional: true, blackbox: true },
+    webhookResponseRevision: { type: String, optional: true },
+    parentId: {
+      /**
+       * the _id of the comment this comment is a reply to (threaded replies).
+       * Optional: top-level comments have no parentId.
+       */
+      type: String,
+      optional: true,
+      defaultValue: '',
     },
     createdAt: {
       /**
@@ -73,6 +159,14 @@ CardComments.attachSchema(
         }
       },
     },
+    syncCommentId: {
+      /**
+       * List sync: the tracker's own id of the comment this one mirrors
+       * (models/lib/listSyncIssueDetails.js). Unset on comments written in WeKan.
+       */
+      type: String,
+      optional: true,
+    },
     // XXX Should probably be called `authorId`
     userId: {
       /**
@@ -90,14 +184,27 @@ CardComments.attachSchema(
 );
 
 CardComments.helpers({
-  copy(newCardId) {
-    this.cardId = newCardId;
-    delete this._id;
-    return CardComments.insertAsync(this);
+  copy(newCardId, newBoardId) {
+    const { buildCopiedComment } = require('./lib/copiedComment');
+    const copy = buildCopiedComment(this, newCardId, newBoardId || this.boardId);
+    if (!copy) return null;
+    // #1213: this is existing conversation history, not a newly posted
+    // comment. Preserve its author and dates, avoid mutating the cached source,
+    // and bypass the add-comment activity hook. Disabling auto-values prevents
+    // the schema from replacing createdAt with the time of the card copy.
+    return CardComments.direct.insertAsync(copy, { getAutoValues: false });
   },
 
   user() {
     return ReactiveCache.getUser(this.userId);
+  },
+
+  // The comment this one replies to, or undefined for top-level comments.
+  parentComment() {
+    if (!this.parentId) {
+      return undefined;
+    }
+    return ReactiveCache.getCardComment(this.parentId);
   },
 
   reactions() {
@@ -149,6 +256,68 @@ CardComments.helpers({
 
 CardComments.hookOptions.after.update = { fetchPrevious: false };
 
+// Server-side enforcement of comment edit/delete permissions (issue #5906).
+//
+// The DDP `allow` rule in server/permissions/cardComments.js is the first gate,
+// but the per-board `restrictCommentEditing` setting is enforced here so the
+// rule cannot be bypassed and the decision lives next to the data. Exported so
+// the REST handlers can enforce the SAME rule (GHSA-pqr4-rxgp-hv2m) rather than
+// relying on collection hooks, which cannot see an HTTP caller's identity.
+export async function assertCanMutateComment(userId, doc) {
+  // Server-internal operations (board copy, cleanup, migrations, etc.) run
+  // without an authenticated user; do not block those here. User-initiated
+  // DDP calls always carry a userId and are still gated by the allow rule.
+  //
+  // GHSA-pqr4-rxgp-hv2m: an HTTP handler is NOT a server-internal operation,
+  // but it reached the collection with no Meteor userId in the invocation
+  // context, so it landed on this trusted path — and every board member could
+  // delete anyone's comment through the REST API, restrictCommentEditing or
+  // not. The REST handlers now call this function themselves, with req.userId,
+  // BEFORE touching the collection (server/models/cardComments.js). The trusted
+  // path stays for the genuine internal callers it was written for.
+  if (!userId) {
+    return;
+  }
+  const isAuthor = userId === doc.userId;
+  if (isAuthor) {
+    return; // Authors may always edit/delete their own comments.
+  }
+  const board = await Boards.findOneAsync(doc.boardId);
+  const isBoardAdmin = !!board && !!userId && board.hasAdmin(userId);
+  const restrictCommentEditing = !!board && !!board.restrictCommentEditing;
+  if (!canEditComment({ isAuthor, isBoardAdmin, restrictCommentEditing })) {
+    const error = new Meteor.Error(
+      'error-comment-edit-not-allowed',
+      "You are not allowed to edit or delete another user's comment on this board.",
+    );
+    // So the REST layer answers 403 rather than 500 (httpStatusForError).
+    error.statusCode = 403;
+    throw error;
+  }
+}
+
+if (Meteor.isServer) {
+  // Issue #3011: cap threading at one level regardless of caller. The client
+  // already sends a flattened parentId (see the reply-click handler in
+  // client/components/activities/comments.js), but this re-derives it
+  // server-side so a reply-to-a-reply can never be stored deeper than one
+  // level, however the insert was made.
+  CardComments.before.insert(async (userId, doc) => {
+    if (doc.parentId) {
+      const parent = await ReactiveCache.getCardComment(doc.parentId);
+      doc.parentId = resolveParentId(doc.parentId, () => parent);
+    }
+  });
+
+  CardComments.before.update(async (userId, doc) => {
+    await assertCanMutateComment(userId, doc);
+  });
+
+  CardComments.before.remove(async (userId, doc) => {
+    await assertCanMutateComment(userId, doc);
+  });
+}
+
 async function commentCreation(userId, doc) {
   const card = await ReactiveCache.getCard(doc.cardId);
   if (!card) {
@@ -187,5 +356,15 @@ CardComments.textSearch = async (userId, textArray) => {
 
   return comments;
 };
+
+if (Meteor.isServer) {
+  // A card's comments, newest first - one selector, one sort, every time a card
+  // is opened.
+  const { ensureIndex } = require('/server/lib/mongoStartup');
+  Meteor.startup(async () => {
+    await ensureIndex(CardComments, { cardId: 1, createdAt: -1 });
+    await ensureIndex(CardComments, { boardId: 1 });
+  });
+}
 
 export default CardComments;

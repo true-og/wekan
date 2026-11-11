@@ -2,11 +2,22 @@ import { Template } from 'meteor/templating';
 import { ReactiveVar } from 'meteor/reactive-var';
 import { ReactiveCache } from '/imports/reactiveCache';
 import { getCurrentCardFromContext } from '/client/lib/currentCard';
+import { normalizeDigits } from '/imports/lib/dateUtils';
 
-// Helper to check if a date is valid
-function isValidDate(date) {
-  return date instanceof Date && !isNaN(date);
-}
+// The window a typed year has to fall in. Wide on purpose: WeKan holds real
+// historical received dates and long-dated deadlines, so this is only meant to
+// catch a year that cannot have been intended - the two-digit one a browser
+// reports verbatim (0026), and the five-digit slip in the other direction.
+const MIN_PLAUSIBLE_YEAR = 1000;
+const MAX_PLAUSIBLE_YEAR = 9999;
+import {
+  draftDate,
+  isValidDate,
+  formatTime,
+  initialTimeValue,
+  fallbackSubmitTime,
+  parseTimeInput,
+} from '/imports/lib/datePickerTime';
 
 // Format date as YYYY-MM-DD
 function formatDate(date) {
@@ -17,14 +28,6 @@ function formatDate(date) {
   return `${year}-${month}-${day}`;
 }
 
-// Format time as HH:mm
-function formatTime(date) {
-  if (!isValidDate(date)) return '';
-  const hours = String(date.getHours()).padStart(2, '0');
-  const minutes = String(date.getMinutes()).padStart(2, '0');
-  return `${hours}:${minutes}`;
-}
-
 /**
  * Sets up datepicker state on a template instance.
  * Call from onCreated. Stores state on tpl.datePicker.
@@ -33,14 +36,23 @@ function formatTime(date) {
  * @param {Object} options
  * @param {string} [options.defaultTime='1970-01-01 08:00:00'] - Default time string
  * @param {Date} [options.initialDate] - Initial date to set (if valid)
+ * @param {Function} options.storeDate - Stores a valid date for this popup
+ * @param {Function} options.deleteDate - Clears the date for this popup
  */
-export function setupDatePicker(tpl, { defaultTime = '1970-01-01 08:00:00', initialDate } = {}) {
+export function setupDatePicker(tpl, {
+  defaultTime = '1970-01-01 08:00:00',
+  initialDate,
+  storeDate,
+  deleteDate,
+} = {}) {
   const card = getCurrentCardFromContext() || Template.currentData();
   tpl.datePicker = {
     error: new ReactiveVar(''),
     card,
     date: new ReactiveVar(initialDate && isValidDate(new Date(initialDate)) ? new Date(initialDate) : new Date('invalid')),
     defaultTime,
+    storeDate,
+    deleteDate,
   };
 }
 
@@ -52,18 +64,21 @@ export function setupDatePicker(tpl, { defaultTime = '1970-01-01 08:00:00', init
  */
 export function datePickerRendered(tpl) {
   const dp = tpl.datePicker;
-  if (isValidDate(dp.date.get())) {
-    const dateInput = tpl.find('#date');
-    const timeInput = tpl.find('#time');
+  const dateInput = tpl.find('#date');
+  const timeInput = tpl.find('#time');
 
-    if (dateInput) {
-      dateInput.value = formatDate(dp.date.get());
-    }
-    if (timeInput && !timeInput.value && dp.defaultTime) {
-      const defaultDate = new Date(dp.defaultTime);
-      timeInput.value = formatTime(defaultDate);
-    } else if (timeInput && isValidDate(dp.date.get())) {
-      timeInput.value = formatTime(dp.date.get());
+  if (dateInput && isValidDate(dp.date.get())) {
+    dateInput.value = formatDate(dp.date.get());
+  }
+  // Pre-fill the time input: an existing card date keeps its own time; a
+  // card without this date gets the configured default (e.g. 17:00 for due
+  // dates) instead of an empty field that would silently save as 12:00
+  // (#1502). The template already fills the input for existing dates, so
+  // only ever write into an empty input.
+  if (timeInput && !timeInput.value) {
+    const initial = initialTimeValue(dp.date.get(), dp.defaultTime);
+    if (initial) {
+      timeInput.value = initial;
     }
   }
 }
@@ -77,10 +92,15 @@ export function datePickerHelpers() {
     error() {
       return Template.instance().datePicker.error;
     },
+    datePicker() {
+      return Template.instance().datePicker;
+    },
+    // #6809: today when there is no date yet - the day the calendar opens
+    // on and marks - so Save without picking a day saves it (imports/lib/
+    // datePickerTime.js draftDate). The time stays the popup's default.
     showDate() {
       const dp = Template.instance().datePicker;
-      if (isValidDate(dp.date.get())) return formatDate(dp.date.get());
-      return '';
+      return formatDate(draftDate(dp.date.get()));
     },
     showTime() {
       const dp = Template.instance().datePicker;
@@ -107,46 +127,96 @@ export function datePickerHelpers() {
 /**
  * Returns events object for datepicker templates.
  *
- * @param {Object} callbacks
- * @param {Function} callbacks.storeDate - Called with (date) when form is submitted
- * @param {Function} callbacks.deleteDate - Called when delete button is clicked
  */
-export function datePickerEvents({ storeDate, deleteDate }) {
+export function datePickerEvents() {
+  // The form is a child template of each named popup. Blaze deliberately does
+  // not send events across a template boundary, so the shared form owns these
+  // handlers and receives its popup's state as a template argument (#6607).
+  const getDatePicker = tpl => tpl.datePicker || Template.currentData()?.datePicker;
   return {
     'change .js-date-field'(evt, tpl) {
-      // Native HTML date input validation
-      const dateValue = tpl.find('#date').value;
+      const datePicker = getDatePicker(tpl);
+      // Native HTML date input validation. Normalize any non-Latin digits
+      // (e.g. Persian/Arabic-Indic) so parsing works in those locales (#5752).
+      const dateValue = normalizeDigits(tpl.find('#date').value);
       if (dateValue) {
         // HTML date input format is always YYYY-MM-DD
         const dateObj = new Date(dateValue + 'T12:00:00');
         if (isValidDate(dateObj)) {
-          tpl.datePicker.error.set('');
+          const currentDate = datePicker.date.get();
+          if (isValidDate(currentDate)) {
+            dateObj.setHours(
+              currentDate.getHours(),
+              currentDate.getMinutes(),
+              currentDate.getSeconds(),
+              currentDate.getMilliseconds(),
+            );
+          }
+          // Keep the reactive draft in step with the native input. Otherwise
+          // any unrelated Blaze rerender can restore the old date after the
+          // user edited it but before the form is submitted.
+          datePicker.date.set(dateObj);
+          datePicker.error.set('');
         } else {
-          tpl.datePicker.error.set('invalid-date');
+          datePicker.error.set('invalid-date');
         }
       }
     },
     'change .js-time-field'(evt, tpl) {
-      // Native HTML time input validation
-      const timeValue = tpl.find('#time').value;
-      if (timeValue) {
-        // HTML time input format is always HH:mm
-        const timeObj = new Date(`1970-01-01T${timeValue}:00`);
-        if (isValidDate(timeObj)) {
-          tpl.datePicker.error.set('');
+      const datePicker = getDatePicker(tpl);
+      // Normalize any non-Latin digits (e.g. Persian/Arabic-Indic) so parsing
+      // works in those locales (#5752), then accept the looser formats
+      // parseTimeInput understands - an hour alone ('13'), with am/pm, etc.
+      // (#2903) - not just a complete 'HH:mm'.
+      const rawTime = normalizeDigits(tpl.find('#time').value);
+      if (rawTime) {
+        const timeValue = parseTimeInput(rawTime);
+        const timeObj = timeValue ? new Date(`1970-01-01T${timeValue}:00`) : null;
+        if (timeObj && isValidDate(timeObj)) {
+          const currentDate = datePicker.date.get();
+          if (isValidDate(currentDate)) {
+            const draftDate = new Date(currentDate);
+            draftDate.setHours(
+              timeObj.getHours(),
+              timeObj.getMinutes(),
+              0,
+              0,
+            );
+            datePicker.date.set(draftDate);
+          }
+          datePicker.error.set('');
         } else {
-          tpl.datePicker.error.set('invalid-time');
+          datePicker.error.set('invalid-time');
         }
       }
     },
-    'submit .edit-date'(evt, tpl) {
+    async 'submit .edit-date'(evt, tpl) {
       evt.preventDefault();
+      const datePicker = getDatePicker(tpl);
 
-      const dateValue = evt.target.date.value;
-      const timeValue = evt.target.time.value || '12:00'; // Default to 12:00 if no time given
+      // Normalize any non-Latin digits (e.g. Persian/Arabic-Indic) before
+      // parsing so due/start/end dates work in those locales (#5752).
+      // An empty time falls back to the popup's configured default time
+      // (e.g. 17:00 for due dates), then 12:00 (#1502). A non-empty time
+      // accepts the looser formats parseTimeInput understands - an hour
+      // alone ('13'), with am/pm, etc. (#2903) - and is rejected the same
+      // way a bad 'HH:mm' always was.
+      const dateValue = normalizeDigits(evt.target.date.value);
+      const rawTime = normalizeDigits(evt.target.time.value);
+      let timeValue;
+      if (rawTime) {
+        timeValue = parseTimeInput(rawTime);
+        if (!timeValue) {
+          datePicker.error.set('invalid-time');
+          evt.target.time.focus();
+          return;
+        }
+      } else {
+        timeValue = fallbackSubmitTime(datePicker.defaultTime);
+      }
 
       if (!dateValue) {
-        tpl.datePicker.error.set('invalid-date');
+        datePicker.error.set('invalid-date');
         evt.target.date.focus();
         return;
       }
@@ -156,17 +226,54 @@ export function datePickerEvents({ storeDate, deleteDate }) {
       const newCompleteDate = new Date(dateTimeString);
 
       if (!isValidDate(newCompleteDate)) {
-        tpl.datePicker.error.set('invalid');
+        datePicker.error.set('invalid');
         return;
       }
 
-      storeDate.call(tpl, newCompleteDate);
+      // A TWO-DIGIT YEAR is a real date that is not the one anybody meant.
+      // `<input type="date">` reports YYYY-MM-DD, but the browser lets the year
+      // sub-field be typed as two digits and reports that literally: typing
+      // 31-12-26 gives "0026-12-31", the year 26 AD. Nothing above rejects it -
+      // it is a perfectly valid Date - so the card got a due date two thousand
+      // years in the past, which is why the reporter saw a date they had TYPED
+      // come out red (overdue) while the same date picked from the calendar,
+      // which always fills four digits, came out yellow (due soon). The colour
+      // was right; the year was wrong.
+      //
+      // Refused rather than corrected: 0026 could be meant as 2026, but guessing
+      // silently rewrites what somebody typed, and this is a date other people's
+      // reminders hang off. The error names the year so the fix is obvious.
+      const year = newCompleteDate.getFullYear();
+      if (year < MIN_PLAUSIBLE_YEAR || year > MAX_PLAUSIBLE_YEAR) {
+        datePicker.error.set('invalid-year');
+        evt.target.date.focus();
+        return;
+      }
+
+      await datePicker.storeDate(newCompleteDate, datePicker.card);
+      // FerretDB does not always wake Meteor's already-running observer for an
+      // update made through the async collection path. Restart the current
+      // board publication so the saved badge replaces the add-date control
+      // immediately instead of appearing only after a later navigation.
+      Session.set(
+        'boardSubscriptionGeneration',
+        (Session.get('boardSubscriptionGeneration') || 0) + 1,
+      );
       Popup.back();
     },
-    'click .js-delete-date'(evt, tpl) {
+    async 'click .js-delete-date'(evt, tpl) {
       evt.preventDefault();
-      deleteDate.call(tpl);
+      const datePicker = getDatePicker(tpl);
+      await datePicker.deleteDate(datePicker.card);
+      Session.set(
+        'boardSubscriptionGeneration',
+        (Session.get('boardSubscriptionGeneration') || 0) + 1,
+      );
       Popup.back();
     },
   };
 }
+
+// All seven date popups render this one child template, so register the event
+// map on the child that actually contains the form.
+Template.editDateForm.events(datePickerEvents());

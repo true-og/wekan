@@ -1,24 +1,126 @@
+import { Meteor } from 'meteor/meteor';
 import { ReactiveCache } from '/imports/reactiveCache';
 import { ReactiveVar } from 'meteor/reactive-var';
 import { avatarUpdateCounter } from '/client/components/users/avatarUpdateCounter';
 import Avatars from '/models/avatars';
 import Presences from '/models/presences';
 import { Utils } from '/client/lib/utils';
+const { avatarDisplayUrl } = require('/models/lib/avatarDisplayUrl');
+
+// The stored profile.avatarUrl, as the address this browser loads it from: under
+// the path WeKan is served at NOW, on this page's origin. Rendered as stored, a
+// /cdn/storage/avatars/<id> is outside WeKan on a sub-path install such as UCS's
+// /wekan, and the avatar is an empty circle (models/lib/avatarDisplayUrl.js).
+export function avatarSrc(stored) {
+  const cfg = typeof window !== 'undefined' && window.__meteor_runtime_config__;
+  return avatarDisplayUrl(stored, (cfg && cfg.ROOT_URL_PATH_PREFIX) || '');
+}
+Template.registerHelper('avatarSrc', (stored) => avatarSrc(typeof stored === 'string' ? stored : ''));
+
+// #824: the default avatar (DEFAULT_AVATAR_URL, server/defaultAvatar.js) for a
+// user with none of their own; an image that does not load is remembered, per
+// user, so the initials are shown instead of a broken image.
+const failedDefaultAvatars = new ReactiveVar(new Set());
+Template.userAvatar.events({
+  'error img.js-default-avatar'(event) {
+    const userId = Template.currentData() && Template.currentData().userId;
+    if (!userId || failedDefaultAvatars.get().has(userId)) return;
+    failedDefaultAvatars.set(new Set([...failedDefaultAvatars.get(), userId]));
+  },
+});
+
+// #6745: the user fields an avatar reads. A helper that reads the whole user
+// document re-runs on every write to it; a card open writes one.
+// tests/largeBoardDataLoading.test.cjs pins that these stay field-limited.
+const INITIALS_USER_FIELDS = {
+  username: 1,
+  'profile.initials': 1,
+  'profile.fullname': 1,
+};
+const AVATAR_USER_FIELDS = {
+  ...INITIALS_USER_FIELDS,
+  'profile.avatarUrl': 1,
+  authenticationMethod: 1,
+  isActive: 1,
+};
 
 Template.userAvatar.helpers({
+  // WCAG 2.5.3 Label in Name: an avatar drawn as initials shows those letters as
+  // text, so the link's accessible name has to contain them. The name is the
+  // initials followed by the title, "AB Ann Brown (ann) Admin". A picture shows
+  // no text, so its name stays the title.
+  initialsInName() {
+    const user = ReactiveCache.getUser(this.userId, { fields: AVATAR_USER_FIELDS });
+    if (user && user.profile && user.profile.avatarUrl) return '';
+    const defaultAvatar = Template.userAvatar.__helpers.get('defaultAvatarUrl');
+    if (user && defaultAvatar && defaultAvatar.call(this)) return '';
+    const initials = (user && user.getInitials && user.getInitials()) || '';
+    return initials ? `${initials} ` : '';
+  },
+  defaultAvatarUrl() {
+    if (!(Meteor.settings.public && Meteor.settings.public.defaultAvatar)) return '';
+    const userId = this.userId;
+    if (!userId || failedDefaultAvatars.get().has(userId)) return '';
+    // Under the path WeKan is served at, like avatarSrc: a bare /avatar-default
+    // is outside WeKan on a sub-path install.
+    const cfg = typeof window !== 'undefined' && window.__meteor_runtime_config__;
+    const prefix = String((cfg && cfg.ROOT_URL_PATH_PREFIX) || '').replace(/\/+$/, '');
+    return `${prefix}/avatar-default/${encodeURIComponent(userId)}`;
+  },
+
   userData() {
+    // #6745: only what the avatar shows. `profile: 1` re-ran every avatar on
+    // the board whenever anything in the profile changed - and opening a card
+    // writes profile.cardLastViews - so one card open re-rendered every member
+    // and assignee avatar of every minicard.
+    return ReactiveCache.getUser(this.userId, { fields: AVATAR_USER_FIELDS });
+  },
+
+  // Distinguish, on the avatar itself, whether a real account backs this member:
+  //  - imported-member: an inert placeholder created by a board import that has not been
+  //    reconciled/mapped to a real account yet (dashed ring + "?" badge).
+  //  - inactive-member: deactivated on this board (e.g. a person not in LDAP after
+  //    reconciliation) (greyscale + dim).
+  // A placeholder is typically both. A real, active account gets neither.
+  memberAccountClass() {
     const user = ReactiveCache.getUser(this.userId, {
-      fields: {
-        profile: 1,
-        username: 1,
-      },
+      fields: { authenticationMethod: 1, isActive: 1 },
     });
-    return user;
+    if (!user) return '';
+    const classes = [];
+    if (user.authenticationMethod === 'imported') classes.push('imported-member');
+    let inactive = user.isActive === false;
+    if (!inactive) {
+      const board = Utils.getCurrentBoard && Utils.getCurrentBoard();
+      const m = board && Array.isArray(board.members)
+        ? board.members.find(x => x.userId === this.userId)
+        : null;
+      if (m && m.isActive === false) inactive = true;
+    }
+    if (inactive) classes.push('inactive-member');
+    return classes.join(' ');
+  },
+
+  isImportedMember() {
+    const user = ReactiveCache.getUser(this.userId, { fields: { authenticationMethod: 1 } });
+    return !!(user && user.authenticationMethod === 'imported');
+  },
+
+  isInactiveMember() {
+    const user = ReactiveCache.getUser(this.userId, { fields: { authenticationMethod: 1, isActive: 1 } });
+    if (!user) return false;
+    if (user.authenticationMethod === 'imported') return false; // shown via the imported badge
+    if (user.isActive === false) return true;
+    const board = Utils.getCurrentBoard && Utils.getCurrentBoard();
+    const m = board && Array.isArray(board.members)
+      ? board.members.find(x => x.userId === this.userId)
+      : null;
+    return !!(m && m.isActive === false);
   },
 
   avatarUrl() {
-    const user = ReactiveCache.getUser(this.userId, { fields: { profile: 1 } });
-    const base = (user && user.profile && user.profile.avatarUrl) || '';
+    const user = ReactiveCache.getUser(this.userId, { fields: { 'profile.avatarUrl': 1 } });
+    const base = avatarSrc((user && user.profile && user.profile.avatarUrl) || '');
     if (!base) return '';
     // Append current boardId when available so public viewers can access avatars on public boards
     try {
@@ -32,7 +134,8 @@ Template.userAvatar.helpers({
   },
 
   memberType() {
-    const user = ReactiveCache.getUser(this.userId);
+    // The role comes from the board; the user is needed only for its _id.
+    const user = ReactiveCache.getUser(this.userId, { fields: { _id: 1 } });
     if (!user) return '';
 
     const board = Utils.getCurrentBoard();
@@ -65,14 +168,23 @@ Template.userAvatar.helpers({
 });
 
 Template.userAvatarInitials.helpers({
+  colorStyle() {
+    return require('/models/lib/avatarColor').avatarColorStyle(this.userId);
+  },
   initials() {
-    const user = ReactiveCache.getUser(this.userId);
-    return user && user.getInitials();
+    if (typeof this.initials === 'string' && this.initials) return this.initials;
+    const user = ReactiveCache.getUser(this.userId, { fields: INITIALS_USER_FIELDS });
+    return (user && user.getInitials()) || '';
   },
 
+  // The SVG's viewBox is built from this, so it must be a number whatever the
+  // user document looks like: an empty width made Firefox refuse the whole
+  // attribute ("0 0  15"), and the avatar rendered as nothing.
   viewPortWidth() {
-    const user = ReactiveCache.getUser(this.userId);
-    return ((user && user.getInitials().length) || 1) * 12;
+    const user = ReactiveCache.getUser(this.userId, { fields: INITIALS_USER_FIELDS });
+    const initials = (typeof this.initials === 'string' && this.initials)
+      || (user && user.getInitials()) || '';
+    return (initials.length || 1) * 12;
   },
 });
 
@@ -164,15 +276,44 @@ Template.boardTeamName.helpers({
   },
 });
 
+// #5850: row showing a single board email-domain share, with a remove affordance.
+Template.boardDomainRow.helpers({
+  domainViewPortWidth() {
+    return ((this.domain && this.domain.length) || 1) * 12;
+  },
+});
+
+Template.boardDomainRow.events({
+  // The row's data context is `{ domain }`, which becomes removeBoardDomainPopup's
+  // data context, so the popup can read `this.domain` directly.
+  'click .js-manage-board-removeDomain': Popup.open('removeBoardDomain'),
+});
+
+// Avatar links may carry a ?boardId= query parameter (added so public-board viewers
+// can load them), which must not affect "is this the avatar in use?" comparisons.
+function normalizeAvatarUrl(url) {
+  return url ? url.split('?')[0] : '';
+}
+
 Template.changeAvatarPopup.onCreated(function () {
   this.error = new ReactiveVar('');
   this.avatarUpdateCounter = new ReactiveVar(0);  // Trigger to force helper re-evaluation
+  // Whether an admin has blocked avatar uploads (Admin Panel > Attachments >
+  // Transfer limits). Default false (avatars enabled); when true the upload
+  // option is hidden and the upload is also rejected server-side.
+  this.avatarUploadBlocked = new ReactiveVar(false);
+  Meteor.call('isAvatarUploadBlocked', (err, blocked) => {
+    if (!err) this.avatarUploadBlocked.set(blocked === true);
+  });
   Meteor.subscribe('my-avatars');
 });
 
 Template.changeAvatarPopup.helpers({
   error() {
     return Template.instance().error;
+  },
+  avatarUploadBlocked() {
+    return Template.instance().avatarUploadBlocked.get();
   },
   uploadedAvatars() {
     Template.instance().avatarUpdateCounter.get();  // Create dependency on update counter
@@ -190,10 +331,7 @@ Template.changeAvatarPopup.helpers({
     const userProfile = ReactiveCache.getCurrentUser().profile;
     const avatarUrl = userProfile && userProfile.avatarUrl;
     const currentAvatarUrl = this.link && typeof this.link === 'function' ? this.link() : '';
-    // Normalize URLs by removing query parameters for comparison
-    // (they may be added for boardId but shouldn't affect selection comparison)
-    const normalizeUrl = (url) => url ? url.split('?')[0] : '';
-    return normalizeUrl(avatarUrl) === normalizeUrl(currentAvatarUrl);
+    return normalizeAvatarUrl(avatarUrl) === normalizeAvatarUrl(currentAvatarUrl);
   },
   noAvatarUrl() {
     Template.instance().avatarUpdateCounter.get();  // Create dependency on update counter
@@ -253,7 +391,7 @@ Template.changeAvatarPopup.events({
     event.preventDefault();
     event.stopPropagation();
     if (this && typeof this.link === 'function') {
-      const avatarUrl = this.link();
+      const avatarUrl = `/cdn/storage/avatars/${this._id}`;
       changeAvatarSetAvatar(tpl, avatarUrl);
     }
   },
@@ -265,9 +403,19 @@ Template.changeAvatarPopup.events({
   'click .js-delete-avatar': Popup.afterConfirm('deleteAvatar', async function() {
     // Inside the each loop, 'this' is the avatar object
     const avatarId = this._id;
+    const deletedUrl = typeof this.link === 'function' ? this.link() : '';
     if (avatarId) {
       await Avatars.removeAsync(avatarId);
     }
+    // Any uploaded avatar can be deleted now, including the one in use. Deleting
+    // the one in use would leave profile.avatarUrl pointing at a file that no
+    // longer exists (a broken image everywhere), so fall back to the initials.
+    const user = ReactiveCache.getCurrentUser();
+    const currentUrl = normalizeAvatarUrl(user && user.profile && user.profile.avatarUrl);
+    if (currentUrl && currentUrl === normalizeAvatarUrl(deletedUrl)) {
+      Meteor.call('setAvatarUrl', '');
+    }
+    avatarUpdateCounter.set(avatarUpdateCounter.get() + 1);
     Popup.back();
   }),
 });
@@ -338,8 +486,7 @@ Template.adminChangeAvatarPopup.helpers({
     const userProfile = user.profile;
     const avatarUrl = userProfile && userProfile.avatarUrl;
     const currentAvatarUrl = this.link && typeof this.link === 'function' ? this.link() : '';
-    const normalizeUrl = (url) => url ? url.split('?')[0] : '';
-    return normalizeUrl(avatarUrl) === normalizeUrl(currentAvatarUrl);
+    return normalizeAvatarUrl(avatarUrl) === normalizeAvatarUrl(currentAvatarUrl);
   },
   noAvatarUrl() {
     Template.instance().avatarUpdateCounter.get();
@@ -410,7 +557,7 @@ Template.adminChangeAvatarPopup.events({
     event.preventDefault();
     event.stopPropagation();
     if (this && typeof this.link === 'function') {
-      const avatarUrl = this.link();
+      const avatarUrl = `/cdn/storage/avatars/${this._id}`;
       adminChangeAvatarSetAvatar(tpl, avatarUrl);
     }
   },
@@ -420,11 +567,21 @@ Template.adminChangeAvatarPopup.events({
     adminChangeAvatarSetAvatar(tpl, '');
   },
   'click .js-delete-avatar': Popup.afterConfirm('deleteAvatar', async function() {
-    // Inside the each loop, 'this' is the avatar object
+    // Inside the each loop, 'this' is the avatar object, which carries the userId
+    // of the person the admin is editing.
     const avatarId = this._id;
+    const targetUserId = this.userId;
+    const deletedUrl = typeof this.link === 'function' ? this.link() : '';
     if (avatarId) {
       await Avatars.removeAsync(avatarId);
     }
+    // Same as in changeAvatarPopup: never leave the user pointing at a deleted file.
+    const user = targetUserId && ReactiveCache.getUser(targetUserId);
+    const currentUrl = normalizeAvatarUrl(user && user.profile && user.profile.avatarUrl);
+    if (currentUrl && currentUrl === normalizeAvatarUrl(deletedUrl)) {
+      Meteor.call('adminSetAvatarUrl', targetUserId, '');
+    }
+    avatarUpdateCounter.set(avatarUpdateCounter.get() + 1);
     Popup.back();
   }),
 });

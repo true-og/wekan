@@ -1,0 +1,186 @@
+import { Meteor } from 'meteor/meteor';
+import { ReactiveCache } from '/imports/reactiveCache';
+import { SyncedCron } from '/server/cron/syncedCron';
+import { RulesHelper } from '/server/rulesHelper';
+import Rules from '/models/rules';
+import Triggers from '/models/triggers';
+import Actions from '/models/actions';
+import Cards from '/models/cards';
+import Activities from '/models/activities';
+import { matchesScheduledDate } from '/models/lib/scheduledDueFilter';
+import { ruleActionIds, ruleForTriggerSelector } from '/models/lib/ruleParts';
+import { isValidCron, cronMatches } from '/models/lib/cronSchedule';
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const BOARD_LEVEL_ACTIONS = ['createCard', 'addSwimlane', 'moveAllCardsInList'];
+
+function pad(n) {
+  return String(n).padStart(2, '0');
+}
+
+// Has this calendar-scheduled trigger reached its day/date condition right now?
+function calendarDue(trigger, now) {
+  const dow = now.getDay(); // 0 = Sunday … 6 = Saturday
+  const dom = now.getDate();
+  switch (trigger.scheduleType) {
+    case 'once': {
+      const today = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(dom)}`;
+      return trigger.onDate === today;
+    }
+    case 'daily':
+      return true;
+    case 'weekday':
+      return dow >= 1 && dow <= 5;
+    case 'weekly':
+      return dow === Number(trigger.weekday);
+    case 'monthly':
+      return dom === Number(trigger.dayOfMonth);
+    default:
+      return false;
+  }
+}
+
+// Days a card has spent in its current list, from the most recent move/create
+// activity for that card (falls back to the card creation date).
+async function daysInList(card) {
+  const acts = await ReactiveCache.getActivities(
+    { cardId: card._id, activityType: { $in: ['moveCard', 'createCard'] } },
+    { sort: { createdAt: -1 }, limit: 1 },
+  );
+  const since = acts && acts.length ? acts[0].createdAt : card.createdAt;
+  if (!since) return 0;
+  return (Date.now() - new Date(since).getTime()) / DAY_MS;
+}
+
+// Resolve which cards a scheduled trigger should act on.
+async function selectCards(trigger) {
+  const selector = { boardId: trigger.boardId, archived: false };
+  if (trigger.listName && trigger.listName !== '*') {
+    const list = await ReactiveCache.getList({
+      title: trigger.listName,
+      boardId: trigger.boardId,
+    });
+    if (!list) return [];
+    selector.listId = list._id;
+  }
+  let cards = await ReactiveCache.getCards(selector);
+
+  if (trigger.scheduleKind === 'due') {
+    // #4278: the trigger may watch the start date instead of the due date.
+    const now = Date.now();
+    cards = cards.filter(c => matchesScheduledDate(c, trigger, now));
+  } else if (trigger.scheduleKind === 'aging') {
+    const filtered = [];
+    for (const c of cards) {
+      // eslint-disable-next-line no-await-in-loop
+      if ((await daysInList(c)) >= (Number(trigger.days) || 0)) {
+        filtered.push(c);
+      }
+    }
+    cards = filtered;
+  }
+  return cards;
+}
+
+async function runDueTrigger(trigger, slotKey, now) {
+  // The trigger may be one of several the rule has; the rule runs each of its
+  // actions in order (models/lib/ruleParts.js).
+  const rule = await ReactiveCache.getRule(ruleForTriggerSelector(trigger._id));
+  // A disabled rule keeps its configuration and never fires (#2322) - on a
+  // schedule too, as activity rules already did (RulesHelper.findMatchingRules).
+  if (!rule || rule.enabled === false) return;
+  const actions = [];
+  for (const actionId of ruleActionIds(rule)) {
+    // eslint-disable-next-line no-await-in-loop
+    const action = await ReactiveCache.getAction(actionId);
+    if (action) actions.push(action);
+  }
+  if (!actions.length) return;
+
+  const board = await ReactiveCache.getBoard(trigger.boardId);
+  const userId = board ? board.createdBy : undefined;
+  const cards = await selectCards(trigger);
+  // One run per card: an email follows the card where this rule's own move
+  // took it (RulesHelper.emailActivity).
+  const ruleRuns = new Map(cards.map(card => [card._id, {}]));
+
+  for (const action of actions) {
+    if (cards.length === 0 && BOARD_LEVEL_ACTIONS.includes(action.actionType)) {
+      // eslint-disable-next-line no-await-in-loop
+      await RulesHelper.performAction(
+        { activityType: 'scheduledTrigger', boardId: trigger.boardId, userId },
+        action,
+      );
+    } else {
+      for (const card of cards) {
+        // eslint-disable-next-line no-await-in-loop
+        await RulesHelper.performAction(
+          {
+            activityType: 'scheduledTrigger',
+            cardId: card._id,
+            boardId: trigger.boardId,
+            userId,
+          },
+          action,
+          ruleRuns.get(card._id),
+        );
+      }
+    }
+  }
+  await Triggers.updateAsync(trigger._id, {
+    $set: { lastRunKey: slotKey, lastRunAt: now },
+  });
+}
+
+
+// Evaluate every scheduled trigger once per minute.
+export async function scanScheduledRules(now = new Date()) {
+  const hhmm = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  const slotKey = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(
+    now.getDate(),
+  )} ${hhmm}`;
+
+  const triggers = await Triggers.find({
+    activityType: 'scheduledTrigger',
+  }).fetchAsync();
+
+  for (const trigger of triggers) {
+    try {
+      if (trigger.lastRunKey === slotKey) continue; // already ran this minute
+      // A cron schedule (models/lib/cronSchedule.js), in UTC as GitHub Actions
+      // runs it: an imported workflow keeps its exact times.
+      if (trigger.scheduleKind === 'cron') {
+        if (!trigger.cron || !isValidCron(trigger.cron) || !cronMatches(trigger.cron, now)) continue;
+        // eslint-disable-next-line no-await-in-loop
+        await runDueTrigger(trigger, slotKey, now);
+        continue;
+      }
+      if (trigger.atTime && trigger.atTime !== hhmm) continue; // not the chosen time
+      if (trigger.scheduleKind === 'calendar' && !calendarDue(trigger, now)) continue;
+      // 'due' and 'aging' fire daily at atTime; card-level filtering is in selectCards.
+      // eslint-disable-next-line no-await-in-loop
+      await runDueTrigger(trigger, slotKey, now);
+    } catch (e) {
+      // Never let one bad rule crash the cron job.
+      // eslint-disable-next-line no-console
+      console.error('scheduledRules: error running trigger', trigger._id, e);
+    }
+  }
+}
+
+Meteor.startup(() => {
+  try {
+    SyncedCron.add({
+      name: 'wekan-scheduled-rules',
+      schedule(parser) {
+        return parser.text('every 1 minute');
+      },
+      job() {
+        return scanScheduledRules(new Date());
+      },
+    });
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error('scheduledRules: failed to register cron job', e);
+  }
+});

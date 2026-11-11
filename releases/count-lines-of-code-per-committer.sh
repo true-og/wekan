@@ -1,25 +1,16 @@
-
 #!/bin/bash
-
-# Check dependencies for macOS/Linux
-if [ "$(uname)" = "Darwin" ]; then
-  if ! command -v brew >/dev/null 2>&1; then
-    echo "Homebrew not found. Installing Homebrew..."
-    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-  fi
-  for dep in git awk; do
-    if ! command -v $dep >/dev/null 2>&1; then
-      echo "$dep not found. Installing $dep with brew..."
-      brew install $dep
-    fi
-  done
-else
-  for dep in git awk; do
-    if ! command -v $dep >/dev/null 2>&1; then
-      echo "$dep not found. Installing $dep with apt-get..."
-      sudo apt-get update && sudo apt-get install -y $dep
-    fi
-  done
+if [ -n "${ZSH_VERSION:-}" ]; then exec /bin/bash "$0" "$@"; fi
+# Check dependencies with the current platform package manager.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/ensure-tools.sh"
+ensure_tools git
+if ! command -v awk >/dev/null 2>&1; then
+  case "$(_et_linux_family)" in
+    alpine) sudo apk add --no-cache gawk ;;
+    arch) _et_pacman gawk ;;
+    fedora|rhel) pm=dnf; command -v dnf >/dev/null 2>&1 || pm=yum; sudo "$pm" install -y gawk ;;
+    *) ensure_tools awk ;;
+  esac
 fi
 
 # At 2024, GitHub removed feature of counting lines of code from
@@ -33,8 +24,10 @@ if [ $# -ne 1 ]
   then
     echo "Syntax to count lines of code per committer, by email address:"
     echo "  ./releases/count-lines-of-code-per-committer.sh x@xet7.org"
-    echo "Example result at 2026-01-24:"
-    echo "  added lines: 4842862, removed lines: 4550521, total lines: 292341, added:deleted ratio:1.06424"
+    echo "Previous results from x@xet7.org:"
+    echo "  2026-01-24: added lines: 4842862, removed lines: 4550521, total lines: 292341, added:deleted ratio:1.06424"
+    echo "  2026-09-24: added lines: 9156517, removed lines: 7662688, total lines: 1493829, added:deleted ratio:1,19495"
+    echo "  2026-10-07: added lines: 9793928, removed lines: 7831702, total lines: 1962226, added:deleted ratio:1,25055"
     exit 1
 fi
 

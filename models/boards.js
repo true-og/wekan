@@ -1,8 +1,18 @@
+import { normalizeBoardCopyOptions } from '/models/lib/boardCopyOptions';
 import { Meteor } from 'meteor/meteor';
 import { Mongo } from 'meteor/mongo';
 import { check, Match } from 'meteor/check';
 import { Random } from 'meteor/random';
 import { ReactiveCache } from '/imports/reactiveCache';
+const { notHelperBoardTitle } = require('/models/lib/helperBoards');
+const { boardVisibilitySelectors } = require('/models/lib/boardVisibilitySelectors');
+const { BOARD_PERMISSIONS, readableWithoutMembership, withoutMembershipSelectors } = require('/models/lib/boardPermission');
+const { normalizeAutoArchiveDays } = require('/models/lib/autoArchive');
+const { cardParentIds, parentFields } = require('/models/lib/cardParents');
+const { FIELD_KEYS: CARD_SHOWN_FIELD_KEYS } = require('/models/lib/cardShownFields');
+const { SECTION_IDS: CARD_SETTINGS_SECTION_IDS } = require('/models/lib/cardSettingsSections');
+const boardViewSettings = require('/models/lib/boardViewSettings');
+const { deliverySchemaFields } = require('/models/lib/notificationDelivery');
 import escapeForRegex from 'escape-string-regexp';
 import CustomFields from './customFields';
 import {
@@ -11,17 +21,29 @@ import {
   TYPE_TEMPLATE_CONTAINER,
 } from '/config/const';
 import { BOARD_COLORS, LABEL_COLORS } from '/models/metadata/colors';
+import { isHexColor } from '/models/lib/contrastColor';
+import { isValidCustomColors } from '/models/lib/themeCategories';
 import Actions from '/models/actions';
 import Cards from '/models/cards';
+import Integrations from '/models/integrations';
 import Lists from '/models/lists';
 import Rules from '/models/rules';
 import Swimlanes from '/models/swimlanes';
 import Triggers from '/models/triggers';
 import { Counters, incrementCounterAsync } from '/models/counters';
+import { pullMemberById } from '/server/lib/removeMember';
 import getSlug from 'limax';
 import { findWhere, where, groupBy } from '/imports/lib/collectionHelpers';
+import {
+  cardsDueInBetweenSelector,
+  cardsInIntervalSelector,
+  cardsReceivedInBetweenSelector,
+  cardsEndInBetweenSelector,
+} from '/models/lib/calendarFilter';
 import { generateUniversalAttachmentUrl } from '/models/lib/universalUrlGenerator';
+import { buildCardSearchOr, matchingCommentCardIds, literalSearchRegex } from '/models/lib/cardSearch';
 const { SimpleSchema } = require('/imports/simpleSchema');
+const { memberRoleOf, CUSTOM_ROLE_PREFIX, customRoleCapabilities, uiRoleFor } = require('/models/lib/boardRoleCapabilities');
 const getTAPi18n = () => require('/imports/i18n').TAPi18n;
 
 function getTranslatedString(key, fallback, options) {
@@ -45,6 +67,7 @@ function sanitizeBoardMembers(members) {
     isCommentAssignedOnly: !!member.isCommentAssignedOnly,
     isReadOnly: !!member.isReadOnly,
     isReadAssignedOnly: !!member.isReadAssignedOnly,
+    ...(member.customRoleId ? { customRoleId: member.customRoleId } : {}),
   }));
 }
 
@@ -57,6 +80,11 @@ const Boards = new Mongo.Collection('boards');
  */
 Boards.attachSchema(
   new SimpleSchema({
+    // Scrum metadata is optional and hidden by default; only validated methods write it.
+    scrum: { type: Object, optional: true, blackbox: true },
+    scrumRevision: { type: Number, optional: true, min: 0 },
+    scrumImportLosses: { type: Array, optional: true },
+    'scrumImportLosses.$': { type: Object, blackbox: true },
     title: {
       /**
        * The title of the board
@@ -199,9 +227,36 @@ Boards.attachSchema(
        * `silver`, `peachpuff`, `crimson`, `plum`, `darkgreen`,
        * `slateblue`, `magenta`, `gold`, `navy`, `gray`,
        * `saddlebrown`, `paleturquoise`, `mistyrose`, `indigo`
+       *
+       * Since #5514 a label color may also be a custom '#rrggbb' hex chosen
+       * from the color wheel, in addition to the named palette colors above.
        */
       type: String,
-      allowedValues: LABEL_COLORS,
+      custom() {
+        const v = this.value;
+        if (v === undefined || v === null || v === '') return undefined;
+        if (LABEL_COLORS.includes(v) || isHexColor(v)) return undefined;
+        return 'notAllowed';
+      },
+    },
+    'labels.$.sharedLabelId': {
+      /**
+       * This label is the board's copy of a shared label (#2761, #4698,
+       * models/lib/sharedLabels.js): its name and colour follow the shared one.
+       */
+      type: String,
+      optional: true,
+    },
+    'labels.$.dueAt': {
+      /**
+       * Optional due date carried by the label itself (#2802), e.g. a
+       * "milestone" label such as "Sprint 1" that expires on a given date.
+       * Unset by default so existing labels/boards are unaffected. Filtering
+       * cards by this label is the existing label filter; no separate
+       * Milestone object or filter UI is added for this.
+       */
+      type: Date,
+      optional: true,
     },
     // XXX We might want to maintain more informations under the member sub-
     // documents like de-normalized meta-data (the date the member joined the
@@ -297,12 +352,51 @@ Boards.attachSchema(
       type: Boolean,
       optional: true,
     },
+    key: {
+      /**
+       * The board's key (#2449, #2450): 2-10 capital letters and digits,
+       * unique in the instance, so a card's number shows as KEY-7. Given when
+       * the board is created (server/boardKeys.js); a board admin may change it.
+       */
+      type: String,
+      optional: true,
+    },
+    allowsInstanceEditing: {
+      /**
+       * Every signed-in user may edit this open board (#4575), where Admin
+       * Panel / Settings / Visibility allows it. Their first edit makes them a
+       * Normal member.
+       */
+      type: Boolean,
+      optional: true,
+    },
+    'members.$.grantedBy': {
+      /**
+       * The teams and organizations this membership came through (#4178),
+       * e.g. ['team:<id>']. Absent: a direct membership. Leaving the last of
+       * them deactivates it (models/lib/groupBoardMembership.js).
+       */
+      type: Array,
+      optional: true,
+    },
+    'members.$.grantedBy.$': {
+      type: String,
+    },
+    'members.$.customRoleId': {
+      /**
+       * A custom board role (#3022, models/customBoardRoles.js). The flags above
+       * then carry the strongest built-in role that grants nothing more.
+       */
+      type: String,
+      optional: true,
+    },
     permission: {
       /**
        * visibility of the board
        */
       type: String,
-      allowedValues: ['public', 'private'],
+      // #3249: 'instance' = every signed-in user reads it (semi-open).
+      allowedValues: BOARD_PERMISSIONS,
     },
     orgs: {
       /**
@@ -360,6 +454,38 @@ Boards.attachSchema(
        */
       type: Boolean,
     },
+    domains: {
+      /**
+       * #5850: the list of email-address domains a board is shared with. Every
+       * user whose primary email is in one of these domains gets board access.
+       */
+      type: Array,
+      optional: true,
+    },
+    'domains.$': {
+      type: Object,
+    },
+    'domains.$.domain': {
+      /**
+       * The email-address domain, e.g. example.com
+       */
+      type: String,
+    },
+    'domains.$.isActive': {
+      /**
+       * Is the domain share active?
+       */
+      type: Boolean,
+    },
+    importRunId: {
+      /**
+       * The import run that created this board (server/lib/importRuns.js).
+       * An interrupted import is discarded only from the board that carries
+       * its run's id.
+       */
+      type: String,
+      optional: true,
+    },
     importUsernames: {
       /**
        * Usernames of imported (e.g. Trello) board members that were not mapped
@@ -374,6 +500,18 @@ Boards.attachSchema(
     'importUsernames.$': {
       type: String,
     },
+    announcement: {
+      /**
+       * #1566: the board's own announcement - { enabled, body, updatedAt } -
+       * written by a board admin, shown to every member until dismissed
+       * (models/lib/boardAnnouncement.js).
+       */
+      type: Object,
+      optional: true,
+    },
+    'announcement.enabled': { type: Boolean, optional: true },
+    'announcement.body': { type: String, optional: true, max: 2000 },
+    'announcement.updatedAt': { type: Date, optional: true },
     color: {
       /**
        * The color of the board.
@@ -385,6 +523,81 @@ Boards.attachSchema(
         if (this.isInsert && !this.isSet) {
           return BOARD_COLORS[0];
         }
+      },
+    },
+    // #2489: WIP limit GROUPS - a shared limit across two or more of this
+    // board's lists together (e.g. "these three middle columns together may
+    // never hold more than 10 cards total"), on top of the existing per-list
+    // `wipLimit` in models/lists.js. Deliberately its own small array rather
+    // than a second WIP-tracking system: the combined count and "over limit"
+    // decision are pure arithmetic (models/lib/wipLimitGroupDecision.js) and
+    // the visual indicator it drives is the SAME `.highlight` styling the
+    // per-list limit already uses (client/components/lists/listHeader.js).
+    wipLimitGroups: {
+      /**
+       * List of board-level WIP limit groups.
+       */
+      type: Array,
+      optional: true,
+    },
+    'wipLimitGroups.$': {
+      type: Object,
+    },
+    'wipLimitGroups.$._id': {
+      /**
+       * Unique id of a WIP limit group.
+       */
+      type: String,
+    },
+    'wipLimitGroups.$.name': {
+      /**
+       * Optional display name for the group (e.g. "Middle columns").
+       */
+      type: String,
+      optional: true,
+    },
+    'wipLimitGroups.$.listIds': {
+      /**
+       * The _ids of the board's lists that share this group's limit. At least
+       * two - a "group" of one is just that list's own individual wipLimit.
+       */
+      type: Array,
+    },
+    'wipLimitGroups.$.listIds.$': {
+      type: String,
+    },
+    'wipLimitGroups.$.limit': {
+      /**
+       * The combined card-count limit shared by every list in listIds.
+       */
+      type: Number,
+      defaultValue: 1,
+    },
+    'wipLimitGroups.$.enabled': {
+      /**
+       * Whether this group's limit is currently in effect. Kept (rather than
+       * deleting the group) so a temporarily-disabled group's list selection
+       * and limit are not lost.
+       */
+      type: Boolean,
+      defaultValue: true,
+    },
+    customThemeColors: {
+      /**
+       * Optional custom colors for the "flat" (1 color) and "clear" (2 colors,
+       * a color slide) theme categories — see docs/Theme/Theme.md. Each entry is a
+       * #rrggbb hex validated on the server; dark/special themes never store these.
+       * Absent = the named `color` theme's stock colors.
+       */
+      type: Array,
+      optional: true,
+    },
+    'customThemeColors.$': {
+      type: String,
+      // Enforced on client AND server by collection2 — a value that is not a plain
+      // #rrggbb hex can never be stored, so there is no CSS-injection surface.
+      custom() {
+        return /^#[0-9a-fA-F]{6}$/.test(this.value) ? undefined : 'notAHexColor';
       },
     },
     backgroundImageURL: {
@@ -403,12 +616,77 @@ Boards.attachSchema(
       type: String,
       optional: true,
     },
+    // Sync activation (server/lib/syncActivation.js): a board administrator's
+    // opt-in to rules, notifications and webhooks for changes Sync makes on
+    // this board. Absent means off.
+    syncEffectsEnabled: {
+      type: Boolean,
+      optional: true,
+    },
     allowsCardCounterList: {
       /**
        * Show card counter per list
        */
       type: Boolean,
       defaultValue: false,
+    },
+    askForMoveReason: { type: Boolean, defaultValue: false },
+    // Was Card Settings / Card's "Show empty fields". Since 2026-10-28 every
+    // opened card shows every field its board shows on cards, empty or not
+    // (models/lib/cardShownFields.js), so nothing reads or writes this; kept
+    // so a board document that has it still validates.
+    showEmptyCardFields: { type: Boolean, defaultValue: false },
+    cardAging: {
+      /**
+       * #3984: Visually fade cards that have not been touched for a while
+       * (Trello-style "card aging"), based on the card's dateLastActivity.
+       */
+      type: Boolean,
+      defaultValue: false,
+    },
+    showDependencies: {
+      /**
+       * #3392: PI Program Board "Red Strings". No longer read since #6732:
+       * showing dependencies is each user's own choice
+       * (profile.showBoardDependencies / profile.showMyDependencies), so one
+       * user turning them on no longer turns them on for everybody. Kept so
+       * existing boards and imports still validate.
+       */
+      type: Boolean,
+      defaultValue: false,
+    },
+    mapImageAttachmentId: {
+      /**
+       * #3256: the image the Map board view draws the cards on - a board-level
+       * attachment (meta.source 'board-map'). Unset = no map yet.
+       */
+      type: String,
+      optional: true,
+    },
+    autoArchiveInactiveDays: {
+      /**
+       * Nextcloud Deck-style auto-archive: archive cards with no activity for
+       * this many days (models/lib/autoArchive.js). Unset means off.
+       */
+      type: SimpleSchema.Integer,
+      optional: true,
+      min: 1,
+      max: 3650,
+    },
+    cardAgingDays1: {
+      /** #3984: days of inactivity for the first (lightest) card-aging fade tier. */
+      type: Number,
+      defaultValue: 7,
+    },
+    cardAgingDays2: {
+      /** #3984: days of inactivity for the second card-aging fade tier. */
+      type: Number,
+      defaultValue: 14,
+    },
+    cardAgingDays3: {
+      /** #3984: days of inactivity for the third (heaviest) card-aging fade tier. */
+      type: Number,
+      defaultValue: 28,
     },
     allowsBoardMemberList: {
       /**
@@ -449,6 +727,27 @@ Boards.attachSchema(
     subtasksDefaultListId: {
       /**
        * The default List ID assigned to subtasks.
+       */
+      type: String,
+      optional: true,
+      defaultValue: null,
+    },
+
+    rulesVisibleToMembers: {
+      /**
+       * #2217: board members may read this board's Rules, when Admin Panel /
+       * Settings / Visibility allows it (models/lib/rulesReadOnly.js). Set by
+       * a board admin; grants no right to change a rule.
+       */
+      type: Boolean,
+      optional: true,
+    },
+
+    subtasksDefaultSwimlaneId: {
+      /**
+       * #1953: the swimlane new subtasks land in on the deposit board
+       * (models/lib/subtaskLandingSwimlane.js). Unset: the swimlane with the
+       * parent card's swimlane title, else the default swimlane.
        */
       type: String,
       optional: true,
@@ -497,6 +796,28 @@ Boards.attachSchema(
       defaultValue: true,
     },
 
+    allowsSwimlaneDragging: { type: Boolean, defaultValue: true },
+    allowsListDragging: { type: Boolean, defaultValue: true },
+    allowsCardDragging: { type: Boolean, defaultValue: true },
+    allowsChecklistDragging: { type: Boolean, defaultValue: true },
+    allowsChecklistItemDragging: { type: Boolean, defaultValue: true },
+    allowsSubtaskDragging: { type: Boolean, defaultValue: true },
+    allowsMinicardCollapse: {
+      type: Boolean,
+      defaultValue: true,
+    },
+    labelsAboveTitleOnMinicard: {
+      type: Boolean,
+      defaultValue: false,
+    },
+    allowsChecklistDueDate: {
+      type: Boolean,
+      defaultValue: true,
+    },
+    allowsChecklistTitle: {
+      type: Boolean,
+      defaultValue: true,
+    },
     allowsChecklists: {
       /**
        * Does the board allows checklists?
@@ -512,12 +833,45 @@ Boards.attachSchema(
       defaultValue: true,
     },
 
+    allowsCustomFields: {
+      /** Show assigned custom fields on opened cards? */
+      type: Boolean,
+      optional: true,
+      defaultValue: true,
+    },
+    allowsCustomFieldsOnMinicard: {
+      /** Show assigned custom fields on minicards? Opt-in by default. */
+      type: Boolean,
+      optional: true,
+      defaultValue: false,
+    },
+
+    allowsChecklistCountBadgeOnMinicard: {
+      /**
+       * Does the board show the compact checklist item-count badge
+       * (finished/total, e.g. "0/156") on minicards? Issue #6431: opt-in and
+       * OFF by default so the (potentially expensive) checklist counting only
+       * runs when this is enabled in Card Settings > Show on Minicard.
+       */
+      type: Boolean,
+      defaultValue: false,
+    },
+
     allowsComments: {
       /**
        * Does the board allows comments?
        */
       type: Boolean,
       defaultValue: true,
+    },
+
+    allowsCommentsOnMinicard: {
+      /**
+       * #4285: show a card's comments directly on the minicard? Opt-in and
+       * OFF by default so existing boards are unaffected.
+       */
+      type: Boolean,
+      defaultValue: false,
     },
 
     allowsDescriptionTitle: {
@@ -550,6 +904,105 @@ Boards.attachSchema(
       defaultValue: false,
     },
 
+    // #4448: the order the fields of the opened card render in - field keys
+    // of models/lib/cardFieldOrder.js (the first version stored the five
+    // SECTION keys; those stay valid). A missing/partial/unknown value falls
+    // back to the historical fixed order via applyCardOrder() /
+    // applyCardFieldOrder() there - see that file for what is reorderable.
+    cardFieldOrder: {
+      /**
+       * The order of the opened card's fields (models/lib/cardFieldOrder.js keys)
+       */
+      type: Array,
+      optional: true,
+    },
+    'cardFieldOrder.$': {
+      type: String,
+    },
+    // The same for the minicard, independently: the order its dates, labels,
+    // avatars, badges and the rest render in, from Board Settings / Card's
+    // "Show on Minicard" column. applyMinicardOrder() in
+    // models/lib/cardFieldOrder.js; missing means the historical order.
+    minicardFieldOrder: {
+      /**
+       * The order of the minicard's fields (models/lib/cardFieldOrder.js keys)
+       */
+      type: Array,
+      optional: true,
+    },
+    'minicardFieldOrder.$': {
+      type: String,
+    },
+    // The order of Card Settings' sections (Labels, Date, Members, ...) on
+    // the opened card - which draws them in this order - dragged like
+    // checklists in Card Settings' Card pane. sectionOrder() in
+    // models/lib/cardSettingsSections.js; missing means the table's order.
+    cardSettingsSectionOrder: {
+      /**
+       * The order of the Card Settings sections (models/lib/cardSettingsSections.js ids)
+       */
+      type: Array,
+      optional: true,
+    },
+    'cardSettingsSectionOrder.$': {
+      type: String,
+    },
+    // The same for the minicard (Card Settings' Minicard pane): the minicard
+    // draws Card Settings' sections in this order. Missing means the
+    // minicard's default (DEFAULT_SECTION_ORDER.minicard there).
+    minicardSettingsSectionOrder: {
+      /**
+       * The order of the Card Settings sections on the minicard (models/lib/cardSettingsSections.js ids)
+       */
+      type: Array,
+      optional: true,
+    },
+    'minicardSettingsSectionOrder.$': {
+      type: String,
+    },
+    // The Card Settings sections hidden WHOLE on every opened card of the
+    // board (Show on Card) and on every minicard (Show on Minicard): the
+    // checkbox left of each section's title. The rows keep their own flags.
+    // models/lib/cardSettingsSections.js hiddenSectionsOf; written normalised
+    // by setCardSettingsSectionShown below.
+    cardSettingsHiddenOnCard: {
+      /**
+       * The Card Settings sections (models/lib/cardSettingsSections.js ids) not shown on the opened card
+       */
+      type: Array,
+      optional: true,
+    },
+    'cardSettingsHiddenOnCard.$': {
+      type: String,
+      allowedValues: CARD_SETTINGS_SECTION_IDS,
+    },
+    cardSettingsHiddenOnMinicard: {
+      /**
+       * The Card Settings sections (models/lib/cardSettingsSections.js ids) not shown on the minicard
+       */
+      type: Array,
+      optional: true,
+    },
+    'cardSettingsHiddenOnMinicard.$': {
+      type: String,
+      allowedValues: CARD_SETTINGS_SECTION_IDS,
+    },
+    // #6806: was Board Settings / Card's "Show empty" - the fields every card
+    // showed even when empty. Since 2026-10-28 every card shows every field
+    // its board shows on cards (models/lib/cardShownFields.js), so nothing
+    // reads or writes this; kept so a board document that has it validates.
+    cardFieldsAlwaysShown: {
+      /**
+       * The opened card's fields shown on every card, even when empty
+       */
+      type: Array,
+      optional: true,
+    },
+    'cardFieldsAlwaysShown.$': {
+      type: String,
+      allowedValues: CARD_SHOWN_FIELD_KEYS,
+    },
+
     allowsCoverAttachmentOnMinicard: {
       /**
        * Does the board allows cover attachment on minicard?
@@ -558,9 +1011,39 @@ Boards.attachSchema(
       defaultValue: true,
     },
 
+    allowsCoverAttachmentOnCard: {
+      /**
+       * Does the board show the cover image on the opened card? ON by default:
+       * a card shows its cover when it has one (docs/Features/Cards/Card-Fields.md;
+       * server/lib/schemaUpgradeSteps.js cover-on-card-on turned it on, once, on
+       * the boards created while it was opt-in).
+       */
+      type: Boolean,
+      defaultValue: true,
+    },
+
     allowsBadgeAttachmentOnMinicard: {
       /**
        * Does the board allows badge attachment on minicard?
+       */
+      type: Boolean,
+      defaultValue: false,
+    },
+
+    allowsAttachmentCountOnCard: {
+      /**
+       * Does the board show the attachment count on the opened card? Opt-in,
+       * OFF by default (new Card Settings option).
+       */
+      type: Boolean,
+      defaultValue: false,
+    },
+
+    allowsChecklistCountBadgeOnCard: {
+      /**
+       * Does the board show the checklist item-count total (finished/total)
+       * above all checklists on the opened card? Opt-in, OFF by default so the
+       * checklist counting only runs when enabled (new Card Settings option).
        */
       type: Boolean,
       defaultValue: false,
@@ -580,6 +1063,53 @@ Boards.attachSchema(
        */
       type: Boolean,
       defaultValue: false,
+    },
+    // Board-level override of the 3-tier Notification Settings system (see
+    // models/lib/notificationSettings.js). Unset (optional, no default)
+    // means "use the Admin Panel default"; an explicit true/false overrides
+    // it for every member of this board unless a member also has their own
+    // override, exactly like the admin-default -> board-override ->
+    // member-override precedence used elsewhere.
+    notifyOverrideTray: {
+      type: Boolean,
+      optional: true,
+    },
+    notifyOverrideEmail: {
+      type: Boolean,
+      optional: true,
+    },
+    // Email to card (#794): { enabled, listId, swimlaneId, parts } - whether
+    // this board takes email from its members' board addresses, where the
+    // cards go, and which parts of an email are used. Off when unset. Set by
+    // setBoardEmailToCard (server/emailToCard.js); see models/lib/emailToCard.js.
+    emailToCard: {
+      type: Object,
+      optional: true,
+      blackbox: true,
+    },
+    // #3695 / #5171: this board's notification delivery per channel (email,
+    // tray, webhook) - content, grouping, schedule. Unset keys inherit the Admin
+    // Panel default; a member's own choice (email, tray) and a webhook's own
+    // setting win over it. See models/lib/notificationDelivery.js.
+    ...deliverySchemaFields('notificationDelivery'),
+    // #5323: this board's due-date reminder offsets (days before due, 0 = due
+    // today, negative = days past due), overriding NOTIFY_DUE_DAYS_BEFORE_AND_AFTER.
+    // Unset uses the server default; an empty list turns reminders off.
+    dueReminderDays: {
+      type: Array,
+      optional: true,
+      maxCount: 10,
+    },
+    'dueReminderDays.$': {
+      type: SimpleSchema.Integer,
+      min: -14,
+      max: 14,
+    },
+    // #5323: also send this board's due reminders to its enabled outgoing
+    // webhooks, whichever activities those webhooks subscribe to.
+    dueReminderWebhook: {
+      type: Boolean,
+      optional: true,
     },
     allowsCardNumberOnMinicard: {
       /**
@@ -626,6 +1156,20 @@ Boards.attachSchema(
        */
       type: Boolean,
       defaultValue: false,
+    },
+
+    showLabelText: {
+      /**
+       * #4256: does this board show label TEXT on its minicards (coloured
+       * words), or only the coloured bars? Board Settings / Card ("Labels
+       * text"). A user's own profile.showLabelTextOverride, when set, wins
+       * over this on every board - see client/lib/minicardLabelText.js.
+       * Defaults to true (text shown), the historical global default, so an
+       * existing board with no value stored sees no behaviour change.
+       */
+      type: Boolean,
+      defaultValue: true,
+      optional: true,
     },
 
     allowsAssignee: {
@@ -712,6 +1256,18 @@ Boards.attachSchema(
       defaultValue: false,
     },
 
+    // #2426: a card's swimlane isn't otherwise visible on its minicard in
+    // List view (Swimlanes view already groups cards by swimlane), so this
+    // board-wide toggle shows the swimlane's name at the bottom of the
+    // minicard. Defaults to false so existing boards see no change.
+    allowsSwimlaneNameOnMinicard: {
+      /**
+       * Does the board allow showing the swimlane name on all minicards?
+       */
+      type: Boolean,
+      defaultValue: false,
+    },
+
     allowsChecklistAtMinicard: {
       /**
        * Does the board allow showing checklists on all minicards?
@@ -727,6 +1283,348 @@ Boards.attachSchema(
       type: Boolean,
       defaultValue: true,
     },
+
+    // #2530: the "Time spent" field (and its overtime indicator) was only
+    // reachable through the card's hamburger/context menu. Both the card
+    // detail view and the minicard already render it unconditionally
+    // whenever a card has logged time (see getSpentTime() in
+    // client/components/cards/minicard.jade and cardDetails.jade), so these
+    // two toggles default to TRUE - matching that existing behaviour rather
+    // than hiding something boards already show - and only let an admin turn
+    // it OFF via Card Settings, the same "Show on card"/"Show on minicard"
+    // pattern used by allowsReceivedDate/allowsReceivedDateOnMinicard above.
+    allowsSpentTime: {
+      /**
+       * Does the board show the accumulated spent-time badge on the opened card?
+       */
+      type: Boolean,
+      defaultValue: true,
+    },
+    allowsSpentTimeOnMinicard: {
+      /**
+       * Does the board show the accumulated spent-time badge on the minicard?
+       */
+      type: Boolean,
+      defaultValue: true,
+    },
+    // #6688: the card sections that shipped WITHOUT a Board Settings / Card
+    // toggle - Stickers, Location, Dependencies, Flowtime, Pomodoro, Vote,
+    // Planning Poker, Text Notes - and the minicard badges of the ones that
+    // have one (Stickers, Dependencies, Vote, Poker, the comment count). All
+    // default to TRUE because every one of them rendered unconditionally
+    // before, so an existing board keeps showing exactly what it showed; the
+    // toggle only lets an admin turn one OFF, the allowsSpentTime pattern.
+    allowsStickers: {
+      /**
+       * Does the board show the Stickers section on the opened card?
+       */
+      type: Boolean,
+      defaultValue: true,
+    },
+    allowsStickersOnMinicard: {
+      /**
+       * Does the board show the stickers badge on the minicard?
+       */
+      type: Boolean,
+      defaultValue: true,
+    },
+    allowsLocation: {
+      /**
+       * Does the board show the Location section on the opened card?
+       */
+      type: Boolean,
+      defaultValue: true,
+    },
+    allowsDependencies: {
+      /**
+       * Does the board show the Dependencies section on the opened card?
+       */
+      type: Boolean,
+      defaultValue: true,
+    },
+    allowsDependenciesOnMinicard: {
+      /**
+       * Does the board show the dependencies badge on the minicard?
+       */
+      type: Boolean,
+      defaultValue: true,
+    },
+    allowsFlowtime: {
+      /**
+       * Does the board show the Flowtime timer on the opened card?
+       */
+      type: Boolean,
+      defaultValue: true,
+    },
+    allowsPomodoro: {
+      /**
+       * Does the board show the Pomodoro timer on the opened card?
+       */
+      type: Boolean,
+      defaultValue: true,
+    },
+    allowsVote: {
+      /**
+       * Does the board show a card's voting question and buttons on the opened card?
+       */
+      type: Boolean,
+      defaultValue: true,
+    },
+    allowsVoteOnMinicard: {
+      /**
+       * Does the board show the vote-count badge on the minicard?
+       */
+      type: Boolean,
+      defaultValue: true,
+    },
+    allowsPoker: {
+      /**
+       * Does the board show a card's Planning Poker on the opened card?
+       */
+      type: Boolean,
+      defaultValue: true,
+    },
+    allowsPokerOnMinicard: {
+      /**
+       * Does the board show the Planning Poker badge on the minicard?
+       */
+      type: Boolean,
+      defaultValue: true,
+    },
+    allowsTextNotes: {
+      /**
+       * Does the board show the Text Notes section on the opened card?
+       */
+      type: Boolean,
+      defaultValue: true,
+    },
+    allowsCommentCountOnMinicard: {
+      /**
+       * Does the board show the comment-count badge on the minicard?
+       */
+      type: Boolean,
+      defaultValue: true,
+    },
+    // Board Settings / Card: the sides each row gained on 2026-10-02, so that
+    // every row can be shown on the card and on the minicard
+    // (models/lib/cardSettingsRows.js). A side that already drew something
+    // defaults to true; a new element defaults to off.
+    allowsCardCollapse: { type: Boolean, defaultValue: true },
+    allowsChecklistTitleOnMinicard: { type: Boolean, defaultValue: true },
+    allowsLabelTextOnCard: { type: Boolean, defaultValue: true },
+    labelsAboveTitleOnCard: { type: Boolean, optional: true },
+    allowsChecklistDueDateOnMinicard: { type: Boolean, optional: true },
+    allowsLocationOnMinicard: { type: Boolean, optional: true },
+    allowsSwimlaneNameOnCard: { type: Boolean, optional: true },
+    allowsFlowtimeOnMinicard: { type: Boolean, optional: true },
+    allowsPomodoroOnMinicard: { type: Boolean, optional: true },
+    allowsAttachmentListOnMinicard: { type: Boolean, optional: true },
+    allowsTextNotesOnMinicard: { type: Boolean, optional: true },
+    allowsCommentCountOnCard: { type: Boolean, optional: true },
+    allowsActivitiesOnMinicard: { type: Boolean, optional: true },
+    // ...and the rows for what both surfaces drew with no row of their own.
+    allowsCardColorOnCard: { type: Boolean, defaultValue: true },
+    allowsCardColorOnMinicard: { type: Boolean, defaultValue: true },
+    allowsParentCardOnCard: { type: Boolean, defaultValue: true },
+    allowsParentCardOnMinicard: { type: Boolean, defaultValue: true },
+    allowsLinkedCardOnCard: { type: Boolean, defaultValue: true },
+    allowsLinkedCardOnMinicard: { type: Boolean, defaultValue: true },
+    allowsCardButtonsOnCard: { type: Boolean, defaultValue: true },
+    allowsDescriptionBadgeOnMinicard: { type: Boolean, defaultValue: true },
+    allowsUnreadCommentsOnMinicard: { type: Boolean, defaultValue: true },
+    allowsCardButtonsOnMinicard: { type: Boolean, optional: true },
+    allowsDescriptionBadgeOnCard: { type: Boolean, optional: true },
+    allowsUnreadCommentsOnCard: { type: Boolean, optional: true },
+    // Helpers that need no AI: on unless a board admin turned them off.
+    // docs/Features/General/Assistants/Assistants.md
+    allowsDueFromTitleOnCard: { type: Boolean, optional: true },
+    allowsDueFromTitleOnMinicard: { type: Boolean, optional: true },
+    allowsSimilarCardsOnCard: { type: Boolean, optional: true },
+    allowsSimilarCardsOnMinicard: { type: Boolean, optional: true },
+    allowsAtRiskOnCard: { type: Boolean, optional: true },
+    allowsAtRiskOnMinicard: { type: Boolean, optional: true },
+    allowsSuggestedMembersOnCard: { type: Boolean, optional: true },
+    allowsForecastOnCard: { type: Boolean, optional: true },
+    allowsForecastOnMinicard: { type: Boolean, optional: true },
+    allowsChecklistFromDescriptionOnCard: { type: Boolean, optional: true },
+    allowsActionItemsOnCard: { type: Boolean, optional: true },
+    allowsWhiteboardOnCard: { type: Boolean, optional: true },
+    // #6796: the opened card's attachment previews, and each attachment's
+    // uploader and date. On unless a board admin turned them off.
+    allowsAttachmentPreviewsOnCard: { type: Boolean, optional: true },
+    allowsAttachmentDetailsOnCard: { type: Boolean, optional: true },
+    allowsIssueTypeOnMinicard: {
+      /**
+       * Does the board show the work item type badge on the minicard? It was
+       * shown on every board before it had a Board Settings / Card row, so a
+       * missing value means shown.
+       */
+      type: Boolean,
+      defaultValue: true,
+    },
+    restrictCommentEditing: {
+      /**
+       * When true, board admins can NOT edit or delete comments authored by
+       * other users (only the comment's author can). Default false keeps the
+       * historical behaviour where board admins may moderate any comment.
+       */
+      type: Boolean,
+      defaultValue: false,
+    },
+    allowsPersonalListWidth: {
+      /**
+       * List-width scope for this board (#6409).
+       * - false (default): list widths are SHARED — stored in `lists.width`,
+       *   the same layout for everyone; only members with write access may
+       *   change them.
+       * - true: list widths are PERSONAL — each user keeps their own widths in
+       *   their profile (or localStorage when not logged in).
+       */
+      type: Boolean,
+      defaultValue: false,
+    },
+    autoWidth: {
+      /**
+       * Shared (per-board) auto-width for all lists (#6409). When true, lists
+       * fit their content instead of using a fixed width. Used when the board
+       * is in SHARED list-width mode (allowsPersonalListWidth = false); in
+       * PERSONAL mode each user's own profile.autoWidthBoards value is used
+       * instead.
+       */
+      type: Boolean,
+      optional: true,
+      defaultValue: false,
+    },
+    stickyListHeaders: {
+      /**
+       * #3847: when true, every list's header (title/WIP badge/hamburger)
+       * stays pinned to the top of its own list while that list's cards
+       * scroll underneath it, instead of scrolling out of view with them.
+       * Board-wide rather than per-list - freezing one list's header while
+       * its neighbours scrolled normally would look inconsistent - but the
+       * toggle itself lives in the List hamburger/action menu
+       * (listActionPopup in client/components/lists/listHeader.jade) for
+       * discoverability, per the issue reporter's request.
+       */
+      type: Boolean,
+      defaultValue: false,
+    },
+    listWidthResizeLocked: {
+      /**
+       * #6680: when true, the list-width drag-resize handle between lists is
+       * disabled for everyone on this board, so a viewer who is just
+       * navigating cannot accidentally drag a list to a strange width.
+       * Toggled from the top header's lock icon, beside the drag-handles
+       * toggle. Independent of swimlaneHeightResizeLocked.
+       */
+      type: Boolean,
+      optional: true,
+      defaultValue: false,
+    },
+    columnSets: {
+      /**
+       * #211: named column sets over the same cards (models/lib/columnSets.js):
+       * [{ _id, name, columns: [{ _id, title, color }] }].
+       */
+      type: Array,
+      optional: true,
+    },
+    'columnSets.$': {
+      type: Object,
+      blackbox: true,
+    },
+    sharedListHeaders: {
+      /**
+       * #2805: one shared list header row for all swimlanes - the first
+       * swimlane's, sticky at the top while the board scrolls - instead of the
+       * same headers repeated in every swimlane. A board view setting (Board
+       * Settings / Swimlane), off by default.
+       */
+      type: Boolean,
+      optional: true,
+    },
+    swimlaneHeightResizeLocked: {
+      /**
+       * #6680: when true, the swimlane-height drag-resize handle at the top
+       * of each swimlane is disabled for everyone on this board. Same toggle
+       * pattern and reasoning as listWidthResizeLocked, independent of it.
+       */
+      type: Boolean,
+      optional: true,
+      defaultValue: false,
+    },
+    // Board Settings / Board View (docs/Features/Board-Sidebar/Board-Settings/Board-View.md):
+    // which Board View menu entries this board offers, and which one it opens
+    // in, separately for a public and a private board. The decisions live in
+    // models/lib/boardViewSettings.js; a missing entry/side means SHOWN and a
+    // missing default means Swimlanes, so a board that never opened the popup
+    // behaves as it always did.
+    boardViewSettings: {
+      /**
+       * Per view: { '<board-view-key>': { showOnPublic: Boolean, showOnPrivate: Boolean } }
+       */
+      type: Object,
+      blackbox: true,
+      optional: true,
+    },
+    defaultPublicBoardView: {
+      /**
+       * The Board View a PUBLIC board opens in when the viewer has no stored
+       * choice (or a choice this board hides). Always shown on public.
+       */
+      type: String,
+      optional: true,
+      defaultValue: 'board-view-swimlanes',
+    },
+    defaultPrivateBoardView: {
+      /**
+       * The Board View a PRIVATE board opens in when the viewer has no stored
+       * choice (or a choice this board hides). Always shown on private.
+       */
+      type: String,
+      optional: true,
+      defaultValue: 'board-view-swimlanes',
+    },
+    // The order of the Board View menu on this board, set with the up/down
+    // arrows in Board Settings / Board View. Missing, partial or unknown
+    // values are made whole by normalizeBoardViewOrder() in
+    // models/lib/boardViewSettings.js, the same way cardFieldOrder is.
+    boardViewOrder: {
+      /**
+       * The Board View menu's order: board-view keys, first to last
+       */
+      type: Array,
+      optional: true,
+    },
+    'boardViewOrder.$': {
+      type: String,
+    },
+    sameWidthForAllLists: {
+      /**
+       * #6680: the BOARD-WIDE equivalent of each user's own "same width for
+       * all lists" (fixed width) choice in the Set Width popup
+       * (profile.fixedListWidthBoards) - an admin-set toggle, in the top
+       * header between the two resize-lock icons, that forces every list on
+       * this board to the single sameWidthForAllListsValue for EVERY viewer,
+       * overriding their personal fixed-width choice while it is on.
+       */
+      type: Boolean,
+      optional: true,
+      defaultValue: false,
+    },
+    sameWidthForAllListsValue: {
+      /**
+       * The single width (px) every list uses while sameWidthForAllLists is
+       * on. Any board member with write access may change it by dragging a
+       * list's resize handle (server/permissions/boards.js allows an update
+       * touching only this field); turning the mode itself on/off is
+       * admin-only, like the rest of this board's settings.
+       */
+      type: Number,
+      optional: true,
+      defaultValue: 220, // models/lib/listWidth.js DEFAULT_LIST_WIDTH
+      min: 200, // models/lib/listWidth.js MIN_LIST_WIDTH
+    },
     allowsReceivedDateOnMinicard: {
       /**
        * Does the board allows received date on minicard?
@@ -735,6 +1633,8 @@ Boards.attachSchema(
       defaultValue: true,
     },
 
+    dateFormatOverride: { type: Boolean, optional: true },
+    dateFormat: { type: String, optional: true, allowedValues: require('/models/lib/dateFormatPolicy').DATE_FORMATS },
     allowsStartDate: {
       /**
        * Does the board allows start date?
@@ -778,6 +1678,23 @@ Boards.attachSchema(
        */
       type: Boolean,
       defaultValue: true,
+    },
+    allowsDueComplete: {
+      /**
+       * Does the board show the "Mark as complete" toggle on cards?
+       * Issue #6381: opt-in, hidden by default.
+       */
+      type: Boolean,
+      defaultValue: false,
+    },
+    allowsDueCompleteOnMinicard: {
+      /**
+       * Does the board show the "Mark as complete" toggle on minicards?
+       * Separate from the card-details toggle (allowsDueComplete): opt-in,
+       * hidden by default so it is not shown on minicards unless enabled.
+       */
+      type: Boolean,
+      defaultValue: false,
     },
 
     presentParentTask: {
@@ -868,9 +1785,23 @@ Boards.attachSchema(
 );
 
 Boards.helpers({
-  async copy() {
+  async copy(withoutCards = false, copyOptions) {
+    const selection = normalizeBoardCopyOptions(copyOptions);
+    if (withoutCards) selection.cards = false;
     const oldId = this._id;
+    const sourceBoardId = oldId;
+    let scrumExport = null;
+    if (selection.scrum) {
+      const { exportScrumTransfer } = require('/server/lib/scrumTransferExport');
+      const [sourceCards, sourceLists, sourceLanes] = await Promise.all([
+        ReactiveCache.getCards({ boardId: oldId }), ReactiveCache.getLists({ boardId: oldId }), ReactiveCache.getSwimlanes({ boardId: oldId }),
+      ]);
+      scrumExport = await exportScrumTransfer(oldId, sourceCards.map(c => c._id), sourceLists.map(l => l._id), sourceLanes.map(s => s._id));
+    }
+    // Planning references are installed only after destination IDs exist.
+    delete this.scrum; delete this.scrumRevision; delete this.scrumImportLosses;
     const oldWatchers = this.watchers ? this.watchers.slice() : [];
+    if (!selection.labels) this.labels = [];
     delete this._id;
     delete this.slug;
     this.title = await this.copyTitle();
@@ -883,40 +1814,95 @@ Boards.helpers({
         },
     });
 
-    // Copy all swimlanes in board
-    const swimlanes = await ReactiveCache.getSwimlanes({
-      boardId: oldId,
-      archived: false,
-    });
-    for (const swimlane of swimlanes) {
-      swimlane.type = 'swimlane';
-      await swimlane.copy(_id);
+    // #4494: repoint subtasks/date-settings defaults that referenced the source
+    // (template) board to this copy, so subtasks created on the new board are
+    // NOT dropped onto the template board.
+    const { remapCopiedBoardDefaults } = require('./lib/boardCopyDefaults');
+    const defaultsPatch = remapCopiedBoardDefaults(this, oldId, _id);
+    if (Object.keys(defaultsPatch).length > 0) {
+      await Boards.updateAsync(_id, { $set: defaultsPatch });
     }
 
-    // copy custom field definitions
+    // Clone custom field definitions BEFORE any card is copied, and give card
+    // copy the old -> new id map. Cards used to be inserted with the source
+    // board's field ids and re-keyed afterwards; the admin-only field guard
+    // (AdminFieldBleed) refuses a card whose field belongs to another board,
+    // so every board copy with custom fields failed.
     const cfMap = {};
-    const customFields = await ReactiveCache.getCustomFields({ boardIds: oldId });
+    const customFields = selection.customFields ? await ReactiveCache.getCustomFields({ boardIds: oldId }) : [];
     for (const cf of customFields) {
       const id = cf._id;
       delete cf._id;
       cf.boardIds = [_id];
       cfMap[id] = await CustomFields.insertAsync(cf);
     }
-    const cards = await ReactiveCache.getCards({ boardId: _id });
-    for (const card of cards) {
-      await Cards.updateAsync(card._id, {
-        $set: {
-          customFields: card.customFields.map(cf => {
-            cf._id = cfMap[cf._id];
-            return cf;
-          }),
-        },
+    selection.customFieldIdMap = cfMap;
+
+    // Copy all swimlanes in board. cardIdMap collects old card id -> new card
+    // id so card-to-card dependencies (#3392 "Red Strings") can be remapped to
+    // the copies once every card has been created.
+    const cardIdMap = {};
+    const copyMaps = { lists: {}, swimlanes: {} };
+    const swimlanes = await ReactiveCache.getSwimlanes({
+      boardId: oldId,
+      archived: false,
+    });
+    for (const swimlane of selection.swimlanes ? swimlanes : []) {
+      swimlane.type = 'swimlane';
+      if (copyOptions === undefined) {
+        await swimlane.copy(_id, null, 'below', '', cardIdMap, withoutCards, selection, copyMaps);
+      } else {
+        await swimlane.copy(_id, null, 'below', '', cardIdMap, !selection.cards, selection, copyMaps);
+      }
+    }
+
+    // #3392: remap card-to-card dependencies (Red Strings) from the source
+    // card ids to their copies, dropping any whose target was not copied.
+    const depCards = await ReactiveCache.getCards({
+      boardId: _id,
+      cardDependencies: { $exists: true, $ne: [] },
+    });
+    for (const depCard of depCards) {
+      const remapped = (depCard.cardDependencies || [])
+        .map(dep => {
+          // Tolerate legacy bare-string entries as well as { cardId, ... }.
+          const oldDepId = typeof dep === 'string' ? dep : dep.cardId;
+          const newDepId = cardIdMap[oldDepId];
+          if (!newDepId) return null;
+          return typeof dep === 'string'
+            ? { cardId: newDepId }
+            : { ...dep, cardId: newDepId };
+        })
+        .filter(Boolean);
+      await Cards.updateAsync(depCard._id, {
+        $set: { cardDependencies: remapped },
       });
+    }
+
+    if (copyOptions !== undefined) {
+      for (const copied of await ReactiveCache.getCards({ boardId: _id })) {
+        // #3626: every parent, remapped; one that was not copied is dropped.
+        const parents = cardParentIds(copied);
+        if (parents.length) await Cards.updateAsync(copied._id, {
+          $set: parentFields(parents.map(id => cardIdMap[id]).filter(Boolean)),
+        });
+      }
+    }
+
+    // Custom field definitions were cloned before the cards (see above).
+
+    if (scrumExport) {
+      const { importScrumTransfer } = require('/server/lib/scrumTransferImport');
+      const { scrumTransferUserIds } = require('/server/lib/scrumTransferExport');
+      const users = await ReactiveCache.getUsers({ _id: { $in: scrumTransferUserIds(scrumExport.transfer) } });
+      await importScrumTransfer({ cards: cardIdMap, lists: copyMaps.lists, swimlanes: copyMaps.swimlanes,
+        customFields: cfMap, members: Object.fromEntries(users.map(user => [user._id, user._id])) },
+      { _id: sourceBoardId, scrumTransfer: scrumExport.transfer, scrumTransferLosses: scrumExport.losses }, _id);
     }
 
     // copy rules, actions, and triggers
     const actionsMap = {};
-    const actions = await ReactiveCache.getActions({ boardId: oldId });
+    const actions = selection.rules ? await ReactiveCache.getActions({ boardId: oldId }) : [];
     for (const action of actions) {
       const id = action._id;
       delete action._id;
@@ -924,20 +1910,32 @@ Boards.helpers({
       actionsMap[id] = await Actions.insertAsync(action);
     }
     const triggersMap = {};
-    const triggers = await ReactiveCache.getTriggers({ boardId: oldId });
+    const triggers = selection.rules ? await ReactiveCache.getTriggers({ boardId: oldId }) : [];
     for (const trigger of triggers) {
       const id = trigger._id;
       delete trigger._id;
       trigger.boardId = _id;
       triggersMap[id] = await Triggers.insertAsync(trigger);
     }
-    const rules = await ReactiveCache.getRules({ boardId: oldId });
+    const rules = selection.rules ? await ReactiveCache.getRules({ boardId: oldId }) : [];
     for (const rule of rules) {
       delete rule._id;
       rule.boardId = _id;
-      rule.actionId = actionsMap[rule.actionId];
-      rule.triggerId = triggersMap[rule.triggerId];
+      // #4294: all of a rule's triggers and actions, not only the first ones.
+      require('/models/lib/ruleParts').remapRuleParts(rule, triggersMap, actionsMap);
       await Rules.insertAsync(rule);
+    }
+
+    // #5592: copy the board's webhooks (Integrations). They are per-board
+    // children (boardRemover deletes them by boardId) but were not duplicated on
+    // copy, so a copied board lost all its outgoing webhooks. Re-home each onto
+    // the new board; the URL/token/activities carry over (the copying user is a
+    // board admin and already has access to them).
+    const integrations = selection.integrations ? await ReactiveCache.getIntegrations({ boardId: oldId }) : [];
+    for (const integration of integrations) {
+      delete integration._id;
+      integration.boardId = _id;
+      await Integrations.insertAsync(integration);
     }
 
     // Re-set Watchers to reenable notification
@@ -960,13 +1958,12 @@ Boards.helpers({
    * Is supplied user authorized to view this board?
    */
   isVisibleBy(user) {
-    if (this.isPublic()) {
-      // public boards are visible to everyone
+    // Public boards are visible to everyone, 'instance' boards (#3249) to
+    // every signed-in user; otherwise you have to be an active member.
+    if (readableWithoutMembership(this.permission, !!(user && user._id))) {
       return true;
-    } else {
-      // otherwise you have to be logged-in and active member
-      return user && this.isActiveMember(user._id);
     }
+    return user && this.isActiveMember(user._id);
   },
 
   /**
@@ -985,8 +1982,22 @@ Boards.helpers({
     }
   },
 
+  // Anybody, signed in or not. An 'instance' board is NOT public: code that
+  // serves anonymous callers keeps asking this; code that knows its caller
+  // asks isVisibleBy() or readableWithoutMembership().
   isPublic() {
     return this.permission === 'public';
+  },
+
+  isInstanceBoard() {
+    return this.permission === 'instance';
+  },
+
+  // The icon shown beside the board's visibility (#3249).
+  visibilityIcon() {
+    if (this.permission === 'public') return 'fa-globe';
+    if (this.permission === 'instance') return 'fa-users';
+    return 'fa-lock';
   },
 
   hasSharedListsConverted() {
@@ -1015,6 +2026,7 @@ Boards.helpers({
       {
         boardId: this._id,
         archived: false,
+        deletedAt: null, // soft delete: hide deleted lists (docs/Features/Undo/Undo.md)
       },
       { sort: sortKey },
     );
@@ -1024,6 +2036,7 @@ Boards.helpers({
     return ReactiveCache.getLists(
       {
         boardId: this._id,
+        deletedAt: null, // soft delete: hide deleted lists
       },
       { sort: { sort: 1 } }
     );
@@ -1033,7 +2046,7 @@ Boards.helpers({
    * @returns Document the last list
    */
   getLastList() {
-    const ret = ReactiveCache.getList({ boardId: this._id }, { sort: { sort: 'desc' } });
+    const ret = ReactiveCache.getList({ boardId: this._id, deletedAt: null }, { sort: { sort: 'desc' } });
     return ret;
   },
 
@@ -1041,6 +2054,7 @@ Boards.helpers({
     return ReactiveCache.getLists({
       boardId: this._id,
       archived: false,
+      deletedAt: null,
       sort: { $eq: null },
     });
   },
@@ -1106,7 +2120,7 @@ Boards.helpers({
 
   activeMembers(){
     // Depend on the users collection for reactivity when users are loaded
-    const memberUserIds = this.members.map(x => x.userId);
+    const memberUserIds = (this.members || []).map(x => x.userId);
     // Use findOne with limit for reactivity trigger instead of count() which loads all users
     if (Meteor.isClient) {
       Meteor.users.findOne({ _id: { $in: memberUserIds } }, { fields: { _id: 1 }, limit: 1 });
@@ -1146,6 +2160,32 @@ Boards.helpers({
     return [...filteredMembers].sort((a, b) => sortKey(a).localeCompare(sortKey(b)));
   },
 
+  // Active members first (sorted as above), then the inactive/imported ones appended, so
+  // the sidebar member list shows EVERYONE and which are active vs not — imported
+  // placeholders and members deactivated by reconciliation (e.g. not in LDAP) stay
+  // visible (rendered distinguished by userAvatar) instead of silently disappearing.
+  membersForSidebar() {
+    const active = this.activeMembers();
+    const activeIds = new Set(active.map(m => m.userId));
+    const seen = new Set();
+    // #6479: a REMOVED member (isActive:false) must NOT appear in the sidebar member
+    // list. removeMember keeps the entry with isActive:false (#5122: role history /
+    // re-activation), so if the sidebar showed inactive members too, "Remove from
+    // board" looked like it did nothing — the avatar stayed. The only inactive entries
+    // still worth showing here are imported placeholders pending reconciliation
+    // (authenticationMethod:'imported'); a plain removed account is hidden. Removed
+    // members remain visible (greyed) where they are still referenced, e.g. as a card
+    // assignee, via the userAvatar 'inactive-member' styling — just not as current
+    // board members in this list.
+    const placeholders = (this.members || []).filter(m => {
+      if (m.isActive === true || activeIds.has(m.userId) || seen.has(m.userId)) return false;
+      seen.add(m.userId);
+      const user = ReactiveCache.getUser(m.userId);
+      return !!user && user.authenticationMethod === 'imported';
+    });
+    return active.concat(placeholders);
+  },
+
   activeOrgs() {
     return where(this.orgs, { isActive: true });
   },
@@ -1156,6 +2196,11 @@ Boards.helpers({
 
   activeTeams() {
     return where(this.teams, { isActive: true });
+  },
+
+  // #5850: the board's active email-address domains.
+  activeDomains() {
+    return where(this.domains, { isActive: true });
   },
 
   // hasNotAnyTeam(){
@@ -1170,8 +2215,15 @@ Boards.helpers({
     return ReactiveCache.getUsers({ _id: { $in: this.members.map(x => x.userId) } });
   },
 
+  // A label by name and color. Names are compared as the schema stores them,
+  // trimmed: a padded " Bug " from the REST API, an import or a typed form must find
+  // the stored "Bug", or every repeat created another label with the same name and
+  // color (#6864). A legacy label stored with padding is found by its trimmed name too.
   getLabel(name, color) {
-    return findWhere(this.labels, { name, color });
+    const wanted = typeof name === 'string' ? name.trim() : name;
+    return (this.labels || []).find(label => label
+      && (typeof label.name === 'string' ? label.name.trim() : label.name) === wanted
+      && label.color === color);
   },
 
   getLabelById(labelId) {
@@ -1199,6 +2251,8 @@ Boards.helpers({
   },
 
   hasNoComments(memberId) {
+    const custom = this.customUiRoleOf(memberId);
+    if (custom) return custom === 'no-comments';
     return !!findWhere(this.members, {
       userId: memberId,
       isActive: true,
@@ -1209,6 +2263,8 @@ Boards.helpers({
   },
 
   hasCommentOnly(memberId) {
+    const custom = this.customUiRoleOf(memberId);
+    if (custom) return custom === 'comment-only';
     return !!findWhere(this.members, {
       userId: memberId,
       isActive: true,
@@ -1219,6 +2275,8 @@ Boards.helpers({
   },
 
   hasWorker(memberId) {
+    const custom = this.customUiRoleOf(memberId);
+    if (custom) return custom === 'worker';
     return !!findWhere(this.members, {
       userId: memberId,
       isActive: true,
@@ -1229,6 +2287,8 @@ Boards.helpers({
   },
 
   hasNormalAssignedOnly(memberId) {
+    const custom = this.customUiRoleOf(memberId);
+    if (custom) return custom === 'normal-assigned-only';
     return !!findWhere(this.members, {
       userId: memberId,
       isActive: true,
@@ -1239,6 +2299,8 @@ Boards.helpers({
   },
 
   hasCommentAssignedOnly(memberId) {
+    const custom = this.customUiRoleOf(memberId);
+    if (custom) return custom === 'comment-assigned-only';
     return !!findWhere(this.members, {
       userId: memberId,
       isActive: true,
@@ -1249,6 +2311,8 @@ Boards.helpers({
   },
 
   hasReadOnly(memberId) {
+    const custom = this.customUiRoleOf(memberId);
+    if (custom) return custom === 'read-only';
     return !!findWhere(this.members, {
       userId: memberId,
       isActive: true,
@@ -1258,12 +2322,33 @@ Boards.helpers({
   },
 
   hasReadAssignedOnly(memberId) {
+    const custom = this.customUiRoleOf(memberId);
+    if (custom) return custom === 'read-assigned-only';
     return !!findWhere(this.members, {
       userId: memberId,
       isActive: true,
       isAdmin: false,
       isReadAssignedOnly: true,
     });
+  },
+
+  // The built-in role a member's custom role (#3022) behaves like (uiRoleFor),
+  // or null when the member has none. The has*() helpers below answer from it,
+  // so every place that asks for a role by name treats a custom role by what
+  // it may do.
+  customUiRoleOf(memberId) {
+    const member = findWhere(this.members, { userId: memberId, isActive: true });
+    const role = memberRoleOf(member);
+    const caps = role && role.startsWith(CUSTOM_ROLE_PREFIX) ? customRoleCapabilities(role) : null;
+    return caps ? uiRoleFor(caps) : null;
+  },
+
+  // The custom role (#3022) of an active member, when it still exists: its id,
+  // else null. The member's built-in flags then only mirror it.
+  customRoleOf(memberId) {
+    const member = findWhere(this.members, { userId: memberId, isActive: true });
+    const role = memberRoleOf(member);
+    return role && role.startsWith(CUSTOM_ROLE_PREFIX) ? role.slice(CUSTOM_ROLE_PREFIX.length) : null;
   },
 
   // Returns the single BOARD-level role key of an active board member (see
@@ -1275,6 +2360,9 @@ Boards.helpers({
     const member = findWhere(this.members, { userId: memberId, isActive: true });
     if (!member) return null;
     if (member.isAdmin) return 'board-admin';
+    // A custom role is its own key, `custom:<id>` (#3022).
+    const resolved = memberRoleOf(member);
+    if (resolved && resolved.startsWith(CUSTOM_ROLE_PREFIX)) return resolved;
     if (member.isWorker) return 'worker';
     if (member.isCommentOnly) return 'comment-only';
     if (member.isNoComments) return 'no-comments';
@@ -1290,9 +2378,59 @@ Boards.helpers({
     return ret;
   },
 
+  // The minicard's field order (models/lib/cardFieldOrder.js), canonical.
+  getMinicardFieldOrder() {
+    const { applyMinicardOrder } = require('/models/lib/cardFieldOrder');
+    return applyMinicardOrder(this.minicardFieldOrder);
+  },
+
+  // Board Settings / Card's up/down arrows write through these two, the way
+  // Board View's popup writes through setBoardViewShown: the order is
+  // normalised before it is stored, so the database never holds an unknown
+  // or duplicated key. Who may call them is decided where it is for every
+  // other board setting - Boards.allow's update rule in
+  // server/permissions/boards.js, which requires a board admin.
+  async setCardFieldOrder(order) {
+    const { applyCardOrder } = require('/models/lib/cardFieldOrder');
+    return await Boards.updateAsync(this._id, { $set: { cardFieldOrder: applyCardOrder(order) } });
+  },
+
+  // Card Settings' sections dragged above one another, normalised the same
+  // way (models/lib/cardSettingsSections.js sectionOrder).
+  // `side` is 'card' (the default, so the one-argument call still writes the
+  // opened card's order) or 'minicard'.
+  async setCardSettingsSectionOrder(order, side) {
+    const { sectionOrder, SECTION_ORDER_FIELD } = require('/models/lib/cardSettingsSections');
+    const which = side === 'minicard' ? 'minicard' : 'card';
+    return await Boards.updateAsync(this._id, { $set: { [SECTION_ORDER_FIELD[which]]: sectionOrder(order, which) } });
+  },
+
+  // Card Settings' checkbox left of a section's title: whether the whole
+  // section is shown on `side` ('card' or 'minicard'), normalised the same way
+  // (models/lib/cardSettingsSections.js hiddenSectionsAfter). An unknown side
+  // writes nothing.
+  async setCardSettingsSectionShown(side, sectionId, shown) {
+    const { HIDDEN_SECTIONS_FIELD, hiddenSectionsAfter } = require('/models/lib/cardSettingsSections');
+    const field = HIDDEN_SECTIONS_FIELD[side];
+    if (!field) return 0;
+    return await Boards.updateAsync(this._id, { $set: { [field]: hiddenSectionsAfter(this[field], sectionId, shown === true) } });
+  },
+
+  async setMinicardFieldOrder(order) {
+    const { applyMinicardOrder } = require('/models/lib/cardFieldOrder');
+    return await Boards.updateAsync(this._id, { $set: { minicardFieldOrder: applyMinicardOrder(order) } });
+  },
+
   hasAnyAllowsUser() {
     const ret = this.allowsCreator || this.allowsMembers || this.allowsAssignee || this.allowsRequestedBy || this.allowsAssignedBy;
     return ret;
+  },
+
+  // #4448: the resolved, always-complete order of the reorderable card-detail
+  // sections - see models/lib/cardFieldOrder.js.
+  getCardFieldOrder() {
+    const { applyCardFieldOrder } = require('/models/lib/cardFieldOrder');
+    return applyCardFieldOrder(this.cardFieldOrder);
   },
 
   absoluteUrl() {
@@ -1323,9 +2461,11 @@ Boards.helpers({
 
   // XXX currently mutations return no value so we have an issue when using addLabel in import
   // XXX waiting on https://github.com/mquandalle/meteor-collection-mutations/issues/1 to remove...
-  pushLabel(name, color) {
+  pushLabel(name, color, dueAt) {
     const _id = Random.id(6);
-    Boards.direct.update(this._id, { $push: { labels: { _id, name, color } } });
+    const label = { _id, name, color };
+    if (dueAt) label.dueAt = dueAt;
+    Boards.direct.update(this._id, { $push: { labels: label } });
     return _id;
   },
 
@@ -1353,7 +2493,7 @@ Boards.helpers({
     const projection = { limit: 10, sort: { createdAt: -1 } };
 
     if (term) {
-      const regex = new RegExp(term, 'i');
+      const regex = literalSearchRegex(term);
 
       query.$or = [{ title: regex }, { description: regex }];
     }
@@ -1375,7 +2515,7 @@ Boards.helpers({
     const projection = { limit: 10, sort: { createdAt: -1 } };
 
     if (term) {
-      const regex = new RegExp(term, 'i');
+      const regex = literalSearchRegex(term);
 
       query.$or = [{ title: regex }, { description: regex }];
     }
@@ -1400,7 +2540,7 @@ Boards.helpers({
       const projection = { sort: { createdAt: -1 } };
 
       if (term) {
-        const regex = new RegExp(term, 'i');
+        const regex = literalSearchRegex(term);
 
         query.$or = [{ title: regex }, { description: regex }];
       }
@@ -1429,13 +2569,24 @@ Boards.helpers({
       }
       const projection = { sort: { createdAt: -1 } };
 
-      const regex = new RegExp(term, 'i');
+      // #5680: build the $or so numeric custom fields (number / currency, stored
+      // as JS Numbers) match by value too — a regex alone only matches strings.
+      query.$or = buildCardSearchOr(term, { boardKey: this.key });
 
-      query.$or = [
-        { title: regex },
-        { description: regex },
-        { customFields: { $elemMatch: { value: regex } } },
-      ];
+      // #3841: also find cards whose match is only inside a COMMENT. Comments
+      // live in a separate collection, so Minimongo can't match them with a
+      // single query on Cards — pull this board's comment texts, work out
+      // which cards they belong to (using the same case-insensitive matching
+      // rule as the rest of the search), and OR those card ids in too.
+      const comments = ReactiveCache.getCardComments(
+        { boardId: this._id },
+        { fields: { cardId: 1, text: 1 } },
+      );
+      const commentCardIds = matchingCommentCardIds(comments, term);
+      if (commentCardIds.length) {
+        query.$or.push({ _id: { $in: commentCardIds } });
+      }
+
       ret = ReactiveCache.getCards(query, projection);
     }
     return ret;
@@ -1443,11 +2594,28 @@ Boards.helpers({
   // A board alwasy has another board where it deposits subtasks of thasks
   // that belong to itself.
   getDefaultSubtasksBoardId() {
-    if (
-      this.subtasksDefaultBoardId === null ||
-      this.subtasksDefaultBoardId === undefined
-    ) {
-      this.subtasksDefaultBoardId = Boards.insert({
+    // #3868 / #5788 / #2256: only the SERVER may auto-create the default
+    // subtasks board (+ its swimlane) — and #6456: on Meteor 3 the server may
+    // not use the sync insert/update APIs either ("insert is not available on
+    // the server"), which made addSubtaskCard throw here. This is now a PURE
+    // getter; the server-side creation lives in getDefaultSubtasksBoardAsync
+    // (the only path the addSubtaskCard method uses).
+    return this.subtasksDefaultBoardId;
+  },
+
+  getDefaultSubtasksBoard() {
+    return ReactiveCache.getBoard(this.getDefaultSubtasksBoardId());
+  },
+
+  async getDefaultSubtasksBoardAsync() {
+    let boardId = this.getDefaultSubtasksBoardId();
+
+    // #6456: server-authoritative lazy creation, once, with the async APIs
+    // (the sync Boards.insert/Swimlanes.insert/Boards.update this used to rely
+    // on throw on the Meteor 3 server, so creating a subtask crashed with
+    // "Exception while invoking method 'addSubtaskCard'").
+    if (!boardId && Meteor.isServer) {
+      boardId = await Boards.insertAsync({
         title: `^${this.title}^`,
         permission: this.permission,
         members: sanitizeBoardMembers(this.members),
@@ -1459,25 +2627,14 @@ Boards.helpers({
         ),
       });
 
-      Swimlanes.insert({
+      await Swimlanes.insertAsync({
         title: getTranslatedString('default', 'Default'),
-        boardId: this.subtasksDefaultBoardId,
+        boardId,
       });
-      Boards.update(this._id, {
-        $set: {
-          subtasksDefaultBoardId: this.subtasksDefaultBoardId,
-        },
-      });
+      await this.setSubtasksDefaultBoardId(boardId);
+      this.subtasksDefaultBoardId = boardId;
     }
-    return this.subtasksDefaultBoardId;
-  },
 
-  getDefaultSubtasksBoard() {
-    return ReactiveCache.getBoard(this.getDefaultSubtasksBoardId());
-  },
-
-  async getDefaultSubtasksBoardAsync() {
-    const boardId = this.getDefaultSubtasksBoardId();
     if (!boardId) {
       return null;
     }
@@ -1491,32 +2648,13 @@ Boards.helpers({
 
   //Date Settings option such as received date, start date and so on.
   getDefaultDateSettingsBoardId() {
-    if (
-      this.dateSettingsDefaultBoardId === null ||
-      this.dateSettingsDefaultBoardId === undefined
-    ) {
-      this.dateSettingsDefaultBoardId = Boards.insert({
-        title: `^${this.title}^`,
-        permission: this.permission,
-        members: sanitizeBoardMembers(this.members),
-        color: this.color,
-        description: getTranslatedString(
-          'default-dates-board',
-          `Default dates board for ${this.title}`,
-          { board: this.title },
-        ),
-      });
-
-      Swimlanes.insert({
-        title: getTranslatedString('default', 'Default'),
-        boardId: this.dateSettingsDefaultBoardId,
-      });
-      Boards.update(this._id, {
-        $set: {
-          dateSettingsDefaultBoardId: this.dateSettingsDefaultBoardId,
-        },
-      });
-    }
+    // #6456 (same class): PURE getter. The lazy sync creation this used had
+    // BOTH bug classes — no Meteor.isServer guard (client-side creation on
+    // every reactive read, the #2256/#3868 duplicate-boards class) and the
+    // sync Boards.insert/Swimlanes.insert/Boards.update APIs that throw on the
+    // Meteor 3 server. Nothing in the codebase calls it today; if a feature
+    // needs the dates helper board again, add an async server-side ensure like
+    // getDefaultSubtasksBoardAsync.
     return this.dateSettingsDefaultBoardId;
   },
 
@@ -1525,17 +2663,10 @@ Boards.helpers({
   },
 
   getDefaultSubtasksListId() {
-    if (
-      this.subtasksDefaultListId === null ||
-      this.subtasksDefaultListId === undefined
-    ) {
-      this.subtasksDefaultListId = Lists.insert({
-        title: getTranslatedString('queue', 'Queue'),
-        boardId: this._id,
-        swimlaneId: this.getDefaultSwimline()._id, // Set default swimlane for subtasks list
-      });
-      this.setSubtasksDefaultListId(this.subtasksDefaultListId);
-    }
+    // #3868 / #5788 / #2256 / #6456: PURE getter — client-side creation
+    // duplicated lists, and the sync Lists.insert this used on the server
+    // throws on Meteor 3. Server-side creation lives in
+    // getDefaultSubtasksListAsync.
     return this.subtasksDefaultListId;
   },
 
@@ -1544,7 +2675,23 @@ Boards.helpers({
   },
 
   async getDefaultSubtasksListAsync() {
-    const listId = this.getDefaultSubtasksListId();
+    let listId = this.getDefaultSubtasksListId();
+
+    // #6456: server-authoritative lazy creation with the async APIs (the sync
+    // Lists.insert + getDefaultSwimline() this relied on throw on the Meteor 3
+    // server — getDefaultSwimline's sync ReactiveCache read even returns a
+    // Promise there, so .._id was never valid).
+    if (!listId && Meteor.isServer) {
+      const swimlane = await this.getDefaultSwimlineAsync();
+      listId = await Lists.insertAsync({
+        title: getTranslatedString('queue', 'Queue'),
+        boardId: this._id,
+        swimlaneId: swimlane ? swimlane._id : undefined, // Set default swimlane for subtasks list
+      });
+      await this.setSubtasksDefaultListId(listId);
+      this.subtasksDefaultListId = listId;
+    }
+
     if (!listId) {
       return null;
     }
@@ -1557,17 +2704,7 @@ Boards.helpers({
   },
 
   getDefaultDateSettingsListId() {
-    if (
-      this.dateSettingsDefaultListId === null ||
-      this.dateSettingsDefaultListId === undefined
-    ) {
-      this.dateSettingsDefaultListId = Lists.insert({
-        title: getTranslatedString('queue', 'Queue'),
-        boardId: this._id,
-        swimlaneId: this.getDefaultSwimline()._id, // Set default swimlane for date settings list
-      });
-      this.setDateSettingsDefaultListId(this.dateSettingsDefaultListId);
-    }
+    // #6456 (same class): PURE getter — see getDefaultDateSettingsBoardId.
     return this.dateSettingsDefaultListId;
   },
 
@@ -1576,40 +2713,106 @@ Boards.helpers({
   },
 
   getDefaultSwimline() {
-    let result = ReactiveCache.getSwimlane({ boardId: this._id });
-    if (result === undefined) {
-      // Check if any swimlane exists for this board to avoid duplicates
-      const existingSwimlanes = ReactiveCache.getSwimlanes({ boardId: this._id });
-      if (existingSwimlanes.length > 0) {
-        // Use the first existing swimlane
-        result = existingSwimlanes[0];
-      } else {
-        // Use fallback title if i18n is not available (e.g., during migration)
-        const title = getTranslatedString('default', 'Default');
-        Swimlanes.insert({
-          title: title,
-          boardId: this._id,
-        });
-        result = ReactiveCache.getSwimlane({ boardId: this._id });
-      }
+    // Issue #1971: pick a NON-archived swimlane so a card added in List view
+    // never lands in an archived (invisible-in-swimlane-view) swimlane. The pure
+    // pickDefaultSwimlane helper prefers the first active swimlane, falling back
+    // to the first one only when every swimlane is archived (so callers reading
+    // ._id never crash).
+    const { pickDefaultSwimlane } = require('./lib/defaultSwimlane');
+    let result = pickDefaultSwimlane(ReactiveCache.getSwimlanes({ boardId: this._id }));
+    if (result === undefined && Meteor.isServer && this._id) {
+      // Issue #6382: only the server may auto-create the default swimlane. On
+      // the client this getter runs inside reactive render contexts; when a
+      // board's swimlanes are not yet loaded/subscribed (e.g. the default
+      // subtasks board viewed via "All boards"), getSwimlanes() is transiently
+      // empty and every re-render would insert another empty swimlane —
+      // producing thousands of them and freezing the browser. The server
+      // creates the default swimlane at board creation and self-heals here.
+      // Issue #6429: self-heal via a DETERMINISTIC _id so concurrent/repeated
+      // calls are idempotent (see ensureDefaultSwimlaneId).
+      result = this.ensureDefaultSwimlaneId();
     }
     return result;
   },
 
-  async getDefaultSwimlineAsync() {
-    let result = await ReactiveCache.getSwimlane({ boardId: this._id });
-    if (result === undefined) {
-      const existingSwimlanes = await ReactiveCache.getSwimlanes({ boardId: this._id });
-      if (existingSwimlanes.length > 0) {
-        result = existingSwimlanes[0];
-      } else {
-        const title = getTranslatedString('default', 'Default');
-        await Swimlanes.insertAsync({
-          title,
-          boardId: this._id,
-        });
-        result = await ReactiveCache.getSwimlane({ boardId: this._id });
+  // Deterministic _id for a board's auto-created default swimlane. Because _id
+  // carries a unique index, an upsert on it can create AT MOST ONE default
+  // swimlane per board, no matter how many times (or how concurrently) the
+  // self-heal runs — the fix for #6429 (a check-then-insert race in the getters
+  // below produced 30 000+ empty "Default" swimlanes on some boards).
+  defaultSwimlaneId() {
+    const { defaultSwimlaneId } = require('./lib/defaultSwimlane');
+    return defaultSwimlaneId(this._id);
+  },
+
+  ensureDefaultSwimlaneId() {
+    const defaultId = this.defaultSwimlaneId();
+    // Upsert keyed on the deterministic _id: concurrent self-heals collide on
+    // the _id unique index, so only one insert wins instead of racing the
+    // check-then-insert and each inserting a new swimlane.
+    //
+    // It must be the ASYNC upsert. Meteor 3 removed the synchronous one on the
+    // server, and calling it threw
+    //   Error: update is not available on the server. Please use updateAsync()
+    // out of every `moveSwimlane` that reached this self-heal - the failure an
+    // admin kept seeing in Admin Panel / Problems / Database problems. This
+    // getter is SYNCHRONOUS and cannot await, so the upsert is started and not
+    // waited for: the self-heal still happens, and this call returns whatever
+    // is in the cache, which the caller already had to handle (it was undefined
+    // before the self-heal existed too). A caller that needs the swimlane back
+    // in the same tick uses ensureDefaultSwimlaneIdAsync().
+    try {
+      const p = Swimlanes.upsertAsync(
+        { _id: defaultId },
+        { $setOnInsert: this.defaultSwimlaneFields() },
+      );
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    } catch (e) {
+      if (process.env.DEBUG === 'true') {
+        // eslint-disable-next-line no-console
+        console.warn('default swimlane self-heal failed:', e && e.message);
       }
+    }
+    return ReactiveCache.getSwimlane({ _id: defaultId });
+  },
+
+  async ensureDefaultSwimlaneIdAsync() {
+    const defaultId = this.defaultSwimlaneId();
+    await Swimlanes.upsertAsync(
+      { _id: defaultId },
+      { $setOnInsert: this.defaultSwimlaneFields() },
+    );
+    return (
+      (await ReactiveCache.getSwimlane({ _id: defaultId })) ||
+      (Meteor.isServer ? await Swimlanes.findOneAsync(defaultId) : undefined)
+    );
+  },
+
+  // Fields for an upsert-inserted default swimlane. archived/type must be set
+  // explicitly: their schema autoValue/defaultValue only fire on isInsert, not
+  // on the isUpsert path used here, so omitting them fails required validation.
+  defaultSwimlaneFields() {
+    const { defaultSwimlaneFields } = require('./lib/defaultSwimlane');
+    // Use fallback title if i18n is not available (e.g., during migration).
+    return defaultSwimlaneFields(this._id, getTranslatedString('default', 'Default'));
+  },
+
+  async getDefaultSwimlineAsync() {
+    // Issue #1971: prefer a NON-archived swimlane (see getDefaultSwimline).
+    const { pickDefaultSwimlane } = require('./lib/defaultSwimlane');
+    // On the server this can run immediately after creating a helper board and
+    // its first swimlane. The reactive cache may still hold the pre-insert
+    // empty result, so use the authoritative collection in server methods.
+    const swimlanes = Meteor.isServer
+      ? await Swimlanes.find({ boardId: this._id }).fetchAsync()
+      : await ReactiveCache.getSwimlanes({ boardId: this._id });
+    let result = pickDefaultSwimlane(swimlanes);
+    if (result === undefined && Meteor.isServer && this._id) {
+      // Issue #6382: never auto-create swimlanes from the client (see
+      // getDefaultSwimline) — only the server may insert the default one.
+      // Issue #6429: idempotent deterministic-_id upsert instead of a racy
+      // check-then-insert that produced thousands of empty swimlanes.
+      result = await this.ensureDefaultSwimlaneIdAsync();
     }
     return result;
   },
@@ -1670,44 +2873,37 @@ Boards.helpers({
     return await incrementCounterAsync(counterName);
   },
 
-  cardsDueInBetween(start, end) {
-    const ret = ReactiveCache.getCards({
-      boardId: this._id,
-      dueAt: { $gte: start, $lte: end },
-    });
+  // #5656: the Calendar view must honor the active board Filter (member /
+  // assignee / due-date / label / custom-field). `filterSelector` is the object
+  // produced by Filter._getMongoSelector() on the client (pass a falsy/empty
+  // value, e.g. from the server or when no filter is active). It is always
+  // ANDed in via combineWithFilter so it can never be overwritten by — nor
+  // collide with — the top-level `$or` these interval selectors use.
+  cardsDueInBetween(start, end, filterSelector) {
+    const ret = ReactiveCache.getCards(
+      cardsDueInBetweenSelector(this._id, start, end, filterSelector),
+    );
     return ret;
   },
 
-  cardsInInterval(start, end) {
-    const ret = ReactiveCache.getCards({
-      boardId: this._id,
-      $or: [
-        {
-          startAt: {
-            $lte: start,
-          },
-          endAt: {
-            $gte: start,
-          },
-        },
-        {
-          startAt: {
-            $lte: end,
-          },
-          endAt: {
-            $gte: end,
-          },
-        },
-        {
-          startAt: {
-            $gte: start,
-          },
-          endAt: {
-            $lte: end,
-          },
-        },
-      ],
-    });
+  cardsInInterval(start, end, filterSelector) {
+    const ret = ReactiveCache.getCards(
+      cardsInIntervalSelector(this._id, start, end, filterSelector),
+    );
+    return ret;
+  },
+
+  cardsReceivedInBetween(start, end, filterSelector) {
+    const ret = ReactiveCache.getCards(
+      cardsReceivedInBetweenSelector(this._id, start, end, filterSelector),
+    );
+    return ret;
+  },
+
+  cardsEndInBetween(start, end, filterSelector) {
+    const ret = ReactiveCache.getCards(
+      cardsEndInBetweenSelector(this._id, start, end, filterSelector),
+    );
     return ret;
   },
 
@@ -1717,6 +2913,13 @@ Boards.helpers({
 
   isTemplatesBoard() {
     return this.type === 'template-container';
+  },
+
+  // #5850: any template board (a single template board or the templates
+  // container). On these, sharing is group-only (orgs/teams/domains); the
+  // members tab shows only the original creator as an individual.
+  isAnyTemplateBoard() {
+    return this.type === 'template-board' || this.type === 'template-container';
   },
 
   async archive() {
@@ -1735,8 +2938,40 @@ Boards.helpers({
     return await Boards.updateAsync(this._id, { $set: { description } });
   },
 
-  async setColor(color) {
-    return await Boards.updateAsync(this._id, { $set: { color } });
+  // #1566: the board admin's announcement (Boards.allow limits it to admins).
+  async setAnnouncement(enabled, body) {
+    const { cleanBoardAnnouncement } = require('/models/lib/boardAnnouncement');
+    return await Boards.updateAsync(this._id, { $set: { announcement: cleanBoardAnnouncement(enabled, body) } });
+  },
+
+  async setColor(color, customThemeColors) {
+    // docs/Theme/Theme.md: flat/clear themes may carry custom colors; validate the
+    // count + category here and store only when valid, else clear any previous set.
+    const modifier = { $set: { color } };
+    if (customThemeColors && isValidCustomColors(color, customThemeColors)) {
+      modifier.$set.customThemeColors = customThemeColors;
+    } else {
+      modifier.$unset = { customThemeColors: '' };
+    }
+    return await Boards.updateAsync(this._id, modifier);
+  },
+
+  // Board-level override of the 3-tier Notification Settings system (see
+  // models/lib/notificationSettings.js): admin default -> board override ->
+  // member override. `service` is 'tray' or 'email'; `value` is true/false to
+  // override, or null/undefined to clear the override and fall back to the
+  // Admin Panel default.
+  async setNotifyOverride(service, value) {
+    const currentUser = await ReactiveCache.getCurrentUser();
+    if (!(currentUser.isBoardAdmin() || currentUser.isAdmin())) return false;
+    const field = service === 'email' ? 'notifyOverrideEmail'
+      : service === 'tray' ? 'notifyOverrideTray'
+      : null;
+    if (!field) return false;
+    const modifier = value === true || value === false
+      ? { $set: { [field]: value } }
+      : { $unset: { [field]: '' } };
+    return await Boards.updateAsync(this._id, modifier);
   },
 
   async setBackgroundImageURL(backgroundImageURL) {
@@ -1773,29 +3008,50 @@ Boards.helpers({
     return await Boards.updateAsync(this._id, { $set: { permission: visibility } });
   },
 
-  async addLabel(name, color) {
+  async addLabel(name, color, dueAt) {
     if (!this.getLabel(name, color)) {
       const _id = Random.id(6);
-      return await Boards.updateAsync(this._id, { $push: { labels: { _id, name, color } } });
+      const label = { _id, name, color };
+      // #2802: an optional due date turns a label into a "milestone" (e.g.
+      // "Sprint 1" due 2026-01-15) without a separate Milestone object.
+      if (dueAt) label.dueAt = dueAt;
+      return await Boards.updateAsync(this._id, { $push: { labels: label } });
     }
     return null;
   },
 
-  async editLabel(labelId, name, color) {
+  async editLabel(labelId, name, color, dueAt) {
     if (!this.getLabel(name, color)) {
       const labelIndex = this.labelIndex(labelId);
-      return await Boards.updateAsync(this._id, {
+      const update = {
         $set: {
           [`labels.${labelIndex}.name`]: name,
           [`labels.${labelIndex}.color`]: color,
         },
-      });
+      };
+      // #2802: keep a label's "milestone" due date unset unless one is
+      // provided, and clear it explicitly when it is removed in the popup.
+      if (dueAt) {
+        update.$set[`labels.${labelIndex}.dueAt`] = dueAt;
+      } else {
+        update.$unset = { [`labels.${labelIndex}.dueAt`]: '' };
+      }
+      return await Boards.updateAsync(this._id, update);
     }
     return null;
   },
 
   async removeLabel(labelId) {
     return await Boards.updateAsync(this._id, { $pull: { labels: { _id: labelId } } });
+  },
+
+  // #2040: the board's label order, which a list can be sorted by. The same
+  // write - and so the same board-admin permission - as editing a label.
+  async moveLabel(labelId, direction) {
+    const { moveLabel } = require('./lib/labelOrder');
+    const labels = moveLabel(this.labels, labelId, direction);
+    if (labels.every((l, i) => (this.labels || [])[i] === l)) return null;
+    return await Boards.updateAsync(this._id, { $set: { labels } });
   },
 
   async changeOwnership(fromId, toId) {
@@ -1808,8 +3064,11 @@ Boards.helpers({
   async addMember(memberId) {
     const memberIndex = this.memberIndex(memberId);
     if (memberIndex >= 0) {
+      // Adding a member by hand is a direct membership from now on (#4178): a
+      // team that brought them can no longer take it away.
       return await Boards.updateAsync(this._id, {
         $set: { [`members.${memberIndex}.isActive`]: true },
+        $unset: { [`members.${memberIndex}.grantedBy`]: '' },
       });
     }
 
@@ -1833,6 +3092,17 @@ Boards.helpers({
 
   async removeMember(memberId) {
     const memberIndex = this.memberIndex(memberId);
+    // #5330: a member entry whose user account has been deleted still appears
+    // in board.members but has no Users document. Such an orphaned entry can
+    // never be a meaningful (active) admin and the deactivate-by-index flow
+    // below would only leave it lingering, so hard-remove it by userId. This
+    // works whether or not the user still exists since matching is by userId.
+    if (memberIndex < 0 || !ReactiveCache.getUser(memberId)) {
+      return await Boards.updateAsync(this._id, {
+        $set: { members: pullMemberById(this.members, memberId) },
+      });
+    }
+
     const allowRemove =
       !this.members[memberIndex].isAdmin || this.activeAdmins().length > 1;
     if (!allowRemove) {
@@ -1846,6 +3116,8 @@ Boards.helpers({
         [`members.${memberIndex}.isActive`]: false,
         [`members.${memberIndex}.isAdmin`]: false,
       },
+      // A board admin's removal is final (#4178): no team brings them back.
+      $unset: { [`members.${memberIndex}.grantedBy`]: '' },
     });
   },
 
@@ -1876,6 +3148,11 @@ Boards.helpers({
         [`members.${memberIndex}.isCommentAssignedOnly`]: isCommentAssignedOnly,
         [`members.${memberIndex}.isReadOnly`]: isReadOnly,
         [`members.${memberIndex}.isReadAssignedOnly`]: isReadAssignedOnly,
+      },
+      // A built-in role replaces a custom one (#3022), which would otherwise
+      // keep deciding what the member may do.
+      $unset: {
+        [`members.${memberIndex}.customRoleId`]: '',
       },
     });
   },
@@ -1912,6 +3189,12 @@ Boards.helpers({
     return await Boards.updateAsync(this._id, { $set: { allowsShowListsOnMinicard } });
   },
 
+  async setAllowsSwimlaneNameOnMinicard(allowsSwimlaneNameOnMinicard) {
+    return await Boards.updateAsync(this._id, {
+      $set: { allowsSwimlaneNameOnMinicard },
+    });
+  },
+
   async setAllowsChecklistAtMinicard(allowsChecklistAtMinicard) {
     return await Boards.updateAsync(this._id, { $set: { allowsChecklistAtMinicard } });
   },
@@ -1938,6 +3221,10 @@ Boards.helpers({
 
   async setAllowsComments(allowsComments) {
     return await Boards.updateAsync(this._id, { $set: { allowsComments } });
+  },
+
+  async setAllowsCommentsOnMinicard(allowsCommentsOnMinicard) {
+    return await Boards.updateAsync(this._id, { $set: { allowsCommentsOnMinicard } });
   },
 
   async setAllowsDescriptionTitle(allowsDescriptionTitle) {
@@ -1985,6 +3272,15 @@ Boards.helpers({
     return await this.setAllowsCardSortingByNumberOnMinicard(allowsCardSortingByNumberOnMinicard);
   },
 
+  // #4256: this board's own default for showing label text on minicards.
+  getShowLabelText() {
+    return this.showLabelText !== false;
+  },
+
+  async setShowLabelText(showLabelText) {
+    return await Boards.updateAsync(this._id, { $set: { showLabelText } });
+  },
+
   async setAllowsActivities(allowsActivities) {
     return await Boards.updateAsync(this._id, { $set: { allowsActivities } });
   },
@@ -1993,8 +3289,281 @@ Boards.helpers({
     return await Boards.updateAsync(this._id, { $set: { allowsReceivedDate } });
   },
 
+  async setAllowsSpentTime(allowsSpentTime) {
+    return await Boards.updateAsync(this._id, { $set: { allowsSpentTime } });
+  },
+
+  async setAllowsSpentTimeOnMinicard(allowsSpentTimeOnMinicard) {
+    return await Boards.updateAsync(this._id, { $set: { allowsSpentTimeOnMinicard } });
+  },
+
+  // #6688: the card sections and minicard badges that had no toggle before.
+  async setAllowsStickers(allowsStickers) {
+    return await Boards.updateAsync(this._id, { $set: { allowsStickers } });
+  },
+
+  async setAllowsStickersOnMinicard(allowsStickersOnMinicard) {
+    return await Boards.updateAsync(this._id, { $set: { allowsStickersOnMinicard } });
+  },
+
+  async setAllowsLocation(allowsLocation) {
+    return await Boards.updateAsync(this._id, { $set: { allowsLocation } });
+  },
+
+  async setAllowsDependencies(allowsDependencies) {
+    return await Boards.updateAsync(this._id, { $set: { allowsDependencies } });
+  },
+
+  async setAllowsDependenciesOnMinicard(allowsDependenciesOnMinicard) {
+    return await Boards.updateAsync(this._id, { $set: { allowsDependenciesOnMinicard } });
+  },
+
+  async setAllowsFlowtime(allowsFlowtime) {
+    return await Boards.updateAsync(this._id, { $set: { allowsFlowtime } });
+  },
+
+  async setAllowsPomodoro(allowsPomodoro) {
+    return await Boards.updateAsync(this._id, { $set: { allowsPomodoro } });
+  },
+
+  async setAllowsVote(allowsVote) {
+    return await Boards.updateAsync(this._id, { $set: { allowsVote } });
+  },
+
+  async setAllowsVoteOnMinicard(allowsVoteOnMinicard) {
+    return await Boards.updateAsync(this._id, { $set: { allowsVoteOnMinicard } });
+  },
+
+  async setAllowsPoker(allowsPoker) {
+    return await Boards.updateAsync(this._id, { $set: { allowsPoker } });
+  },
+
+  async setAllowsPokerOnMinicard(allowsPokerOnMinicard) {
+    return await Boards.updateAsync(this._id, { $set: { allowsPokerOnMinicard } });
+  },
+
+  async setAllowsTextNotes(allowsTextNotes) {
+    return await Boards.updateAsync(this._id, { $set: { allowsTextNotes } });
+  },
+
+  async setAllowsCommentCountOnMinicard(allowsCommentCountOnMinicard) {
+    return await Boards.updateAsync(this._id, { $set: { allowsCommentCountOnMinicard } });
+  },
+
+  getRestrictCommentEditing() {
+    return !!this.restrictCommentEditing;
+  },
+
+  async setRestrictCommentEditing(restrictCommentEditing) {
+    return await Boards.updateAsync(this._id, {
+      $set: { restrictCommentEditing: !!restrictCommentEditing },
+    });
+  },
+
+  getAllowsPersonalListWidth() {
+    return !!this.allowsPersonalListWidth;
+  },
+
+  async setAllowsPersonalListWidth(allowsPersonalListWidth) {
+    return await Boards.updateAsync(this._id, {
+      $set: { allowsPersonalListWidth: !!allowsPersonalListWidth },
+    });
+  },
+
+  getAutoWidth() {
+    return !!this.autoWidth;
+  },
+
+  // #3847: board-wide sticky list headers, toggled from the List hamburger
+  // menu (see server/models/users.js#setStickyListHeaders).
+  getStickyListHeaders() {
+    return !!this.stickyListHeaders;
+  },
+
+  async setStickyListHeaders(stickyListHeaders) {
+    return await Boards.updateAsync(this._id, {
+      $set: { stickyListHeaders: !!stickyListHeaders },
+    });
+  },
+
+  async setAutoWidth(autoWidth) {
+    return await Boards.updateAsync(this._id, {
+      $set: { autoWidth: !!autoWidth },
+    });
+  },
+
+  getListWidthResizeLocked() {
+    return !!this.listWidthResizeLocked;
+  },
+
+  async setListWidthResizeLocked(listWidthResizeLocked) {
+    return await Boards.updateAsync(this._id, {
+      $set: { listWidthResizeLocked: !!listWidthResizeLocked },
+    });
+  },
+
+  hasSharedListHeaders() {
+    return this.sharedListHeaders === true;
+  },
+
+  async setSharedListHeaders(sharedListHeaders) {
+    return await Boards.updateAsync(this._id, { $set: { sharedListHeaders: !!sharedListHeaders } });
+  },
+
+  getSwimlaneHeightResizeLocked() {
+    return !!this.swimlaneHeightResizeLocked;
+  },
+
+  async setSwimlaneHeightResizeLocked(swimlaneHeightResizeLocked) {
+    return await Boards.updateAsync(this._id, {
+      $set: { swimlaneHeightResizeLocked: !!swimlaneHeightResizeLocked },
+    });
+  },
+
+  // Board Settings / Board View. Both setters apply the pure modifiers of
+  // models/lib/boardViewSettings.js and are called from the popup the way
+  // setSwimlaneHeightResizeLocked is; Boards.allow's update rule
+  // (server/permissions/boards.js) is what limits them to a board admin.
+  // A null modifier is a refused click (hiding the default view, an unknown
+  // view) and writes nothing.
+  isBoardViewShown(view, visibility) {
+    return boardViewSettings.isBoardViewShown(this, view, visibility);
+  },
+
+  defaultBoardView(visibility) {
+    return boardViewSettings.defaultBoardView(this, visibility);
+  },
+
+  async setBoardViewShown(view, visibility, shown) {
+    const $set = boardViewSettings.showBoardViewModifier(this, view, visibility, shown);
+    if (!$set) return false;
+    return await Boards.updateAsync(this._id, { $set });
+  },
+
+  async setDefaultBoardView(view, visibility) {
+    const $set = boardViewSettings.defaultBoardViewModifier(this, view, visibility);
+    if (!$set) return false;
+    return await Boards.updateAsync(this._id, { $set });
+  },
+
+  // The up/down arrows of Board Settings / Board View. Re-reads this
+  // board's current order, so two quick clicks each move from where the
+  // previous one left it; a no-op (first row up, last row down) writes
+  // nothing.
+  // Drag and drop: the shown rows in their dropped order (boardViewSettings.js
+  // reorderVisibleBoardViews); a drop that changes nothing writes nothing.
+  async setVisibleBoardViewOrder(visibleOrder, allowView) {
+    const order = boardViewSettings.reorderVisibleBoardViews(this.boardViewOrder, visibleOrder, allowView);
+    const before = boardViewSettings.normalizeBoardViewOrder(this.boardViewOrder);
+    if (order.every((v, i) => v === before[i])) return false;
+    return await Boards.updateAsync(this._id, { $set: { boardViewOrder: order } });
+  },
+
+  // `allowView` (#6736): the instance's disabled views are not rows, so the
+  // move steps over them.
+  async moveBoardView(view, direction, allowView) {
+    const order = boardViewSettings.moveBoardView(this.boardViewOrder, view, direction, allowView);
+    const before = boardViewSettings.normalizeBoardViewOrder(this.boardViewOrder);
+    if (order.every((v, i) => v === before[i])) return false;
+    return await Boards.updateAsync(this._id, { $set: { boardViewOrder: order } });
+  },
+
+  getSameWidthForAllLists() {
+    return !!this.sameWidthForAllLists;
+  },
+
+  async setSameWidthForAllLists(sameWidthForAllLists) {
+    return await Boards.updateAsync(this._id, {
+      $set: { sameWidthForAllLists: !!sameWidthForAllLists },
+    });
+  },
+
+  // #2489: WIP limit groups - see the schema comment above for what these are.
+  getWipLimitGroups() {
+    return Array.isArray(this.wipLimitGroups) ? this.wipLimitGroups : [];
+  },
+
+  async addWipLimitGroup(listIds, limit, name = '') {
+    const group = {
+      _id: Random.id(6),
+      name: name || '',
+      listIds: Array.isArray(listIds) ? listIds : [],
+      limit: Number.isFinite(limit) && limit > 0 ? limit : 1,
+      enabled: true,
+    };
+    await Boards.updateAsync(this._id, {
+      $push: { wipLimitGroups: group },
+    });
+    return group._id;
+  },
+
+  async updateWipLimitGroup(groupId, fields = {}) {
+    if (Meteor.isClient) {
+      return Meteor.callAsync('updateWipLimitGroup', this._id, groupId, fields);
+    }
+    const changes = {};
+    if (Array.isArray(fields.listIds)) changes.listIds = fields.listIds;
+    if (Number.isFinite(fields.limit) && fields.limit > 0) changes.limit = fields.limit;
+    if (typeof fields.name === 'string') changes.name = fields.name;
+    if (typeof fields.enabled === 'boolean') changes.enabled = fields.enabled;
+    const groups = this.getWipLimitGroups();
+    if (!Object.keys(changes).length || !groups.some(group => group._id === groupId)) return 0;
+    // Compare the existing array to avoid overwriting a concurrent edit. This
+    // also works on database backends without positional array updates.
+    return Boards.updateAsync(
+      { _id: this._id, wipLimitGroups: groups },
+      { $set: { wipLimitGroups: groups.map(group =>
+        group._id === groupId ? { ...group, ...changes } : group) } },
+    );
+  },
+
+  async removeWipLimitGroup(groupId) {
+    return await Boards.updateAsync(this._id, {
+      $pull: { wipLimitGroups: { _id: groupId } },
+    });
+  },
+
+  getSameWidthForAllListsValue() {
+    return this.sameWidthForAllListsValue;
+  },
+
+  async setSameWidthForAllListsValue(sameWidthForAllListsValue) {
+    return await Boards.updateAsync(this._id, {
+      $set: { sameWidthForAllListsValue: sameWidthForAllListsValue },
+    });
+  },
+
   async setAllowsCardCounterList(allowsCardCounterList) {
     return await Boards.updateAsync(this._id, { $set: { allowsCardCounterList } });
+  },
+
+  async setAskForMoveReason(askForMoveReason) {
+    return Boards.updateAsync(this._id, { $set: { askForMoveReason } });
+  },
+  async setCardAging(cardAging) {
+    return await Boards.updateAsync(this._id, { $set: { cardAging } });
+  },
+
+
+  async setCardAgingDays(cardAgingDays1, cardAgingDays2, cardAgingDays3) {
+    return await Boards.updateAsync(this._id, {
+      $set: { cardAgingDays1, cardAgingDays2, cardAgingDays3 },
+    });
+  },
+
+  // #3256: the Map view's image, or null to remove it.
+  async setMapImage(attachmentId) {
+    return await Boards.updateAsync(this._id, typeof attachmentId === 'string' && attachmentId
+      ? { $set: { mapImageAttachmentId: attachmentId } }
+      : { $unset: { mapImageAttachmentId: '' } });
+  },
+
+  // Deck-style auto-archive: a whole number of days, or null/'' for off.
+  async setAutoArchiveInactiveDays(value) {
+    const days = normalizeAutoArchiveDays(value);
+    return await Boards.updateAsync(this._id, days
+      ? { $set: { autoArchiveInactiveDays: days } }
+      : { $unset: { autoArchiveInactiveDays: '' } });
   },
 
   async setAllowsBoardMemberList(allowsBoardMemberList) {
@@ -2014,11 +3583,22 @@ Boards.helpers({
   },
 
   async setSubtasksDefaultBoardId(subtasksDefaultBoardId) {
+    if (Meteor.isServer && subtasksDefaultBoardId) {
+      const { canWriteSubtaskDeposit, recordSubtaskDepositDenial } = require('/server/lib/subtaskDepositAccess');
+      if (!(await canWriteSubtaskDeposit(Meteor.userId(), subtasksDefaultBoardId))) {
+        recordSubtaskDepositDenial('setSubtasksDefaultBoardId');
+        throw new Meteor.Error('not-authorized');
+      }
+    }
     return await Boards.updateAsync(this._id, { $set: { subtasksDefaultBoardId } });
   },
 
   async setSubtasksDefaultListId(subtasksDefaultListId) {
     return await Boards.updateAsync(this._id, { $set: { subtasksDefaultListId } });
+  },
+
+  async setSubtasksDefaultSwimlaneId(subtasksDefaultSwimlaneId) {
+    return await Boards.updateAsync(this._id, { $set: { subtasksDefaultSwimlaneId } });
   },
 
   async setPresentParentTask(presentParentTask) {
@@ -2060,23 +3640,39 @@ Boards.uniqueTitle = async title => {
 
 // Non-async: returns data on client, Promise on server.
 // Server callers must await.
+// Boards matching `selector` that the user may search. `options.includePublic:
+// false` drops the "anybody may open this" clause, the same choice as
+// Boards.userBoards - this is what resolves a `board:name` filter, so it has to
+// scope the same way the search around it does, or the filter would name a board
+// the search cannot return anything from.
 Boards.userSearch = (
   userId,
   selector = {},
   projection = {},
-  // includeArchived = false,
+  options = {},
 ) => {
-  // if (!includeArchived) {
-  //   selector.archived = false;
-  // }
-  selector.$or = [{ permission: 'public' }];
+  selector.$or = options.includePublic === false ? [] : withoutMembershipSelectors(!!userId);
 
   if (userId) {
     selector.$or.push({ members: { $elemMatch: { userId, isActive: true } } });
   }
+  // An anonymous caller with public boards excluded can reach nothing, and an
+  // empty `$or` matches NOTHING in Mongo but is an error in some backends - so
+  // say it explicitly rather than leaving a selector that means "no boards" by
+  // accident.
+  if (selector.$or.length === 0) {
+    return Meteor.isServer ? Promise.resolve([]) : [];
+  }
   return ReactiveCache.getBoards(selector, projection);
 };
 
+// The ways a user reaches a board. `{ permission: 'public' }` is the odd one out:
+// it is not a relationship to the user at all, it is "anybody may open this". That
+// belongs in the boards LIST - a public board is meant to be discoverable - but not
+// in a search over "all boards", where it means every public board on the instance
+// is searched, and a hit lands the user in somebody else's board they have no part
+// in. `options.includePublic: false` leaves it out (see Boards.userBoardIds).
+//
 // Non-async: returns data on client (for Blaze templates), Promise on server.
 // Server callers must await.
 Boards.userBoards = (
@@ -2084,7 +3680,9 @@ Boards.userBoards = (
   archived = false,
   selector = {},
   projection = {},
+  options = {},
 ) => {
+  const includePublic = options.includePublic !== false;
   const _buildSelector = (user) => {
     if (!user) return null;
     if (typeof archived === 'boolean') {
@@ -2093,12 +3691,22 @@ Boards.userBoards = (
     if (!selector.type) {
       selector.type = 'board';
     }
-    selector.$or = [
-      { permission: 'public' },
-      { members: { $elemMatch: { userId, isActive: true } } },
-      { orgs: { $elemMatch: { orgId: { $in: user.orgIds() }, isActive: true } } },
-      { teams: { $elemMatch: { teamId: { $in: user.teamIds() }, isActive: true } } },
-    ];
+    // #5582: never surface internal helper boards whose title is wrapped in
+    // carets (e.g. `^Subtasks^`). Only set this when the caller did not already
+    // constrain the title.
+    if (selector.title === undefined) {
+      selector.title = notHelperBoardTitle();
+    }
+    // GHSA-gwc4-fw7p-gw58: the same builder the `board` publication uses, so
+    // "which boards may this user see" has one answer and cannot drift.
+    selector.$or = boardVisibilitySelectors({
+      userId,
+      orgIds: user.orgIds(),
+      teamIds: user.teamIds(),
+      emailDomains: user.emailDomains(),
+      includePublic,
+      membersOnly: options.membersOnly === true,
+    });
     return selector;
   };
 
@@ -2114,10 +3722,10 @@ Boards.userBoards = (
   return ReactiveCache.getBoards(selector, projection);
 };
 
-Boards.userBoardIds = async (userId, archived = false, selector = {}) => {
+Boards.userBoardIds = async (userId, archived = false, selector = {}, options = {}) => {
   const boards = await Boards.userBoards(userId, archived, selector, {
     fields: { _id: 1 },
-  });
+  }, options);
   return boards.map(board => {
     return board._id;
   });
@@ -2142,3 +3750,13 @@ Boards.labelColors = () => {
 };
 
 export default Boards;
+
+// Prevent direct DDP writes bypassing Scrum reference and lifecycle validation.
+if (Meteor.isServer) {
+  Boards.deny({
+    insert(userId, doc) { return doc.scrum !== undefined || doc.scrumRevision !== undefined || doc.scrumImportLosses !== undefined; },
+    update(userId, doc, fields) {
+      return fields.some(field => field === 'scrum' || field.startsWith('scrum.') || field === 'scrumRevision' || field === 'scrumImportLosses' || field.startsWith('scrumImportLosses.'));
+    },
+  });
+}

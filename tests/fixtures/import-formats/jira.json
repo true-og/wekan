@@ -1,0 +1,121 @@
+{
+  "isLast": true,
+  "issues": [
+    {
+      "id": "10001",
+      "key": "AUDIT-1",
+      "fields": {
+        "summary": "Audit task – Å 中文",
+        "description": {
+          "type": "doc",
+          "version": 1,
+          "content": [
+            {
+              "type": "paragraph",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "First line: café, comma, and \"quotes\"."
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Second line: 日本語."
+                }
+              ]
+            }
+          ]
+        },
+        "status": {
+          "name": "Audit list"
+        },
+        "project": {
+          "name": "Audit Jira"
+        },
+        "labels": [
+          "Audit label"
+        ],
+        "duedate": "2026-09-30",
+        "reporter": {
+          "accountId": "dummy",
+          "displayName": "Dummy Reporter"
+        },
+        "comment": {
+          "comments": [
+            {
+              "id": "10002",
+              "body": {
+                "type": "doc",
+                "version": 1,
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Audit comment"
+                      }
+                    ]
+                  }
+                ]
+              },
+              "author": {
+                "accountId": "jira-acc",
+                "displayName": "jira-user"
+              },
+              "created": "2026-09-30T12:34:56.000+0000"
+            }
+          ]
+        },
+        "attachment": [
+          {
+            "id": "10003",
+            "filename": "audit.txt",
+            "size": 25,
+            "mimeType": "text/plain",
+            "content": "https://example.invalid/audit.txt"
+          }
+        ],
+        "priority": {
+          "name": "High"
+        },
+        "components": [
+          {
+            "name": "Audit component"
+          }
+        ],
+        "fixVersions": [
+          {
+            "name": "1.0"
+          }
+        ],
+        "customfield_10020": 5,
+        "customfield_10030": {
+          "value": "Blue"
+        },
+        "customfield_10040": null,
+        "subtasks": [
+          {
+            "key": "AUDIT-9",
+            "fields": {
+              "summary": "Audit subtask",
+              "status": {
+                "statusCategory": {
+                  "key": "done"
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "names": {
+    "customfield_10020": "Audit points",
+    "customfield_10030": "Audit team"
+  }
+}

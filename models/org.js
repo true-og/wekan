@@ -5,7 +5,7 @@ const { SimpleSchema } = require('/imports/simpleSchema');
 const Org = new Mongo.Collection('org');
 
 /**
- * A Organization in Wekan. A Enterprise in Trello.
+ * A Organization in WeKan. A Enterprise in Trello.
  */
 Org.attachSchema(
   new SimpleSchema({
@@ -54,6 +54,121 @@ Org.attachSchema(
        */
       type: Boolean,
       optional: true,
+    },
+    orgSharedTemplates: {
+      /**
+       * #5850: members may drag personal Template Boards onto this org to share
+       * (per-org form of "Shared Templates for Organizations"). Off by default.
+       */
+      type: Boolean,
+      optional: true,
+    },
+    orgPropagateMembersToBoards: {
+      /**
+       * #4737: add this org's members to the boards that list this org. Off by default.
+       */
+      type: Boolean,
+      optional: true,
+    },
+    orgSyncMembersFromAuth: {
+      /**
+       * #4737: this org's membership is maintained by the authentication
+       * provider's group/membership sync (LDAP, OAuth2/OIDC, SAML, etc.). Off by default.
+       */
+      type: Boolean,
+      optional: true,
+    },
+    orgDomains: {
+      /**
+       * Multitenancy option D (docs/Design/Multitenancy/Multitenancy.md): the
+       * hostname(s) this Organization is served on, free text separated by commas,
+       * semicolons or whitespace - e.g. "a.example.com, kanban.example.org". A
+       * request whose host matches one of these is that tenant's request, and the
+       * org's branding below replaces the instance branding for it. Empty (the
+       * default) means the org is not a tenant and nothing changes.
+       * Only read when the deployment sets MULTITENANCY=true.
+       */
+      type: String,
+      optional: true,
+      max: 1000,
+    },
+    orgDomainsRequested: {
+      /**
+       * Hostnames this Organization's own admin asked for and a site admin has
+       * not yet assigned (2026-10-02: only a site admin assigns a hostname).
+       * Not in effect until then.
+       */
+      type: String,
+      optional: true,
+      max: 1000,
+    },
+    orgProductName: {
+      /**
+       * Per-tenant branding. Each of these overrides the SAME-named instance
+       * setting of Admin Panel / Settings / Visibility for this tenant's requests,
+       * and an empty one leaves the instance value alone - so a tenant overrides
+       * only what it sets. See models/lib/tenants.js BRANDING_FIELDS.
+       */
+      type: String,
+      optional: true,
+      max: 255,
+    },
+    orgThemeColor: {
+      /**
+       * The site theme for this Organization's hosts - the layer between WeKan's
+       * default theme and a user's own override (docs/Theme/Theme.md). Set in
+       * Admin Panel / Settings / Visibility / Change color.
+       */
+      type: String,
+      optional: true,
+      max: 255,
+    },
+    orgThemeCustomColors: {
+      /**
+       * The custom colours of that theme, for the flat (1 colour) and clear
+       * (2 colours, a gradient) categories.
+       */
+      type: Array,
+      optional: true,
+    },
+    'orgThemeCustomColors.$': {
+      type: String,
+      optional: true,
+    },
+    orgCustomLoginLogoImageUrl: {
+      type: String,
+      optional: true,
+      max: 1000,
+    },
+    orgCustomLoginLogoLinkUrl: {
+      type: String,
+      optional: true,
+      max: 1000,
+    },
+    orgTextBelowCustomLoginLogo: {
+      type: String,
+      optional: true,
+      max: 1000,
+    },
+    orgCustomTopLeftCornerLogoImageUrl: {
+      type: String,
+      optional: true,
+      max: 1000,
+    },
+    orgCustomTopLeftCornerLogoLinkUrl: {
+      type: String,
+      optional: true,
+      max: 1000,
+    },
+    orgCustomHelpLinkUrl: {
+      type: String,
+      optional: true,
+      max: 1000,
+    },
+    orgLegalNotice: {
+      type: String,
+      optional: true,
+      max: 1000,
     },
     createdAt: {
       /**

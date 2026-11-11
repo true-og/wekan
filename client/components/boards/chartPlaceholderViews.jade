@@ -1,0 +1,53 @@
+//- The 10 board report charts (docs/Features/Board-Header/Board-Views/Charts/charts.tsv), each a thin
+//  wrapper around the shared boardChartView (charts/boardCharts.jade/.js):
+//  export buttons, the chart's title, a small CSS-bar/table visualization and
+//  the underlying data table - all driven from the `boardChartData` server
+//  method, keyed by chartKey.
+
+template(name="dashboardView")
+  +boardChartView(chartKey="dashboard" titleKey="board-view-dashboard")
+
+template(name="burndownView")
+  +boardChartView(chartKey="burndown" titleKey="board-view-burndown")
+
+template(name="burnupView")
+  +boardChartView(chartKey="burnup" titleKey="board-view-burnup")
+
+template(name="cumulativeFlowView")
+  +boardChartView(chartKey="cumulativeFlow" titleKey="board-view-cumulative-flow")
+
+template(name="controlChartView")
+  +boardChartView(chartKey="controlChart" titleKey="board-view-control-chart")
+
+template(name="cycleTimeView")
+  +boardChartView(chartKey="cycleTime" titleKey="board-view-cycle-time")
+
+template(name="flowEfficiencyView")
+  +boardChartView(chartKey="flowEfficiency" titleKey="board-view-flow-efficiency")
+
+template(name="leadTimeView")
+  +boardChartView(chartKey="leadTime" titleKey="board-view-lead-time")
+
+template(name="throughputHistogramView")
+  +boardChartView(chartKey="throughputHistogram" titleKey="board-view-throughput-histogram")
+
+template(name="wipRunView")
+  +boardChartView(chartKey="wipRun" titleKey="board-view-wip-run")
+
+template(name="pulseView")
+  +boardChartView(chartKey="pulse" titleKey="board-view-pulse")
+
+template(name="agingWipView")
+  +boardChartView(chartKey="agingWip" titleKey="board-view-aging-wip")
+
+template(name="blockerAnalysisView")
+  +boardChartView(chartKey="blockerAnalysis" titleKey="board-view-blocker-analysis")
+
+template(name="monteCarloView")
+  +boardChartView(chartKey="monteCarlo" titleKey="board-view-monte-carlo")
+
+template(name="processBehaviorView")
+  +boardChartView(chartKey="processBehavior" titleKey="board-view-process-behavior")
+
+template(name="sizeCycleTimeView")
+  +boardChartView(chartKey="sizeCycleTime" titleKey="board-view-size-cycle-time")

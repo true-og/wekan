@@ -1,8 +1,9 @@
 template(name="listBody")
-  .list-body(class="{{#unless isVerticalScrollbars}}no-scrollbars{{/unless}}")
+  .list-body(class="{{#unless isVerticalScrollbars}}no-scrollbars{{/unless}}"
+    role="region" tabindex="0" aria-label="{{_ 'list'}}: {{title}}")
     .minicards.clearfix.js-minicards(class="{{#if reachedWipLimit}}js-list-full{{/if}}")
       +inlinedForm(autoclose=false position="top")
-        +addCardForm(listId=_id position="top")
+        +addCardForm(listId=_id swimlaneId=containerSwimlaneId position="top")
       ul.sidebar-list
         each customFieldsSum
           li
@@ -14,25 +15,26 @@ template(name="listBody")
             if $eq customFieldsSum.type "currency"
               +viewer
                 = formattedCurrencyCustomFieldValue(value)
-      each (cardsWithLimit (idOrNull ../../_id))
+      each (cardsWithLimit (idOrNull containerSwimlaneId))
         a.minicard-wrapper.js-minicard(href=originRelativeUrl
+          data-card-id="{{_id}}"
           class="{{#if cardIsSelected}}is-selected{{/if}}"
           class="{{#if MultiSelection.isSelected _id}}is-checked{{/if}}")
           if MultiSelection.isActive
             .materialCheckBox.multi-selection-checkbox.js-toggle-multi-selection(
               class="{{#if MultiSelection.isSelected _id}}is-checked{{/if}}")
           +minicard(this)
-      if (showSpinner (idOrNull ../../_id))
+      if (showSpinner (idOrNull containerSwimlaneId))
         +spinnerList
       if canSeeAddCard
         +inlinedForm(autoclose=false position="bottom")
-          +addCardForm(listId=_id position="bottom")
+          +addCardForm(listId=_id swimlaneId=containerSwimlaneId position="bottom")
         else
           a.open-minicard-composer.js-card-composer.js-open-inlined-form(title="{{_ 'add-card-to-bottom-of-list'}}")
             i.fa.fa-plus
             | {{_ 'add-card'}}
       +inlinedForm(autoclose=false position="bottom")
-        +addCardForm(listId=_id position="bottom")
+        +addCardForm(listId=_id swimlaneId=containerSwimlaneId position="bottom")
 
 template(name="spinnerList")
   .sk-spinner.sk-spinner-list(
@@ -45,16 +47,37 @@ template(name="addCardForm")
     if getLabels
       .minicard-labels
         each getLabels
-          .minicard-label(class="card-label-{{color}}" title="{{name}}")
+          .minicard-label(class="{{labelColorClass color}}" style="{{labelColorStyle color}}" title="{{name}}")
     textarea.minicard-composer-textarea.js-card-title(autofocus dir="auto")
+    +titleDueHint(selector=".js-card-title" field="allowsDueFromTitleOnMinicard")
+    +similarCardsHint(selector=".js-card-title")
+    +multilineTitleChoice(selector=".js-card-title" singular="card" plural="cards")
     if members.get
       .minicard-members.js-minicard-composer-members
         each members.get
           +userAvatar(userId=this)
 
+    //- #3967: an optional "More options" panel lets the description, due
+    //- date and assignees be filled in BEFORE the card is created, so they
+    //- become part of the same Cards.insert call as the title instead of
+    //- separate edits (each of which would fire its own watcher-notification
+    //- email) right after creating the card.
+    if showMoreOptions
+      .add-card-more-options.js-more-options
+        textarea.js-more-options-description(placeholder="{{_ 'description'}}" dir="auto")
+        label {{_ 'due-date'}}
+        +calendarDateInput(fieldClass="js-more-options-due-at" withTime=true)
+        if boardMembersForAssignees
+          label {{_ 'assignees'}}
+          .add-card-more-options-assignees
+            each boardMembersForAssignees
+              label.add-card-more-options-assignee
+                input.js-more-options-assignee(type="checkbox" value="{{userId}}" checked="{{#if isAssignee userId}}checked{{/if}}")
+                +userAvatar(userId=userId)
+
   .add-controls.clearfix
     button.primary.confirm(type="submit") {{_ 'add'}}
-    a.js-close-inlined-form
+    a.js-close-inlined-form(title="{{_ 'close'}}")
       i.fa.fa-times-thin
   .add-controls.clearfix
     unless currentBoard.isTemplatesBoard
@@ -70,6 +93,18 @@ template(name="addCardForm")
           | &nbsp;
           | /
           a.js-card-template {{_ 'template'}}
+    //- #6802: Search / Template / Drawing / More options - while the text adds
+      ONE card, Drawing adds it and draws on it at once, on the whole window,
+      saved as an SVG attachment of the new card.
+    if singleCardTitle
+      span.quiet
+        | &nbsp;
+        | /
+        a.add-card-drawing.js-add-card-drawing(href="#" role="button" title="{{_ 'cardDrawingPopup-title'}}") {{_ 'cardDrawingPopup-title'}}
+    span.quiet
+      | &nbsp;
+      | /
+      a.js-toggle-more-options {{_ 'more-options'}}
 
 template(name="autocompleteLabelLine")
   .minicard-label(class="card-label-{{colorName}}" title=labelName)
@@ -109,7 +144,7 @@ template(name="searchElementPopup")
   form
     label
       | {{_ 'title'}}
-      input.js-element-title(type="text" placeholder="{{_ 'title'}}" autofocus required dir="auto")
+      textarea.js-element-title(rows="2" placeholder="{{_ 'title'}}" autofocus required dir="auto")
   unless isTemplateSearch
     label {{_ 'boards'}}:
     .link-board-wrapper
@@ -117,15 +152,34 @@ template(name="searchElementPopup")
         option(value="")
         each boards
           option(value="{{_id}}") {{title}}
+  if isTemplateSearch
+    if otherTemplateBoards.length
+      //- #2684: a template board shared by another board member, not just the default template board.
+      label {{_ 'boards'}}:
+      .link-board-wrapper
+        select.js-select-template-board
+          option(value="") {{_ 'templates'}}
+          each otherTemplateBoards
+            option(value="{{_id}}") {{title}}
   form.js-search-term-form
     label
       | {{_ 'template'}}
-    input(type="text" name="searchTerm" placeholder="{{_ 'search-example'}}" autofocus dir="auto")
+    input(type="text" name="searchTerm" placeholder="{{_ 'search-example'}}" dir="auto")
   .list-body.search-card-results
     .minicards.clearfix.js-minicards
       if isBoardTemplateSearch
         each results
           a.minicard-wrapper.js-minicard
+            //- #4205: mark one board template as the default applied by the
+              plain "type a name and click Create" board-creation flow, so a
+              user does not have to reopen this picker every time. Toggling
+              stops the click from also applying the template (this popup is
+              also how a template is manually applied, by clicking the rest
+              of the row).
+            span.js-set-default-board-template(
+              title="{{#if isDefaultBoardTemplate _id}}{{_ 'unset-default-board-template'}}{{else}}{{_ 'set-default-board-template'}}{{/if}}"
+              class="{{#if isDefaultBoardTemplate _id}}is-default-board-template{{/if}}")
+              i.fa(class="{{#if isDefaultBoardTemplate _id}}fa-star{{else}}fa-star-o{{/if}}")
             +miniboard(this)
       if isListTemplateSearch
         each results

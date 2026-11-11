@@ -1,0 +1,160 @@
+'use strict';
+
+/**
+ * Spec 21 — Import without mapping members
+ *
+ * Covers the "Import without mapping members (map later)" option, which lets a
+ * WeKan / Trello / Jira import skip the member-mapping step and import the board
+ * immediately, so members can be mapped afterwards.
+ *
+ * We exercise the WeKan-export path (a self-contained board JSON) because it does
+ * not require external services; the same button/flow drives Trello and Jira.
+ */
+
+const { test, expect } = require('../fixtures');
+const db = require('../helpers/db');
+const { navigateInApp } = require('../helpers/auth');
+const { waitForImportedBoard } = require('../helpers/import');
+
+// A minimal but valid WeKan board export (mirrors tests/wekanCreator.import.test.js).
+const now = '2020-01-01T00:00:00.000Z';
+const wekanExport = {
+  _format: 'wekan-board-1.0.0',
+  _id: 'imp1',
+  title: 'Imported No Map Board',
+  archived: false,
+  color: 'bgnone',
+  permission: 'private',
+  createdAt: now,
+  modifiedAt: now,
+  members: [{ userId: 'user1', wekanId: 'user1', isActive: true, isAdmin: true }],
+  labels: [],
+  swimlanes: [{ _id: 'swimlane1', title: 'Default', archived: false, sort: 0 }],
+  lists: [{ _id: 'list1', title: 'ToDoImported', archived: false, sort: 0 }],
+  cards: [
+    {
+      _id: 'card1',
+      title: 'Imported card',
+      archived: false,
+      swimlaneId: 'swimlane1',
+      listId: 'list1',
+      sort: 0,
+      description: '',
+      dateLastActivity: now,
+      labelIds: [],
+    },
+  ],
+  comments: [],
+  activities: [],
+  checklists: [],
+  checklistItems: [],
+  subtaskItems: [],
+  customFields: [],
+  rules: [],
+  triggers: [],
+  actions: [],
+  users: [{ _id: 'user1', username: 'admin', profile: { fullname: 'Admin User' } }],
+};
+
+test.describe('Import without mapping members', () => {
+  test('#1991 a legacy Sandstorm export without permission imports privately', async ({
+    loggedInPage,
+  }) => {
+    const title = `Issue 1991 ${Date.now()}`;
+    const legacyExport = { ...wekanExport, title };
+    delete legacyExport.permission;
+    let importedBoardId;
+    try {
+      await navigateInApp(loggedInPage, '/import/wekan');
+      await loggedInPage.locator('#import-textarea').fill(JSON.stringify(legacyExport));
+      await loggedInPage.locator('.js-import-without-mapping').click();
+      await waitForImportedBoard(loggedInPage);
+
+      await expect(loggedInPage.locator('body')).toContainText('Imported card', {
+        timeout: 20_000,
+      });
+      const imported = db.findOne('boards', { title });
+      expect(imported).toBeTruthy();
+      importedBoardId = imported._id;
+      expect(imported.permission).toBe('private');
+    } finally {
+      if (importedBoardId) db.cleanup({ boardIds: [importedBoardId] });
+    }
+  });
+
+  test('the import page offers "import without mapping members"', async ({ loggedInPage }) => {
+    await navigateInApp(loggedInPage, '/import/wekan');
+    const skip = loggedInPage.locator('.js-import-without-mapping');
+    await expect(skip).toBeVisible({ timeout: 15_000 });
+  });
+
+  test('importing a WeKan board without mapping lands on the new board', async ({ loggedInPage }) => {
+    await navigateInApp(loggedInPage, '/import/wekan');
+
+    await loggedInPage.locator('#import-textarea').fill(JSON.stringify(wekanExport));
+    await loggedInPage.locator('.js-import-without-mapping').click();
+
+    // Skips the map-members step entirely and navigates to the new board (/b/...).
+    await waitForImportedBoard(loggedInPage);
+
+    // The imported list/card is present on the new board.
+    await expect(
+      loggedInPage.locator('.js-list:not(.js-list-composer)').first(),
+    ).toBeVisible({ timeout: 20_000 });
+    await expect(loggedInPage.locator('body')).toContainText('Imported card', {
+      timeout: 20_000,
+    });
+  });
+});
+
+test('Malagasy import choices distinguish placeholders and bulk files', async ({ loggedInPage: page }) => {
+  const mg = require('../../../imports/i18n/data/mg.i18n.json');
+  await page.evaluate(() => Meteor.callAsync('setLanguage', 'mg'));
+  await navigateInApp(page, '/import/wekan');
+  const choices = page.locator('.import-members-mode');
+  for (const key of ['import-members-mode-heading', 'import-members-mode-map', 'import-members-mode-placeholder', 'import-members-mode-me']) {
+    await expect(choices).toContainText(mg[key]);
+  }
+  await expect(choices).not.toContainText('People in the file');
+  await expect(page.locator('.import-many .import-file-hint')).toHaveText(mg['import-many-boards-hint']);
+  await expect(page.locator('#import-many-files')).toBeEmpty();
+});
+
+test('Irish import choices distinguish placeholders and bulk files', async ({ loggedInPage: page }) => {
+  const mg = require('../../../imports/i18n/data/ga.i18n.json');
+  await page.evaluate(() => Meteor.callAsync('setLanguage', 'ga'));
+  await navigateInApp(page, '/import/wekan');
+  const choices = page.locator('.import-members-mode');
+  for (const key of ['import-members-mode-heading', 'import-members-mode-map', 'import-members-mode-placeholder', 'import-members-mode-me']) {
+    await expect(choices).toContainText(mg[key]);
+  }
+  await expect(choices).not.toContainText('People in the file');
+  await expect(page.locator('.import-many .import-file-hint')).toHaveText(mg['import-many-boards-hint']);
+  await expect(page.locator('#import-many-files')).toBeEmpty();
+});
+
+test('Scottish Gaelic import choices distinguish placeholders and bulk files', async ({ loggedInPage: page }) => {
+  const mg = require('../../../imports/i18n/data/gd.i18n.json');
+  await page.evaluate(() => Meteor.callAsync('setLanguage', 'gd'));
+  await navigateInApp(page, '/import/wekan');
+  const choices = page.locator('.import-members-mode');
+  for (const key of ['import-members-mode-heading', 'import-members-mode-map', 'import-members-mode-placeholder', 'import-members-mode-me']) {
+    await expect(choices).toContainText(mg[key]);
+  }
+  await expect(choices).not.toContainText('People in the file');
+  await expect(page.locator('.import-many .import-file-hint')).toHaveText(mg['import-many-boards-hint']);
+  await expect(page.locator('#import-many-files')).toBeEmpty();
+});
+
+test('Igbo import choices distinguish placeholders and bulk files', async ({ loggedInPage: page }) => {
+  const mg = require('../../../imports/i18n/data/ig.i18n.json');
+  await page.evaluate(() => Meteor.callAsync('setLanguage', 'ig'));
+  await navigateInApp(page, '/import/wekan');
+  const choices = page.locator('.import-members-mode');
+  for (const key of ['import-members-mode-heading', 'import-members-mode-map', 'import-members-mode-placeholder', 'import-members-mode-me']) {
+    await expect(choices).toContainText(mg[key]);
+  }
+  await expect(choices).not.toContainText('People in the file');
+  await expect(page.locator('.import-many .import-file-hint')).toHaveText(mg['import-many-boards-hint']);
+  await expect(page.locator('#import-many-files')).toBeEmpty();
+});

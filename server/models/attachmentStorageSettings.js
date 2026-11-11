@@ -8,10 +8,17 @@ import {
   STORAGE_NAME_S3,
   STORAGE_NAME_AZURE,
   STORAGE_NAME_GCS,
+  STORAGE_NAME_WEBDAV,
   CLOUD_STORAGE_NAMES,
 } from '/models/lib/fileStoreConstants';
 import { check } from 'meteor/check';
+import { WebApp } from 'meteor/webapp';
+import { Authentication } from '/server/authentication';
+import { sendJsonResult } from '/server/apiMiddleware';
 import { refreshCloudStorageFromSettings, testCloudConnection } from '/models/lib/cloudStorage';
+import { computeStoragePaths } from '/models/lib/attachmentStoragePath';
+// ErrorBleed: refusals answer with their real status and a safe message.
+const { publicErrorData } = require('/server/lib/apiResponseHelpers');
 
 // Secret fields per cloud provider — never published to the client and only
 // overwritten when a non-empty replacement value is supplied.
@@ -19,6 +26,7 @@ const CLOUD_SECRET_FIELDS = {
   [STORAGE_NAME_S3]: ['secretAccessKey'],
   [STORAGE_NAME_AZURE]: ['accountKey', 'connectionString'],
   [STORAGE_NAME_GCS]: ['credentials'],
+  [STORAGE_NAME_WEBDAV]: ['password'],
 };
 
 // Mask secret fields in a settings document before returning it to the client,
@@ -171,6 +179,21 @@ async function compactCollectionsOnNode(nodeDb, candidates, force = false) {
 }
 
 Meteor.methods({
+  // #6473: the Admin Panel > Attachments page used to render these paths from
+  // process.env.WRITABLE_PATH ON THE CLIENT, where process.env never has it, so
+  // it always showed "/data" — a path that does not exist on a Snap install.
+  // The client now asks the server for the real, Snap-aware paths.
+  async getAttachmentStoragePaths() {
+    if (!this.userId) {
+      throw new Meteor.Error('not-authorized', 'Must be logged in');
+    }
+    const user = await ReactiveCache.getUser(this.userId);
+    if (!user || !user.isAdmin) {
+      throw new Meteor.Error('not-authorized', 'Admin access required');
+    }
+    return computeStoragePaths(process.env.WRITABLE_PATH);
+  },
+
   async getAttachmentStorageSettings() {
     if (!this.userId) {
       throw new Meteor.Error('not-authorized', 'Must be logged in');
@@ -190,7 +213,11 @@ Meteor.methods({
             enabled: true,
             read: true,
             write: true,
-            path: process.env.WRITABLE_PATH ? `${process.env.WRITABLE_PATH}/attachments` : '/data/attachments',
+            // #6473: the REAL storage path (Snap-aware: WRITABLE_PATH may already
+            // end in /files), not `${WRITABLE_PATH}/attachments`, which pointed
+            // at a directory that does not exist on Docker (/data/attachments
+            // instead of /data/files/attachments).
+            path: computeStoragePaths(process.env.WRITABLE_PATH).attachments,
           },
           gridfs: {
             enabled: true,
@@ -226,6 +253,16 @@ Meteor.methods({
             credentials: '',
             bucket: '',
           },
+          // #687: e.g. https://cloud.example.com/remote.php/dav/files/USER
+          webdav: {
+            enabled: false,
+            read: true,
+            write: true,
+            endpoint: '',
+            username: '',
+            password: '',
+            bucket: 'wekan',
+          },
         },
         uploadSettings: {
           maxFileSize: process.env.ATTACHMENTS_UPLOAD_MAX_SIZE
@@ -237,6 +274,7 @@ Meteor.methods({
           attachmentsUploadMaxBytes: process.env.ATTACHMENTS_UPLOAD_MAX_SIZE
             ? parseNonNegativeInt(process.env.ATTACHMENTS_UPLOAD_MAX_SIZE, 0) : 0,
           attachmentsUploadBlocked: false,
+          avatarsUploadBlocked: false,
           attachmentsDownloadMaxBytes: 0,
           attachmentsDownloadBlocked: false,
           apiUploadMaxBytes: process.env.ATTACHMENT_API_MAX_UPLOAD_BYTES
@@ -264,6 +302,20 @@ Meteor.methods({
 
     // Never expose secret keys to the client; the UI shows a "set" marker.
     return maskStorageSecrets(settings);
+  },
+
+  // Whether avatar uploads are blocked board-wide (Admin Panel > Attachments >
+  // Transfer limits). Readable by any logged-in user so the avatar popup can
+  // hide its upload option; the actual upload is also blocked server-side in
+  // server/permissions/avatars.js. Default false (avatars enabled).
+  async isAvatarUploadBlocked() {
+    if (!this.userId) {
+      throw new Meteor.Error('not-authorized', 'Must be logged in');
+    }
+    const settings = await AttachmentStorageSettings.findOneAsync(
+      {}, { fields: { 'limitSettings.avatarsUploadBlocked': 1 } },
+    );
+    return settings?.limitSettings?.avatarsUploadBlocked === true;
   },
 
   async getGridFsStorageStats() {
@@ -596,6 +648,7 @@ Meteor.methods({
       STORAGE_NAME_S3,
       STORAGE_NAME_AZURE,
       STORAGE_NAME_GCS,
+      STORAGE_NAME_WEBDAV,
     ].includes(storageName)) {
       throw new Meteor.Error('invalid-storage', 'Invalid storage backend');
     }
@@ -649,6 +702,7 @@ const CLOUD_SECRET_PROJECTION = {
   'storageConfig.azure.accountKey': 0,
   'storageConfig.azure.connectionString': 0,
   'storageConfig.gcs.credentials': 0,
+  'storageConfig.webdav.password': 0,
 };
 
 Meteor.publish('attachmentStorageSettings', async function() {
@@ -662,4 +716,64 @@ Meteor.publish('attachmentStorageSettings', async function() {
   }
 
   return AttachmentStorageSettings.find({}, { fields: CLOUD_SECRET_PROJECTION });
+});
+
+/**
+ * @operation get_attachment_settings
+ * @tag Settings
+ *
+ * @summary Get the attachment storage / upload-block settings (GlobalAdmin)
+ *
+ * @description Only the global admin can call this. Returns the Admin Panel >
+ * Attachments settings document, including `limitSettings.attachmentsUploadBlocked`
+ * and `limitSettings.avatarsUploadBlocked` plus the size limits. Cloud-storage
+ * secret keys (S3 secretAccessKey, Azure accountKey/connectionString, GCS
+ * credentials) are masked and never returned; a boolean `<field>Set` marker
+ * shows whether a value exists.
+ *
+ * @return_type Object
+ */
+WebApp.handlers.get('/api/admin/attachment-settings', async function(req, res) {
+  try {
+    await Authentication.checkUserId(req.userId);
+    const settings = await Meteor.server.method_handlers[
+      'getAttachmentStorageSettings'
+    ].call({ userId: req.userId });
+    sendJsonResult(res, { code: 200, data: settings });
+  } catch (error) {
+    sendJsonResult(res, publicErrorData(error));
+  }
+});
+
+/**
+ * @operation update_attachment_settings
+ * @tag Settings
+ *
+ * @summary Update the attachment storage / upload-block settings (GlobalAdmin)
+ *
+ * @description Only the global admin can call this. The request body is a
+ * partial settings object (for example
+ * `{"limitSettings": {"avatarsUploadBlocked": true}}`). It is applied through
+ * the same update path as the `updateAttachmentStorageSettings` Meteor method,
+ * so validation and `$set` semantics are identical: cloud-storage secrets left
+ * blank are preserved. The masked, updated settings document is returned.
+ *
+ * @param {Object} settings the partial attachment settings to set
+ * @return_type Object
+ */
+WebApp.handlers.put('/api/admin/attachment-settings', async function(req, res) {
+  try {
+    await Authentication.checkUserId(req.userId);
+    const body = req.body || {};
+    await Meteor.server.method_handlers['updateAttachmentStorageSettings'].call(
+      { userId: req.userId },
+      body,
+    );
+    const updated = await Meteor.server.method_handlers[
+      'getAttachmentStorageSettings'
+    ].call({ userId: req.userId });
+    sendJsonResult(res, { code: 200, data: updated });
+  } catch (error) {
+    sendJsonResult(res, publicErrorData(error));
+  }
 });

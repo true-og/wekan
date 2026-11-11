@@ -2,6 +2,7 @@ import { Meteor } from 'meteor/meteor';
 import { Mongo } from 'meteor/mongo';
 import { ReactiveCache } from '/imports/reactiveCache';
 const { SimpleSchema } = require('/imports/simpleSchema');
+const { deliverySchemaFields } = require('/models/lib/notificationDelivery');
 
 const Integrations = new Mongo.Collection('integrations');
 
@@ -42,10 +43,22 @@ Integrations.attachSchema(
       type: String,
     },
     url: {
-      // URL validation with SSRF protection
       /**
-       * URL validation regex (https://mathiasbynens.be/demo/url-regex)
-       * Includes validation to block private/loopback addresses and ensure safe protocols
+       * First-line, NON-AUTHORITATIVE SSRF check.
+       *
+       * This validator runs synchronously (isomorphically) and therefore CANNOT
+       * resolve DNS. It only rejects the obvious cases (bad protocol, literal
+       * private/loopback IPs, localhost) to give quick feedback in the UI. It is
+       * trivially bypassed by a public hostname that resolves to an internal IP
+       * (e.g. 169-254-169-254.nip.io), so it MUST NOT be relied on as the SSRF
+       * boundary — that was the root cause of GHSA-66m2-4wfr-c45p (DnsBleed).
+       *
+       * The authoritative, DNS-aware checks live server-side and validate the
+       * RESOLVED IP of every address family:
+       *   - input time: validateAttachmentUrl() at the REST write paths
+       *     (server/models/integrations.js POST/PUT), and
+       *   - delivery time: fetchSafe() (server/lib/ssrfGuard.js), which resolves
+       *     once, pins the connection to the validated IP and blocks redirects.
        */
       type: String,
       custom() {
@@ -82,6 +95,10 @@ Integrations.attachSchema(
         }
       },
     },
+    // #3695: how this webhook delivers - content, grouping, schedule. Unset keys
+    // inherit the board's default (board webhooks), then the Admin Panel's.
+    // See models/lib/notificationDelivery.js.
+    ...deliverySchemaFields('notificationDelivery', ['webhook']),
     token: {
       /**
        * token of the integration
@@ -127,6 +144,22 @@ Integrations.attachSchema(
        * user ID who created the interation
        */
       type: String,
+    },
+    mattermostDirectMessages: {
+      /**
+       * #1297: also send each message to the card's members and assignees as
+       * Mattermost direct messages (models/lib/mattermostDirectMessages.js).
+       */
+      type: Boolean,
+      optional: true,
+    },
+    bot: {
+      /**
+       * Board Settings / Bots (models/lib/botRuns.js): this outgoing webhook
+       * is a bot's runner. It is sent dispatches only, never board activity.
+       */
+      type: Boolean,
+      optional: true,
     },
   }),
 );

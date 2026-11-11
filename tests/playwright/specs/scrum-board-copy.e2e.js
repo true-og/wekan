@@ -1,0 +1,67 @@
+'use strict';
+const {test,expect}=require('../fixtures');const db=require('../helpers/db');
+const {loginWithToken,openBoard}=require('../helpers/auth');
+const call=(page,method,...args)=>page.evaluate(async({method,args})=>{try{return await Meteor.callAsync(method,...args);}catch(error){throw new Error(`${error.error}: ${error.reason||error.message}`);}},{method,args});
+function clean(boardId){for(const collection of ['scrumSprints','scrumReleases','scrumEvents','scrumDailySnapshots'])db.deleteMany(collection,{boardId});db.cleanup({boardIds:[boardId]});}
+test('board duplication remaps Scrum planning and metadata and can omit Scrum entirely',async({page,user,board})=>{
+ const copies=[];
+ try{
+  await loginWithToken(page,user.id,user.token);
+  const sprint=await call(page,'scrum.saveSprint',board.boardId,null,{name:'Copied sprint',plannedStart:'2026-09-01',plannedEnd:'2026-09-30'},null);
+  const release=await call(page,'scrum.saveRelease',board.boardId,null,{name:'Copied release'},null);
+  const card=db.find('cards',{boardId:board.boardId})[0];
+  db.updateOne('cards',{_id:card._id},{$set:{syncExternalId:'COPY-1',syncSourceType:'jira',syncLastSource:{title:card.title}}});
+  await call(page,'scrum.updateCard',board.boardId,card._id,{sprintId:sprint._id,releaseId:release._id,acceptanceCriteria:'Copied criteria'},0);
+  await call(page,'scrum.updateSwimlane',board.boardId,board.swimlaneId,{sprintId:sprint._id,releaseId:release._id,purpose:'Copied team'},0);
+  await call(page,'scrum.updateList',board.boardId,card.listId,{category:'doing'},0);
+  const active=await call(page,'scrum.startSprint',board.boardId,sprint._id,sprint.revision);
+  await call(page,'scrum.getDailyHistory',board.boardId,sprint._id);
+  await call(page,'scrum.closeSprint',board.boardId,sprint._id,active.revision,null);
+  db.updateOne('lists',{_id:card.listId},{$set:{syncCredentialIncarnation:'source-lifetime'}});
+  const copy=await call(page,'copyBoard',board.boardId,{});copies.push(copy);
+  expect(db.find('scrumImportPending',{_id:copy})).toHaveLength(0);
+  expect(db.find('scrumImportSteps',{boardId:copy})).toHaveLength(0);
+  const copiedSprint=db.findOne('scrumSprints',{boardId:copy});expect(copiedSprint._id).not.toBe(sprint._id);
+  const copiedCard=db.findOne('cards',{boardId:copy,title:card.title});
+  for(const key of ['syncExternalId','syncSourceType','syncLastSource'])expect(copiedCard[key]).toBeUndefined();
+  expect(db.findOne('cards',{_id:card._id}).syncExternalId).toBe('COPY-1');
+  expect(copiedCard.scrum.pastSprintIds).toEqual([copiedSprint._id]);expect(copiedCard.scrum.acceptanceCriteria).toBe('Copied criteria');
+  expect(copiedCard.scrum.releaseId).toBe(db.findOne('scrumReleases',{boardId:copy})._id);
+  // Snapshot rows are kept outside the sprint (server/lib/scrumSnapshotStore.js).
+  const closeRows=db.scrumSnapshotCards(copiedSprint.closeSnapshot,copiedSprint._id,'close');
+  expect(closeRows[0].cardId).toBe(copiedCard._id);
+  expect(closeRows[0].listId).toBe(copiedCard.listId);
+  expect(copiedSprint.closeSnapshot.cards).toBeUndefined();
+  const copiedObservation=db.findOne('scrumDailySnapshots',{boardId:copy});
+  expect(copiedObservation.sprintId).toBe(copiedSprint._id);
+  const dailyRows=db.scrumSnapshotCards(copiedObservation.snapshot,copiedSprint._id,'daily');
+  expect(dailyRows[0].cardId).toBe(copiedCard._id);
+  expect(dailyRows[0].listId).toBe(copiedCard.listId);
+  const {dailyObservationId}=require('../../../server/lib/scrumDailyCapture');
+  expect(copiedObservation._id).toBe(dailyObservationId(copiedSprint._id,copiedObservation.startedAt,copiedObservation.day));
+  expect(db.findOne('lists',{_id:copiedCard.listId}).scrum.category).toBe('doing');
+  expect(db.findOne('lists',{_id:copiedCard.listId}).syncCredentialIncarnation).toBeTruthy();
+  expect(db.findOne('lists',{_id:copiedCard.listId}).syncCredentialIncarnation).not.toBe('source-lifetime');
+  const lane=db.findOne('swimlanes',{_id:copiedCard.swimlaneId});expect(lane.scrum.sprintId).toBe(copiedSprint._id);
+  expect(db.find('changeHistory',{boardId:copy,entityType:'scrum'})).toHaveLength(0);
+  expect(db.findOne('cards',{_id:card._id}).scrum.pastSprintIds).toEqual([sprint._id]);
+  const omitted=await call(page,'copyBoard',board.boardId,{copyOptions:{scrum:false}});copies.push(omitted);
+  expect(db.find('scrumSprints',{boardId:omitted})).toHaveLength(0);
+  expect(db.find('scrumDailySnapshots',{boardId:omitted})).toHaveLength(0);
+  expect(db.findOne('boards',{_id:omitted}).scrum).toBeUndefined();
+  for(const item of db.find('cards',{boardId:omitted}))expect(item.scrum).toBeUndefined();
+  for(const item of db.find('swimlanes',{boardId:omitted}))expect(item.scrum).toBeUndefined();
+  const structure=await call(page,'copyBoard',board.boardId,{withoutCards:true});copies.push(structure);
+  expect(db.find('cards',{boardId:structure})).toHaveLength(0);
+  expect(db.findOne('scrumSprints',{boardId:structure}).closeSnapshot.partial).toBe(true);
+  const structureSprint=db.findOne('scrumSprints',{boardId:structure});
+  expect(db.scrumSnapshotCards(structureSprint.closeSnapshot,structureSprint._id,'close')).toEqual([]);
+  expect(db.findOne('scrumDailySnapshots',{boardId:structure}).snapshot.partial).toBe(true);
+  expect(db.scrumSnapshotCards(db.findOne('scrumDailySnapshots',{boardId:structure}).snapshot,structureSprint._id,'daily')).toEqual([]);
+  const copiedBoard=db.findOne('boards',{_id:structure});
+  await openBoard(page,structure,copiedBoard.slug);
+  await page.locator('.js-toggle-board-view').first().click();
+  await page.locator('.pop-over .js-open-velocity-view').click();
+  await expect(page.locator('.scrum-table')).toContainText('This sprint contains only part of the original snapshot.');
+ }finally{for(const id of copies)clean(id);for(const collection of ['scrumSprints','scrumReleases','scrumEvents','scrumDailySnapshots'])db.deleteMany(collection,{boardId:board.boardId});}
+});

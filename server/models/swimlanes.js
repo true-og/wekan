@@ -8,7 +8,13 @@ import Swimlanes from '/models/swimlanes';
 import Activities from '/models/activities';
 import Cards from '/models/cards';
 import { ensureIndex } from '/server/lib/mongoStartup';
-import { computeSortForIndex } from '/server/lib/utils';
+const { movedScrumMetadata } = require('/models/lib/scrumCopy');
+import { scrumPlanningPair } from '/server/lib/scrumPlanningPair';
+import { allowIsBoardMemberWithWriteAccess, computeSortForIndex } from '/server/lib/utils';
+import { nextSwimlaneSort } from '/models/lib/swimlaneSort';
+const { deferSyncSwimlaneActivity } = require('/server/lib/syncRecordingScope');
+// ErrorBleed: refusals answer with their real status and a safe message.
+const { publicErrorData } = require('/server/lib/apiResponseHelpers');
 
 Meteor.methods({
   async ensureDefaultSwimlane(boardId) {
@@ -19,8 +25,18 @@ Meteor.methods({
       throw new Meteor.Error('board-not-found', 'Board not found');
     }
 
-    if (!board.isPublic?.() && (!this.userId || !board.isMember?.(this.userId))) {
-      throw new Meteor.Error('not-authorized');
+    if (!allowIsBoardMemberWithWriteAccess(this.userId, board)) {
+      try {
+        require('/server/lib/securityLog').record({
+          key: 'authz.swimlane-create',
+          action: 'blocked',
+          source: 'ensureDefaultSwimlane',
+          userId: this.userId,
+          ip: this.connection?.clientAddress,
+          detail: `write access denied for board ${boardId}`,
+        });
+      } catch (e) { /* logging must never break the guard */ }
+      throw new Meteor.Error('not-authorized', 'Write access required');
     }
 
     const existingSwimlane = await Swimlanes.findOneAsync(
@@ -44,7 +60,8 @@ Meteor.startup(async () => {
 });
 
 Swimlanes.after.insert(async (userId, doc) => {
-  await Activities.insertAsync({
+  // A durable rule addSwimlane writes this activity itself, once, by its own id.
+  if (!deferSyncSwimlaneActivity(doc)) await Activities.insertAsync({
     userId,
     type: 'swimlane',
     activityType: 'createSwimlane',
@@ -89,6 +106,20 @@ Swimlanes.before.remove(async function(userId, doc) {
     swimlaneId: doc._id,
     title: doc.title,
   });
+});
+
+// A swimlane moved to another board loses the sprint and release it had there
+// (models/lib/scrumCopy.js movedScrumMetadata), as a moved card does
+// (server/models/cards.js). Server-side, in the same update - the client's
+// write has passed its allow/deny checks by then, and Scrum fields are not the
+// client's to write. Before the update: Swimlanes do not fetch the previous
+// document for after hooks.
+Swimlanes.before.update(async (userId, doc, fieldNames, modifier) => {
+  const boardId = modifier && modifier.$set && modifier.$set.boardId;
+  if (typeof boardId !== 'string' || boardId === doc.boardId || Object.hasOwn(modifier.$set, 'scrumRevision')) return;
+  const planning = doc.scrum && (doc.scrum.sprintId || require('/models/lib/scrum').cardReleaseIds(doc.scrum).length)
+    ? await scrumPlanningPair(doc.boardId, boardId) : null;
+  Object.assign(modifier.$set, movedScrumMetadata(doc, boardId, planning));
 });
 
 Swimlanes.after.update(async (userId, doc, fieldNames) => {
@@ -138,10 +169,7 @@ WebApp.handlers.get('/api/boards/:boardId/swimlanes', async function(req, res) {
       }),
     });
   } catch (error) {
-    sendJsonResult(res, {
-      code: 200,
-      data: error,
-    });
+    sendJsonResult(res, publicErrorData(error));
   }
 });
 
@@ -151,19 +179,19 @@ WebApp.handlers.get('/api/boards/:boardId/swimlanes/:swimlaneId', async function
     const paramSwimlaneId = req.params.swimlaneId;
     await Authentication.checkBoardAccess(req.userId, paramBoardId);
 
-    sendJsonResult(res, {
-      code: 200,
-      data: await ReactiveCache.getSwimlane({
-        _id: paramSwimlaneId,
-        boardId: paramBoardId,
-        archived: false,
-      }),
+    const swimlane = await ReactiveCache.getSwimlane({
+      _id: paramSwimlaneId,
+      boardId: paramBoardId,
+      archived: false,
     });
+    // 404, not a 200 with an empty body (#6862).
+    if (!swimlane) {
+      sendJsonResult(res, { code: 404, data: { error: 'Swimlane not found' } });
+      return;
+    }
+    sendJsonResult(res, { code: 200, data: swimlane });
   } catch (error) {
-    sendJsonResult(res, {
-      code: 200,
-      data: error,
-    });
+    sendJsonResult(res, publicErrorData(error));
   }
 });
 
@@ -173,10 +201,18 @@ WebApp.handlers.post('/api/boards/:boardId/swimlanes', async function(req, res) 
     await Authentication.checkBoardWriteAccess(req.userId, paramBoardId);
 
     const board = await ReactiveCache.getBoard(paramBoardId);
+    // #3624: append reliably at max(existing sort)+1 (a plain count misordered
+    // the new swimlane when sorts were non-contiguous), and honor an optional
+    // explicit `sort` from the request body. board.swimlanes() is ASYNC on the
+    // server (ReactiveCache.getSwimlanes returns a Promise), so it must be
+    // awaited before mapping — the old `.length` read tolerated the Promise by
+    // silently yielding undefined, but `.map` on a Promise throws.
+    const existingSwimlanes = (await board.swimlanes()) || [];
+    const existingSorts = existingSwimlanes.map(s => s.sort);
     const id = await Swimlanes.insertAsync({
       title: req.body.title,
       boardId: paramBoardId,
-      sort: board.swimlanes().length,
+      sort: nextSwimlaneSort(existingSorts, req.body.sort),
     });
     sendJsonResult(res, {
       code: 200,
@@ -185,10 +221,7 @@ WebApp.handlers.post('/api/boards/:boardId/swimlanes', async function(req, res) 
       },
     });
   } catch (error) {
-    sendJsonResult(res, {
-      code: 200,
-      data: error,
-    });
+    sendJsonResult(res, publicErrorData(error));
   }
 });
 
@@ -216,10 +249,7 @@ WebApp.handlers.put('/api/boards/:boardId/swimlanes/:swimlaneId', async function
       },
     });
   } catch (error) {
-    sendJsonResult(res, {
-      code: 200,
-      data: error,
-    });
+    sendJsonResult(res, publicErrorData(error));
   }
 });
 
@@ -236,10 +266,7 @@ WebApp.handlers.delete('/api/boards/:boardId/swimlanes/:swimlaneId', async funct
       },
     });
   } catch (error) {
-    sendJsonResult(res, {
-      code: 200,
-      data: error,
-    });
+    sendJsonResult(res, publicErrorData(error));
   }
 });
 

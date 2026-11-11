@@ -1,0 +1,157 @@
+'use strict';
+
+// Regression wiring for UserSearchBleed (GHSA-88mv-h439-rj8j, GHSA-9846-cj96-6hv5),
+// MiniProfileBleed (GHSA-c3ch-34g5-x3x7,
+// logged-out user-miniprofile subscriptions),
+// PositionHistoryBleed (GHSA-5fc2-m4gw-j6qq, forged undo history),
+// SubtaskExportBleed (GHSA-hvvr-j425-5xxm) and CasBleed
+// (with CasAccountMergeBleed, GHSA-5797-pjx8-9h6m: implicit CAS username
+// linking to a non-CAS account).
+// Run: node tests/securityAdvisories20260825.test.cjs
+
+const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
+
+const root = path.join(__dirname, '..');
+const read = rel => fs.readFileSync(path.join(root, rel), 'utf8');
+const code = rel => read(rel)
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/(^|[^:])\/\/.*$/gm, '$1');
+
+let passed = 0;
+function test(name, fn) {
+  fn();
+  passed += 1;
+  console.log('  ok -', name);
+}
+
+const publications = code('server/publications/users.js');
+const users = code('server/models/users.js');
+const historyPermission = code('server/permissions/userPositionHistory.js');
+const historyModel = code('models/userPositionHistory.js');
+const historyMethods = code('server/models/userPositionHistory.js');
+const cas = code('packages/wekan-accounts-cas/cas_server.js');
+
+test('user-miniprofile rejects logged-out subscriptions', () => {
+  const body = publications.match(
+    /Meteor\.publish\('user-miniprofile',[\s\S]*?\n\}\);/,
+  )[0];
+  assert.ok(/if \(!this\.userId\)[\s\S]*?this\.ready\(\)/.test(body));
+  assert.ok(/tripCanary\('user\.miniprofile-without-login'/.test(body));
+});
+
+test('user-search treats metacharacters literally and returns public identity only', () => {
+  const body = publications.match(
+    /Meteor\.publish\('user-search',[\s\S]*?\n\}\);/,
+  )[0];
+  assert.ok(/new RegExp\(escapeForRegex\(searchTerm\), 'i'\)/.test(body));
+  for (const sensitive of [
+    'emails.address',
+    'isAdmin',
+    'loginDisabled',
+    'authenticationMethod',
+    'teams',
+    'orgs',
+  ]) {
+    assert.ok(!body.includes(sensitive), sensitive + ' must not be published');
+  }
+  assert.ok(/type: 'subscription', name: 'user-search'/.test(publications));
+});
+
+test('board-authorized searchUsers also escapes and throttles its query', () => {
+  assert.ok(/new RegExp\(escapeForRegex\(query\), 'i'\)/.test(users));
+  assert.ok(/type: 'method', name: 'searchUsers'/.test(users));
+  assert.ok(!/new RegExp\(query, 'i'\)/.test(users));
+});
+
+test('history is never inserted by a client', () => {
+  // PositionHistoryBleed sibling (2026-10-02): checking boardId and
+  // previousBoardId at insert still let a member forge an entry naming any
+  // card, list or checklist item, any newBoardId and any actionType, and have
+  // undo/redo move it into their board or soft-delete it. The server records
+  // history itself (trackChange); clients insert nothing.
+  assert.ok(/insert\(userId\) \{[\s\S]*?return tripCanary\('history\.cross-board', \{ userId \}\);\s*\},/.test(historyPermission));
+  assert.ok(!/return true;/.test(historyPermission), 'no client mutation is ever allowed');
+  assert.ok(/update\(userId\)[\s\S]*?return tripCanary\('history\.cross-board'/.test(
+    historyPermission,
+  ));
+});
+
+test('undo and redo act only within the entry\'s boards, with write access', () => {
+  assert.match(historyModel, /async assertApplicable\(destinationBoardIds = \[\]\) \{/);
+  assert.match(historyModel, /const entryBoards = \[this\.boardId, this\.previousBoardId, this\.newBoardId\]\.filter\(Boolean\);/);
+  assert.match(historyModel, /allowed = allowIsBoardMemberWithWriteAccess\(this\.userId, await Boards\.findOneAsync\(boardId\)\);/);
+  // Both paths call it before touching anything, redo included - which had
+  // no check at all.
+  for (const [fn, field] of [['undo', 'previousBoardId'], ['redo', 'newBoardId']]) {
+    const body = historyModel.slice(historyModel.indexOf(`async ${fn}() {`));
+    const check = body.indexOf(`await this.assertApplicable([this.entityType === 'card' ? this.${field} : null]);`);
+    assert.ok(check > 0 && check < body.indexOf('_applyDeleted('), `${fn} checks first`);
+  }
+});
+
+test('history undo rechecks source visibility and destination membership', () => {
+  assert.ok(/requireBoardVisible\(this\.userId, history\.boardId\)/.test(historyMethods));
+  assert.ok(/destinationBoard\.hasMember\(userId\)/.test(historyModel));
+  assert.ok(/throw new Meteor\.Error\([\s\S]*?'not-authorized'/.test(historyModel));
+  assert.ok(/tripCanary\([\s\S]*?'history\.cross-board'/.test(historyModel));
+});
+
+test('every subtask export query carries its board boundary', () => {
+  const expectations = new Map([
+    ['models/exporter.js', [
+      /boardId: card\.boardId,[\s\S]*?parentId: card\._id/,
+      // #3626: subtasks under any of their parents, still bounded by board.
+      /\{ boardId, \$or: \[\{ parentId: \{ \$in: cardIds \} \}, \{ parentIds: \{ \$in: cardIds \} \}\] \}/,
+    ]],
+    ['models/server/ExporterExcelBoard.js', [
+      /\{ boardId: this\._boardId, \$or: \[\{ parentId: \{ \$in: cardIds \} \}, \{ parentIds: \{ \$in: cardIds \} \}\] \}/,
+    ]],
+    ['models/server/ExporterCardPDF.js', [
+      /\{ boardId: this\._boardId, \.\.\.childrenSelector\(this\._cardId\) \}/,
+      /\{ boardId: this\._boardId, \$or: \[\{ parentId: \{ \$in: cardIds \} \}, \{ parentIds: \{ \$in: cardIds \} \}\] \}/,
+    ]],
+    ['models/server/ExporterExcelCard.js', [
+      /\{ boardId: this\._boardId, \.\.\.childrenSelector\(this\._cardId\) \}/,
+    ]],
+  ]);
+  for (const [rel, patterns] of expectations) {
+    const src = code(rel);
+    for (const pattern of patterns) assert.ok(pattern.test(src), rel);
+  }
+});
+
+test('negative: no export file anywhere queries cards by parent without its board (SubtaskExportBleed)', () => {
+  // Every exporter - board, card, JSON, ZIP, Excel, PDF, charts - is in
+  // models/ or models/server/. A card selector that names a parent (parentId,
+  // parentIds or childrenSelector) must also name boardId, or a private card on
+  // another board that names a parent here is exported with it.
+  const files = ['models', 'models/server'].flatMap(dir => fs.readdirSync(path.join(root, dir))
+    .filter(f => /^export|^Exporter/i.test(f) && f.endsWith('.js')).map(f => `${dir}/${f}`));
+  assert.ok(files.length >= 10, 'the export implementations are found');
+  const offenders = [];
+  for (const rel of files) {
+    const src = code(rel);
+    for (const m of src.matchAll(/(?:getCards|getCard|Cards\.find(?:Async|OneAsync)?|Cards\.rawCollection\(\)\.find)\(\s*\{([^}]*)\}/g)) {
+      if (/\bparentIds?\b|childrenSelector/.test(m[1]) && !/\bboardId\b/.test(m[1])) offenders.push(`${rel}: ${m[0].slice(0, 80)}`);
+    }
+  }
+  assert.deepStrictEqual(offenders, [], 'a parent-only subtask query in an export');
+  // Self-check: the scan sees the original shape.
+  const bad = 'await ReactiveCache.getCards({ parentId: this._cardId })';
+  assert.ok(/getCards\(\s*\{([^}]*)\}/.test(bad) && !/\bboardId\b/.test(bad));
+});
+
+test('CAS refuses implicit linking and marks newly created CAS accounts', () => {
+  assert.ok(/authenticationMethod: 'cas'/.test(cas));
+  assert.ok(/user\.authenticationMethod === 'cas'/.test(cas));
+  assert.ok(/CAS_MERGE_EXISTING_USERS/.test(cas));
+  assert.ok(/'cas-account-conflict'/.test(cas));
+  // cas_server.js is a local Meteor package and cannot import server/lib/
+  // canary.js directly (see that file's global.__wekanTripCanary bridge
+  // comment); it calls tripCanary through that shared bridge instead.
+  assert.ok(/__wekanTripCanary\('cas\.account-conflict'/.test(cas));
+});
+
+console.log('\nsecurityAdvisories20260825: all ' + passed + ' tests passed');

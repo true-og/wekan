@@ -12,6 +12,7 @@
  */
 
 const { test, expect } = require('../fixtures');
+const db = require('../helpers/db');
 const BoardPage = require('../pages/BoardPage');
 
 test.describe('Swimlanes', () => {
@@ -36,20 +37,15 @@ test.describe('Swimlanes', () => {
 
   test('swimlane action popup opens without JS errors', async ({ boardPage, board }) => {
     const errors = [];
-    boardPage.on('pageerror', e => errors.push(e.message));
+    boardPage.on('pageerror', e => errors.push(e.stack || e.message));
 
     // a.js-open-add-swimlane-menu — the "+" icon on each swimlane header
     const plusBtn = boardPage.locator('a.js-open-add-swimlane-menu').first();
-    if (await plusBtn.count() > 0) {
-      await plusBtn.click();
-      const pop = boardPage.locator('.js-pop-over');
-      await expect(pop).toBeVisible({ timeout: 6_000 });
-      // Popup being visible is sufficient proof it opened without crashing.
-      // (WeKan renders a hidden back-btn as the first element inside the popup.)
-    } else {
-      // Swimlane "+" icon not present (single-swimlane boards may hide it in some views)
-      await expect(boardPage.locator('.js-swimlane').first()).toBeVisible({ timeout: 5_000 });
-    }
+    await expect(plusBtn).toBeVisible();
+    await plusBtn.click();
+    const pop = boardPage.locator('.js-pop-over');
+    await expect(pop).toBeVisible({ timeout: 6_000 });
+    await expect(pop.locator('textarea.swimlane-name-input')).toBeVisible();
 
     const critical = errors.filter(
       e => !e.includes('ResizeObserver') && !e.includes('Non-Error promise rejection'),
@@ -89,7 +85,10 @@ test.describe('Swimlanes', () => {
     if (await plusBtn.count() > 0) {
       await plusBtn.click();
       const pop = boardPage.locator('.js-pop-over');
-      await pop.waitFor({ timeout: 6_000 });
+      // 15s (not 6s) to match the suite's standard popup-visibility wait: under the
+      // full parallel run this popup can take >6s to render on webkit, which flaked
+      // even though the popup opens fine (~3s) when the test runs in isolation.
+      await pop.waitFor({ timeout: 15_000 });
 
       // Click "Add Swimlane" inside the action popup
       const addSwimlaneLink = pop.locator('a.js-add-swimlane');
@@ -98,7 +97,7 @@ test.describe('Swimlanes', () => {
         await boardPage.waitForTimeout(400);
 
         // swimlaneAddPopup: fill in the name and submit
-        const nameInput = boardPage.locator('input.swimlane-name-input').first();
+        const nameInput = boardPage.locator('textarea.swimlane-name-input').first();
         if (await nameInput.count() > 0) {
           await nameInput.fill('New Test Swimlane');
           await boardPage.locator('.js-pop-over button.primary, .js-pop-over button[type=submit]').first().click();
@@ -115,6 +114,56 @@ test.describe('Swimlanes', () => {
     } else {
       // No "+" icon — verify existing swimlane is still visible
       await expect(boardPage.locator('.js-swimlane').first()).toBeVisible({ timeout: 5_000 });
+    }
+  });
+
+  test('Mobile Mode keeps other swimlanes lists visible when one list opens', async ({
+    boardPage, board,
+  }) => {
+    const secondSwimlaneId = db.uid('swim');
+    const secondListId = db.uid('list');
+    const now = new Date();
+    try {
+      db.insertOne('swimlanes', {
+        _id: secondSwimlaneId, title: 'Swimlane 2', boardId: board.boardId,
+        archived: false, createdAt: now, updatedAt: now, modifiedAt: now,
+        type: 'swimlane', height: -1, sort: 2,
+      });
+      db.insertOne('lists', {
+        _id: secondListId, title: 'List at Swimlane 2', boardId: board.boardId,
+        swimlaneId: secondSwimlaneId, archived: false, type: 'list', sort: 1,
+        starred: false, width: 272, createdAt: now, updatedAt: now, modifiedAt: now,
+        wipLimit: { value: 1, enabled: false, soft: false },
+      });
+      await boardPage.evaluate(() => localStorage.setItem('wekan-mobile-mode', 'true'));
+      await boardPage.reload({ waitUntil: 'domcontentloaded' });
+
+      const firstLane = boardPage.locator(`#swimlane-${board.swimlaneId}`);
+      const secondLane = boardPage.locator(`#swimlane-${secondSwimlaneId}`);
+      await expect(firstLane.locator('a.mini-list').first()).toBeVisible({ timeout: 15000 });
+      const selected = secondLane.locator(`#js-list-${secondListId}`);
+      await expect(selected).toBeVisible({ timeout: 15000 });
+      const topHeader = boardPage.locator('#header-quick-access');
+      const headerHeightBefore = await topHeader.evaluate(el =>
+        el.getBoundingClientRect().height);
+      const compactRows = firstLane.locator('a.mini-list');
+      const heightsBefore = await compactRows.evaluateAll(rows =>
+        rows.map(row => row.getBoundingClientRect().height));
+      await selected.click();
+
+      await expect(secondLane.locator(`#js-list-${secondListId} .list-body`))
+        .toBeVisible({ timeout: 15000 });
+      await expect(firstLane.locator('a.mini-list').first()).toBeVisible();
+      const heightsAfter = await compactRows.evaluateAll(rows =>
+        rows.map(row => row.getBoundingClientRect().height));
+      expect(heightsAfter).toEqual(heightsBefore);
+      await expect(topHeader.locator('ul.header-quick-access-list')).toHaveCount(0);
+      await expect(topHeader).not.toContainText('List at Swimlane 2');
+      expect(await topHeader.evaluate(el => el.getBoundingClientRect().height))
+        .toBe(headerHeightBefore);
+    } finally {
+      db.deleteMany('lists', { _id: secondListId });
+      db.deleteMany('swimlanes', { _id: secondSwimlaneId });
     }
   });
 });

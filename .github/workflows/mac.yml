@@ -1,0 +1,228 @@
+name: macOS app
+
+# Wrap the already published macOS bundles in Finder-launchable .app ZIPs.
+# Each app carries its own native Node.js, FerretDB, and Meteor server.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: false
+        type: string
+      publish:
+        required: false
+        default: true
+        type: boolean
+      only:
+        description: 'JSON array of arm64 and/or amd64; empty builds both'
+        required: false
+        default: ''
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to wrap (empty = newest release)'
+        required: false
+        type: string
+      publish:
+        description: 'Attach the app ZIPs to the release'
+        required: false
+        default: true
+        type: boolean
+      only:
+        description: 'JSON array of arm64 and/or amd64; empty builds both'
+        required: false
+        default: ''
+        type: string
+
+# Read-only by default; the job that writes is granted it below.
+permissions:
+  contents: read
+
+concurrency:
+  group: wekan-mac-app-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.find.outputs.tag }}
+      version: ${{ steps.find.outputs.version }}
+    steps:
+      - id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="$REQUESTED_TAG"
+          [ -n "$tag" ] || tag="$(gh release list --repo "$GITHUB_REPOSITORY" \
+            --limit 1 --json tagName --jq '.[0].tagName')"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || {
+            echo "::error::Expected a WeKan release tag, got $tag"; exit 1;
+          }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+  build:
+    permissions:
+      contents: write
+    name: Mac app ${{ matrix.arch }}
+    needs: release
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            bundle_arch: mac-arm64
+            runner: macos-15
+          - arch: amd64
+            bundle_arch: mac-x64
+            runner: macos-15-intel
+    env:
+      BUILD_THIS: ${{ inputs.only == '' || contains(fromJSON(inputs.only), matrix.arch) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+        if: ${{ env.BUILD_THIS == 'true' }}
+      - name: Download and verify the native macOS bundle
+        if: ${{ env.BUILD_THIS == 'true' }}
+        id: bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release.outputs.tag }}
+          VERSION: ${{ needs.release.outputs.version }}
+          BUNDLE_ARCH: ${{ matrix.bundle_arch }}
+        run: |
+          set -euo pipefail
+          zip="wekan-${VERSION}-${BUNDLE_ARCH}.zip"
+          # The list is read whole BEFORE matching. `gh … | grep -q` lets grep exit
+          # at the first match while gh is still writing; gh gets SIGPIPE, pipefail
+          # makes the pipeline fail, and a PUBLISHED asset was reported missing - the
+          # v12.39 Mac apps were skipped that way, with the bundles already attached.
+          assets="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --json assets --jq '.assets[].name')"
+          if ! grep -qxF "$zip" <<< "$assets"; then
+            echo "::notice::$zip has not been published yet; this app cannot be wrapped."
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "$zip" --pattern "$zip.sha256sum" --clobber
+          shasum -a 256 -c "$zip.sha256sum"
+          mkdir payload
+          ditto -x -k "$zip" payload
+          for file in main.js node ferretdb start-wekan.sh; do
+            [ -f "payload/bundle/$file" ] || {
+              echo "::error::$zip lacks bundle/$file; cannot make a self-contained Mac app."
+              exit 1
+            }
+          done
+          echo "available=true" >> "$GITHUB_OUTPUT"
+
+      - name: Make the .app and ZIP
+        if: ${{ env.BUILD_THIS == 'true' && steps.bundle.outputs.available == 'true' }}
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+          MAC_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$PWD/.tools/tmp"
+          export TMPDIR="$PWD/.tools/tmp"
+          bash releases/mac/package-app.sh payload/bundle "$VERSION" "$MAC_ARCH" dist
+          unzip -Z1 "dist/WeKan-${VERSION}-mac-${MAC_ARCH}.app.zip" > "$TMPDIR/app-contents.txt"
+          grep -q "WeKan-${VERSION}-mac-${MAC_ARCH}.app/Contents/MacOS/WeKan" "$TMPDIR/app-contents.txt"
+
+      - name: Smoke test Node.js, FerretDB and Meteor
+        id: smoke
+        timeout-minutes: 5
+        if: ${{ env.BUILD_THIS == 'true' && steps.bundle.outputs.available == 'true' }}
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+          MAC_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$PWD/.tools/tmp"
+          export TMPDIR="$PWD/.tools/tmp"
+          python3 -B tests/mac-smoke-app.py
+          app="$PWD/dist/WeKan-${VERSION}-mac-${MAC_ARCH}.app"
+          command="$app/Contents/Resources/launch-wekan.command"
+          export WRITABLE_PATH="$PWD/.tools/tmp/mac-smoke-data"
+          export PORT=18900 ROOT_URL=http://127.0.0.1:18900
+          export FERRETDB_LISTEN_ADDR=127.0.0.1:28900
+          python3 releases/mac/smoke-app.py "$command" "$ROOT_URL/sign-in" \
+            "$PWD/.tools/tmp/mac-smoke.log"
+
+      - name: Keep Mac smoke log
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ always() && env.BUILD_THIS == 'true' && steps.bundle.outputs.available == 'true' }}
+        with:
+          name: mac-smoke-${{ matrix.arch }}
+          path: .tools/tmp/mac-smoke.log
+          if-no-files-found: ignore
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ env.BUILD_THIS == 'true' && steps.bundle.outputs.available == 'true' }}
+        with:
+          name: mac-app-${{ matrix.arch }}
+          path: |
+            dist/*.app.zip
+            dist/*.app.zip.sha256sum
+          if-no-files-found: error
+
+      # Attached HERE, by the job that made and smoke-tested the app, the moment
+      # it passed - not by a later job that waited for both architectures and
+      # then uploaded them together. always() + the smoke test's outcome: a
+      # cancel that arrives after the app was built and checked still attaches
+      # it.
+      - name: Attach this Mac app to the release
+        if: ${{ always() && env.BUILD_THIS == 'true' && steps.bundle.outputs.available == 'true' && steps.smoke.outcome == 'success' && inputs.publish != false }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release.outputs.tag }}
+          VERSION: ${{ needs.release.outputs.version }}
+          MAC_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          zip="dist/WeKan-${VERSION}-mac-${MAC_ARCH}.app.zip"
+          # The checksum is checked against the zip before it goes up, the same
+          # check the old collect-and-upload job made.
+          ( cd dist && shasum -a 256 -c "$(basename "$zip").sha256sum" )
+          # Retried, bounded, and verified by name and size from the release side.
+          bash releases/github-release-upload.sh "$GITHUB_REPOSITORY" "$TAG" "$zip" "${zip}.sha256sum"
+
+  # The last job no longer uploads anything: each build job above attached its
+  # own app as soon as it was built and smoke-tested. This one only says, at
+  # the end, which apps are on the release - and it runs even when the run was
+  # cancelled (always()), so the summary covers whatever did get attached.
+  publish:
+    name: Check which Mac apps are on the release
+    needs: [release, build]
+    if: ${{ always() && needs.release.result == 'success' && inputs.publish != false }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Say which Mac apps are attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release.outputs.tag }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[].name' > published.txt
+          if ! grep -qE '\.app\.zip$' published.txt; then
+            echo "::notice::No Mac app could be wrapped; check the macOS bundle jobs."
+            exit 0
+          fi
+          for arch in arm64 amd64; do
+            for file in "WeKan-${VERSION}-mac-${arch}.app.zip" "WeKan-${VERSION}-mac-${arch}.app.zip.sha256sum"; do
+              grep -qxF "$file" published.txt || \
+                echo "::warning::$file is not on $TAG - see the Mac app $arch build job's log"
+            done
+          done
+          grep -E '\.app\.zip' published.txt || true

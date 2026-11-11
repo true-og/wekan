@@ -1,14 +1,17 @@
+import { parseDueAt, checklistWithItems } from '/server/lib/checklistDeadlines';
 import { Meteor } from 'meteor/meteor';
 import { WebApp } from 'meteor/webapp';
+import { assertListNotRefused } from '/server/lib/listPermissionGate';
 import { Authentication } from '/server/authentication';
 import { sendJsonResult } from '/server/apiMiddleware';
 import { ReactiveCache } from '/imports/reactiveCache';
-import { allowIsBoardMemberByCard } from '/server/lib/utils';
+import { requireBoardMutation } from '/models/lib/boardMutationGuard';
 import Checklists from '/models/checklists';
 import ChecklistItems from '/models/checklistItems';
 import Activities from '/models/activities';
 import { ensureIndex } from '/server/lib/mongoStartup';
 import { backfillBoardIdFromCard } from '/server/lib/denormalizeBoardId';
+const { deferSyncChecklistRecording } = require('/server/lib/syncRecordingScope');
 
 Meteor.methods({
   async moveChecklist(checklistId, newCardId) {
@@ -29,14 +32,17 @@ Meteor.methods({
       throw new Meteor.Error('card-not-found', 'Target card not found');
     }
 
-    // allowIsBoardMemberByCard is async; it was previously both unimported and
-    // un-awaited, so the membership check never actually ran. Import + await it.
     const sourceCard = await ReactiveCache.getCard(checklist.cardId);
-    if (!(await allowIsBoardMemberByCard(this.userId, sourceCard))) {
-      throw new Meteor.Error('not-authorized', 'Not authorized to move checklist from source card');
-    }
-    if (!(await allowIsBoardMemberByCard(this.userId, newCard))) {
-      throw new Meteor.Error('not-authorized', 'Not authorized to move checklist to target card');
+    const sourceBoard = sourceCard && await ReactiveCache.getBoard(sourceCard.boardId);
+    const targetBoard = await ReactiveCache.getBoard(newCard.boardId);
+    requireBoardMutation(this.userId, sourceBoard, 'moveChecklist:source', Meteor);
+    requireBoardMutation(this.userId, targetBoard, 'moveChecklist:destination', Meteor);
+    // Both cards change: the caller may edit each, which for an assigned-only
+    // member means their own (GHSA-r4gm-mjj9-g3x8).
+    const { canEditCardOrLinkedCard } = require('/server/lib/linkedCardPermission');
+    if (!sourceCard || !(await canEditCardOrLinkedCard(this.userId, sourceCard, sourceBoard)) ||
+        !(await canEditCardOrLinkedCard(this.userId, newCard, targetBoard))) {
+      throw new Meteor.Error('not-authorized', 'You cannot change these cards.');
     }
 
     const activities = await ReactiveCache.getActivities({ checklistId });
@@ -73,8 +79,11 @@ Meteor.methods({
 // single reactive cursor on boardId and still see checklists on newly added
 // cards. Server-authoritative: the board publication runs on the server, so the
 // server document carrying boardId is what matters.
+// #6813: ALWAYS from the card, not only when missing - a client's own boardId
+// would otherwise stay, and a document on its own card could carry another
+// board's id (published to that board, and mistaken for being on it).
 Checklists.before.insert(async (userId, doc) => {
-  if (!doc.boardId && doc.cardId) {
+  if (doc.cardId) {
     const card = await ReactiveCache.getCard(doc.cardId);
     if (card) {
       doc.boardId = card.boardId;
@@ -104,6 +113,8 @@ Meteor.startup(async () => {
 });
 
 Checklists.after.insert(async (userId, doc) => {
+  // A durable rule addChecklist writes this activity from its saved plan.
+  if (deferSyncChecklistRecording('checklistActivity', doc)) return;
   const card = await ReactiveCache.getCard(doc.cardId);
   if (!card) {
     console.warn('[Checklists.after.insert] Card not found for cardId:', doc.cardId, '— skipping addChecklist activity.');
@@ -122,13 +133,10 @@ Checklists.after.insert(async (userId, doc) => {
 });
 
 Checklists.before.remove(async (userId, doc) => {
+  // A durable rule removeChecklist writes this activity from its saved plan.
+  if (deferSyncChecklistRecording('checklistActivity', doc)) return;
   try {
-    const activities = await ReactiveCache.getActivities({ checklistId: doc._id });
-    if (activities) {
-      for (const activity of activities) {
-        await Activities.removeAsync(activity._id);
-      }
-    }
+    // #1598: keep the checklist's timestamped activity trail.
     // When a whole list/card is deleted, the parent card may already be gone by
     // the time its checklists are removed (cascade delete). Skip the activity
     // then instead of dereferencing an undefined card, which would throw an
@@ -153,6 +161,22 @@ Checklists.before.remove(async (userId, doc) => {
   }
 });
 
+// #6816: a deleted checklist takes its items with it. Before this, deleting a
+// checklist - in the card, through the REST API or by a rule - left every item
+// in the database with a checklistId that points nowhere: invisible, never
+// cleaned up, and still found by searches on items. One production database had
+// 2335 of them from 690 deleted checklists. Deleting a card already removes its
+// items the same way (models/cards.js), without an activity per item: the
+// checklist's own removeChecklist activity above records the deletion.
+Checklists.after.remove(async (userId, doc) => {
+  if (!doc || !doc._id) return;
+  try {
+    await ChecklistItems.direct.removeAsync({ checklistId: doc._id });
+  } catch (e) {
+    console.error('[Checklists.after.remove] could not remove the items of checklist', doc._id, e);
+  }
+});
+
 WebApp.handlers.get(
   '/api/boards/:boardId/cards/:cardId/checklists',
   async function(req, res) {
@@ -172,14 +196,8 @@ WebApp.handlers.get(
       return;
     }
 
-    const checklists = (await ReactiveCache.getChecklists({ cardId: paramCardId })).map(function(
-      doc,
-    ) {
-      return {
-        _id: doc._id,
-        title: doc.title,
-      };
-    });
+    const checklists = await Promise.all((await ReactiveCache.getChecklists({ cardId: paramCardId }, { sort: ['sort'] }))
+      .map(doc => checklistWithItems(doc, ReactiveCache)));
     if (checklists) {
       sendJsonResult(res, {
         code: 200,
@@ -218,22 +236,14 @@ WebApp.handlers.get(
       cardId: paramCardId,
     });
     if (checklist) {
-      checklist.items = (await ReactiveCache.getChecklistItems({
-        checklistId: checklist._id,
-      })).map(function(doc) {
-        return {
-          _id: doc._id,
-          title: doc.title,
-          isFinished: doc.isFinished,
-        };
-      });
       sendJsonResult(res, {
         code: 200,
-        data: checklist,
+        data: await checklistWithItems(checklist, ReactiveCache),
       });
     } else {
       sendJsonResult(res, {
-        code: 500,
+        code: 404,
+        data: { error: 'Checklist not found or does not belong to the specified card' },
       });
     }
   },
@@ -243,10 +253,7 @@ WebApp.handlers.post(
   '/api/boards/:boardId/cards/:cardId/checklists',
   async function(req, res) {
     const paramBoardId = req.params.boardId;
-    await Authentication.checkBoardAccess(req.userId, paramBoardId);
-    const board = await ReactiveCache.getBoard(paramBoardId);
-    const addPermission = allowIsBoardMemberCommentOnly(req.userId, board);
-    await Authentication.checkAdminOrCondition(req.userId, addPermission);
+    await Authentication.checkBoardWriteAccess(req.userId, paramBoardId);
     const paramCardId = req.params.cardId;
 
     const card = await ReactiveCache.getCard({
@@ -260,9 +267,17 @@ WebApp.handlers.post(
       });
       return;
     }
+    // ListLockBleed (GHSA-4734-8vrg-8j3w): the list's refusal holds over REST too (#4527).
+    await assertListNotRefused(req.userId, await ReactiveCache.getBoard(paramBoardId), card.listId, 'write', 'rest:checklist');
 
+    const deadline = parseDueAt(req.body);
+    if (deadline.error) {
+      sendJsonResult(res, { code: 400, data: { error: deadline.error } });
+      return;
+    }
     const id = await Checklists.insertAsync({
       title: req.body.title,
+      ...(deadline.dueAt ? { dueAt: deadline.dueAt } : {}),
       cardId: paramCardId,
       sort: 0,
     });
@@ -297,13 +312,20 @@ WebApp.handlers.post(
   },
 );
 
-WebApp.handlers.delete(
+// #1037: GET/POST/DELETE were exposed for a checklist but there was no way to
+// rename one over the REST API - a client had to delete and re-create it,
+// losing the checklistId and its items. Mirrors the DELETE handler right below
+// it (same lookup / auth), and lists.js's own PUT for the same "edit the
+// title of a thing on the board" shape. `title` and optional `dueAt` are accepted: the other
+// per-checklist toggles (hideCheckedChecklistItems, resetInterval, etc.) are
+// not exposed anywhere over the REST API yet and are out of scope here.
+WebApp.handlers.put(
   '/api/boards/:boardId/cards/:cardId/checklists/:checklistId',
   async function(req, res) {
     const paramBoardId = req.params.boardId;
     const paramCardId = req.params.cardId;
     const paramChecklistId = req.params.checklistId;
-    await Authentication.checkBoardAccess(req.userId, paramBoardId);
+    await Authentication.checkBoardWriteAccess(req.userId, paramBoardId);
 
     const card = await ReactiveCache.getCard({
       _id: paramCardId,
@@ -316,6 +338,65 @@ WebApp.handlers.delete(
       });
       return;
     }
+    // ListLockBleed (GHSA-4734-8vrg-8j3w): the list's refusal holds over REST too (#4527).
+    await assertListNotRefused(req.userId, await ReactiveCache.getBoard(paramBoardId), card.listId, 'write', 'rest:checklist');
+
+    const checklist = await ReactiveCache.getChecklist({
+      _id: paramChecklistId,
+      cardId: paramCardId,
+    });
+    if (!checklist) {
+      sendJsonResult(res, {
+        code: 404,
+        data: { error: 'Checklist not found or does not belong to the specified card' },
+      });
+      return;
+    }
+
+    const deadline = parseDueAt(req.body);
+    const hasTitle = Object.prototype.hasOwnProperty.call(req.body || {}, 'title');
+    if (deadline.error || (hasTitle && (typeof req.body.title !== 'string' || !req.body.title.trim())) || (!hasTitle && !Object.prototype.hasOwnProperty.call(deadline, 'dueAt'))) {
+      sendJsonResult(res, { code: 400, data: { error: deadline.error || 'title or dueAt is required' } });
+      return;
+    }
+    const modifier = {};
+    if (hasTitle) modifier.$set = { title: req.body.title };
+    if (Object.prototype.hasOwnProperty.call(deadline, 'dueAt')) {
+      if (deadline.dueAt === null) modifier.$unset = { dueAt: '' };
+      else modifier.$set = { ...modifier.$set, dueAt: deadline.dueAt };
+    }
+    await Checklists.direct.updateAsync({ _id: paramChecklistId, cardId: paramCardId }, modifier);
+
+    sendJsonResult(res, {
+      code: 200,
+      data: {
+        _id: paramChecklistId,
+      },
+    });
+  },
+);
+
+WebApp.handlers.delete(
+  '/api/boards/:boardId/cards/:cardId/checklists/:checklistId',
+  async function(req, res) {
+    const paramBoardId = req.params.boardId;
+    const paramCardId = req.params.cardId;
+    const paramChecklistId = req.params.checklistId;
+    await Authentication.checkBoardWriteAccess(req.userId, paramBoardId);
+
+    const card = await ReactiveCache.getCard({
+      _id: paramCardId,
+      boardId: paramBoardId,
+    });
+    if (!card) {
+      sendJsonResult(res, {
+        code: 404,
+        data: { error: 'Card not found or does not belong to the specified board' },
+      });
+      return;
+    }
+    // ListLockBleed (GHSA-4734-8vrg-8j3w): the list's refusal holds over REST too (#4527).
+    await assertListNotRefused(req.userId, await ReactiveCache.getBoard(paramBoardId), card.listId, 'write', 'rest:checklist');
 
     const checklist = await ReactiveCache.getChecklist({
       _id: paramChecklistId,

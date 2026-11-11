@@ -9,42 +9,46 @@ template(name="cardTriggers")
           option(value="removed") {{_'r-removed-from'}}
       div.trigger-text
         | {{_'r-a-card'}}
-      div.trigger-button.trigger-button-person.js-show-user-field
-        i.fa.fa-user
+      button.trigger-button.trigger-button-person.js-show-user-field(type="button" aria-label="{{_ 'username'}}")
+        i.fa.fa-user(aria-hidden="true")
       div.user-details.hide-element
         div.trigger-text
           | {{_'r-by'}}
         div.trigger-dropdown
           input(class="user-name",type=text,placeholder="{{_'username'}}")
-    div.trigger-button.js-add-gen-label-trigger.js-goto-action
-      i.fa.fa-plus
+    button.trigger-button.js-add-gen-label-trigger.js-goto-action(type="button" aria-label="{{_ 'r-add-trigger'}}")
+      i.fa.fa-plus(aria-hidden="true")
 
   div.trigger-item
     div.trigger-content
-      div.trigger-text
-        | {{_'r-when-the-label'}}
+      unless ruleNameBeforeSubject
+        div.trigger-text
+          | {{_'r-when-the-label'}}
       div.trigger-dropdown
         select(id="spec-label")
           each labels
             option(value="#{_id}" style="background-color: #{name}")
               = translatedname
+      if ruleNameBeforeSubject
+        div.trigger-text
+          | {{_'r-when-the-label'}}
       div.trigger-text
-        | {{_'r-is'}}
+        | {{ruleTriggerCopula}}
       div.trigger-dropdown
         select(id="spec-label-action")
           option(value="added") {{_'r-added-to'}}
           option(value="removed") {{_'r-removed-from'}}
       div.trigger-text
         | {{_'r-a-card'}}
-      div.trigger-button.trigger-button-person.js-show-user-field
-        i.fa.fa-user
+      button.trigger-button.trigger-button-person.js-show-user-field(type="button" aria-label="{{_ 'username'}}")
+        i.fa.fa-user(aria-hidden="true")
       div.user-details.hide-element
         div.trigger-text
           | {{_'r-by'}}
         div.trigger-dropdown
           input(class="user-name",type=text,placeholder="{{_'username'}}")
-    div.trigger-button.js-add-spec-label-trigger.js-goto-action
-      i.fa.fa-plus
+    button.trigger-button.js-add-spec-label-trigger.js-goto-action(type="button" aria-label="{{_ 'r-add-trigger'}}")
+      i.fa.fa-plus(aria-hidden="true")
 
   div.trigger-item
     div.trigger-content
@@ -56,59 +60,186 @@ template(name="cardTriggers")
           option(value="removed") {{_'r-removed-from'}}
       div.trigger-text
         | {{_'r-a-card'}}
-      div.trigger-button.trigger-button-person.js-show-user-field
-        i.fa.fa-user
+      button.trigger-button.trigger-button-person.js-show-user-field(type="button" aria-label="{{_ 'username'}}")
+        i.fa.fa-user(aria-hidden="true")
       div.user-details.hide-element
         div.trigger-text
           | {{_'r-by'}}
         div.trigger-dropdown
           input(class="user-name",type=text,placeholder="{{_'username'}}")
-    div.trigger-button.js-add-gen-member-trigger.js-goto-action
-      i.fa.fa-plus
+    button.trigger-button.js-add-gen-member-trigger.js-goto-action(type="button" aria-label="{{_ 'r-add-trigger'}}")
+      i.fa.fa-plus(aria-hidden="true")
 
 
   div.trigger-item
     div.trigger-content
-      div.trigger-text
-        | {{_'r-when-the-member'}}
+      unless ruleNameBeforeSubject
+        div.trigger-text
+          | {{_'r-when-the-member'}}
       div.trigger-dropdown
         input(id="spec-member",type=text,placeholder="{{_'r-name'}}")
+      if ruleNameBeforeSubject
+        div.trigger-text
+          | {{_'r-when-the-member'}}
       div.trigger-text
-        | {{_'r-is'}}
+        | {{ruleTriggerCopula}}
       div.trigger-dropdown
         select(id="spec-member-action")
           option(value="added") {{_'r-added-to'}}
           option(value="removed") {{_'r-removed-from'}}
       div.trigger-text
         | {{_'r-a-card'}}
-      div.trigger-button.trigger-button-person.js-show-user-field
-        i.fa.fa-user
+      button.trigger-button.trigger-button-person.js-show-user-field(type="button" aria-label="{{_ 'username'}}")
+        i.fa.fa-user(aria-hidden="true")
       div.user-details.hide-element
         div.trigger-text
           | {{_'r-by'}}
         div.trigger-dropdown
           input(class="user-name",type=text,placeholder="{{_'username'}}")
-    div.trigger-button.js-add-spec-member-trigger.js-goto-action
-      i.fa.fa-plus
+    button.trigger-button.js-add-spec-member-trigger.js-goto-action(type="button" aria-label="{{_ 'r-add-trigger'}}")
+      i.fa.fa-plus(aria-hidden="true")
+
+  div.trigger-item
+    div.trigger-content
+      div.trigger-text
+        | {{_'r-when-a-assignee'}}
+      div.trigger-dropdown
+        select(id="gen-assignee-action")
+          option(value="added") {{_'r-added-to'}}
+          option(value="removed") {{_'r-removed-from'}}
+      div.trigger-text
+        | {{_'r-a-card'}}
+      button.trigger-button.trigger-button-person.js-show-user-field(type="button" aria-label="{{_ 'username'}}")
+        i.fa.fa-user(aria-hidden="true")
+      div.user-details.hide-element
+        div.trigger-text
+          | {{_'r-by'}}
+        div.trigger-dropdown
+          input(class="user-name",type=text,placeholder="{{_'username'}}")
+    button.trigger-button.js-add-gen-assignee-trigger.js-goto-action(type="button" aria-label="{{_ 'r-add-trigger'}}")
+      i.fa.fa-plus(aria-hidden="true")
+
+
+  div.trigger-item
+    div.trigger-content
+      unless ruleNameBeforeSubject
+        div.trigger-text
+          | {{_'r-when-the-assignee'}}
+      div.trigger-dropdown
+        input(id="spec-assignee",type=text,placeholder="{{_'r-name'}}")
+      if ruleNameBeforeSubject
+        div.trigger-text
+          | {{_'r-when-the-assignee'}}
+      div.trigger-text
+        | {{ruleTriggerCopula}}
+      div.trigger-dropdown
+        select(id="spec-assignee-action")
+          option(value="added") {{_'r-added-to'}}
+          option(value="removed") {{_'r-removed-from'}}
+      div.trigger-text
+        | {{_'r-a-card'}}
+      button.trigger-button.trigger-button-person.js-show-user-field(type="button" aria-label="{{_ 'username'}}")
+        i.fa.fa-user(aria-hidden="true")
+      div.user-details.hide-element
+        div.trigger-text
+          | {{_'r-by'}}
+        div.trigger-dropdown
+          input(class="user-name",type=text,placeholder="{{_'username'}}")
+    button.trigger-button.js-add-spec-assignee-trigger.js-goto-action(type="button" aria-label="{{_ 'r-add-trigger'}}")
+      i.fa.fa-plus(aria-hidden="true")
 
   div.trigger-item
     div.trigger-content
       div.trigger-text
         | {{_'r-when-a-attach'}}
       div.trigger-text
-        | {{_'r-is'}}
+        | {{ruleTriggerCopula}}
       div.trigger-dropdown
         select(id="attach-action")
-          option(value="added") {{_'r-added-to'}}
-          option(value="removed") {{_'r-removed-from'}}
+          option(value="added") {{_'r-attachment-added-to'}}
+          option(value="removed") {{_'r-attachment-removed-from'}}
       div.trigger-text
         | {{_'r-a-card'}}
-      div.trigger-button.trigger-button-person.js-show-user-field
-        i.fa.fa-user
+      button.trigger-button.trigger-button-person.js-show-user-field(type="button" aria-label="{{_ 'username'}}")
+        i.fa.fa-user(aria-hidden="true")
       div.user-details.hide-element
         div.trigger-text
           | {{_'r-by'}}
         div.trigger-dropdown
           input(class="user-name",type=text,placeholder="{{_'username'}}")
-    div.trigger-button.js-add-attachment-trigger.js-goto-action
-      i.fa.fa-plus
+    button.trigger-button.js-add-attachment-trigger.js-goto-action(type="button" aria-label="{{_ 'r-add-trigger'}}")
+      i.fa.fa-plus(aria-hidden="true")
+
+  div.trigger-item(title="{{_'advanced-filter-description'}}")
+    div.trigger-content
+      div.trigger-text
+        | {{_'r-when-a-card-matches-advanced-filter'}}
+      div.trigger-dropdown
+        input(class="advanced-filter-trigger-value",type=text,placeholder="{{_'advanced-filter-label'}}")
+    button.trigger-button.js-add-advanced-filter-trigger.js-goto-action(type="button" aria-label="{{_ 'r-add-trigger'}}")
+      i.fa.fa-plus(aria-hidden="true")
+
+  div.trigger-item(data-editor-scope title="{{_'text-contains-trigger-description'}}")
+    div.trigger-content
+      div.trigger-text
+        | {{_'r-when-a-card-title-or-description-contains'}}
+      div.trigger-dropdown
+        textarea(rows="2" data-editor-submit=".js-goto-action, .js-goto-rules" class="text-contains-trigger-value",placeholder="{{_'text-contains-trigger-label'}}")
+    button.trigger-button.js-add-text-contains-trigger.js-goto-action(type="button" aria-label="{{_ 'r-add-trigger'}}")
+      i.fa.fa-plus(aria-hidden="true")
+
+  div.trigger-item
+    div.trigger-content
+      div.trigger-text
+        | {{_'r-when-a-due-date-changed'}}
+      button.trigger-button.trigger-button-person.js-show-user-field(type="button" aria-label="{{_ 'username'}}")
+        i.fa.fa-user(aria-hidden="true")
+      div.user-details.hide-element
+        div.trigger-text
+          | {{_'r-by'}}
+        div.trigger-dropdown
+          input(class="user-name",type=text,placeholder="{{_'username'}}")
+    button.trigger-button.js-add-due-date-changed-trigger.js-goto-action(type="button" aria-label="{{_ 'r-add-trigger'}}")
+      i.fa.fa-plus(aria-hidden="true")
+
+  div.trigger-item
+    div.trigger-content
+      div.trigger-text
+        | {{_'r-when-a-start-date-changed'}}
+      button.trigger-button.trigger-button-person.js-show-user-field(type="button" aria-label="{{_ 'username'}}")
+        i.fa.fa-user(aria-hidden="true")
+      div.user-details.hide-element
+        div.trigger-text
+          | {{_'r-by'}}
+        div.trigger-dropdown
+          input(class="user-name",type=text,placeholder="{{_'username'}}")
+    button.trigger-button.js-add-start-date-changed-trigger.js-goto-action(type="button" aria-label="{{_ 'r-add-trigger'}}")
+      i.fa.fa-plus(aria-hidden="true")
+
+  div.trigger-item
+    div.trigger-content
+      div.trigger-text
+        | {{_'r-when-a-end-date-changed'}}
+      button.trigger-button.trigger-button-person.js-show-user-field(type="button" aria-label="{{_ 'username'}}")
+        i.fa.fa-user(aria-hidden="true")
+      div.user-details.hide-element
+        div.trigger-text
+          | {{_'r-by'}}
+        div.trigger-dropdown
+          input(class="user-name",type=text,placeholder="{{_'username'}}")
+    button.trigger-button.js-add-end-date-changed-trigger.js-goto-action(type="button" aria-label="{{_ 'r-add-trigger'}}")
+      i.fa.fa-plus(aria-hidden="true")
+
+  div.trigger-item
+    div.trigger-content
+      div.trigger-text
+        | {{_'r-when-a-received-date-changed'}}
+      button.trigger-button.trigger-button-person.js-show-user-field(type="button" aria-label="{{_ 'username'}}")
+        i.fa.fa-user(aria-hidden="true")
+      div.user-details.hide-element
+        div.trigger-text
+          | {{_'r-by'}}
+        div.trigger-dropdown
+          input(class="user-name",type=text,placeholder="{{_'username'}}")
+    button.trigger-button.js-add-received-date-changed-trigger.js-goto-action(type="button" aria-label="{{_ 'r-add-trigger'}}")
+      i.fa.fa-plus(aria-hidden="true")

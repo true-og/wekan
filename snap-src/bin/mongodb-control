@@ -23,11 +23,55 @@ echo "  mongodb-port: $(snapctl get mongodb-port 2>/dev/null || echo 'not set')"
 echo "  mongodb-bind-ip: $(snapctl get mongodb-bind-ip 2>/dev/null || echo 'not set')"
 echo "  mongodb-bind-unix-socket: $(snapctl get mongodb-bind-unix-socket 2>/dev/null || echo 'not set')"
 
+# Maintenance mode: if $SNAP_COMMON/.wekan-maintenance exists, skip ALL automatic migration
+# and service-disable logic below and just start mongod, so an admin can run MongoDB by hand
+# (`snap start wekan.mongodb`) to reach the data over the MongoDB wire protocol WITHOUT the
+# service shutting itself down. Toggle with `snap run wekan.maintenance on|off`. NOTE: MongoDB
+# and FerretDB share port 27019, so run only one of them at a time.
+WEKAN_MAINTENANCE="$SNAP_COMMON/.wekan-maintenance"
+if [ -f "$WEKAN_MAINTENANCE" ]; then
+    echo "MAINTENANCE MODE (.wekan-maintenance present): starting MongoDB directly, skipping"
+    echo "auto-migration and auto-disable. Stop with 'snap stop wekan.mongodb'."
+fi
+
 if [ "true" == "${DISABLE_MONGODB}" ]; then
     echo "mongodb is disabled. Stop service"
     snapctl stop --disable ${SNAP_NAME}.mongodb
     exit 0
 fi
+
+# WHEN MongoDB RUNS AT ALL. There is no `database` setting to consult any more:
+# MongoDB is in this snap to be READ while a migration is owed, and bin/database-role
+# says whether that is still the case. It answers from the data - a FerretDB with
+# something in it, and a finished migration - so this service stops itself exactly
+# when the site no longer needs it, and keeps running when the site still does
+# (an unfinished migration, or a FerretDB that is missing).
+
+# First-boot migration: upgrading from an old MongoDB-based WeKan snap. Before
+# starting mongod normally, hand off to migration-control, which reads the
+# existing MongoDB data (mongod 7 for MongoDB 7 data — including the arm64 snaps
+# on newest WeKan; the bundled old mongod for amd64 6.09/MongoDB 3.2 data),
+# migrates text data to FerretDB v1 (SQLite) and CollectionFS/Meteor-Files GridFS
+# attachments+avatars to the filesystem (progress at ROOT_URL, resumable), then
+# and marks the migration done. It is idempotent and only marks on success; if not
+# pending it returns non-zero and mongod starts as usual.
+if [ ! -f "$WEKAN_MAINTENANCE" ] && bash "$SNAP/bin/migration-pending"; then
+    echo "MongoDB -> FerretDB migration pending; running migration-control..."
+    exec bash "$SNAP/bin/migration-control"
+fi
+
+# If the FerretDB backend is selected, MongoDB must not run (FerretDB binds the
+# same port). Disable this service; ferretdb-control starts FerretDB instead.
+if [ ! -f "$WEKAN_MAINTENANCE" ] && [ "ferretdb" = "$(bash "$SNAP/bin/database-role")" ]; then
+    echo "$(bash "$SNAP/bin/database-role" --why): WeKan runs on FerretDB. Stopping mongodb service."
+    snapctl stop --disable ${SNAP_NAME}.mongodb 2>/dev/null || true
+    exit 0
+fi
+
+# The replica-set setup below uses db-eval (the bundled Node.js 26 + the `mongodb`
+# driver), not mongosh, so there is no client telemetry to disable. mongod itself
+# has no phone-home telemetry (Cloud Free Monitoring is opt-in and stays off).
+DB_EVAL="$SNAP/bin/db-eval"
 
 # make sure we have set minimum env variables for locale
 if [ -z "${LANG}" ]; then
@@ -82,6 +126,27 @@ echo "  MONGODB_PORT: ${MONGODB_PORT}"
 echo "  MONGODB_BIND_UNIX_SOCKET: ${MONGODB_BIND_UNIX_SOCKET:-not set}"
 echo "  BIND_OPTIONS: ${BIND_OPTIONS}"
 
+# WiredTiger cache size, RAM-aware. This was previously HARDCODED to 32 GB, which on any
+# box with less than ~34 GB RAM made mongod get OOM-killed shortly after startup: the
+# temporary mongod (used to initialise the replica set) died before it could be reached,
+# so the replica set was NEVER initiated, the final mongod ran with --replSet rs0 but no
+# config, no PRIMARY was ever elected, and WeKan looped "MongoDB not ready yet, retrying
+# in 5 seconds..." forever (issue #6454). Compute a safe value from MemTotal instead:
+# ~50% of (RAM - 1 GB) - the same formula mongod uses for its own default - never above
+# RAM, capped at 32 GB (the old value, kept as the ceiling for big servers), min 1 GB.
+# Override with the MONGODB_WIREDTIGER_CACHE_GB env var if you need a specific size.
+if [ -n "${MONGODB_WIREDTIGER_CACHE_GB}" ]; then
+    WT_CACHE_GB="${MONGODB_WIREDTIGER_CACHE_GB}"
+else
+    _mem_kb=$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null)
+    [ -z "${_mem_kb}" ] && _mem_kb=2097152   # assume 2 GB if MemTotal is unreadable
+    _mem_gb=$(( _mem_kb / 1024 / 1024 ))
+    WT_CACHE_GB=$(( (_mem_gb - 1) / 2 ))
+    [ "${WT_CACHE_GB}" -lt 1 ]  && WT_CACHE_GB=1
+    [ "${WT_CACHE_GB}" -gt 32 ] && WT_CACHE_GB=32
+fi
+echo "  WiredTiger cache: ${WT_CACHE_GB} GB (RAM-aware; formerly hardcoded 32 GB - see #6454)"
+
 # Check if MongoDB is already running
 check_mongodb_running() {
     local port="${MONGODB_PORT}"
@@ -121,11 +186,238 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# ── #6458/#6466: decide a real outcome when mongod cannot start ──────────────
+# mongod can be unable to start at all: SIGILL (exit 132) on x86_64 CPUs without
+# AVX (MongoDB >= 5.0 requires AVX — #6458), or "This version of MongoDB is too
+# recent to start up on the existing data files" when the data is still MongoDB
+# 3.x after a failed/paused migration (#6466). Previously the exit status of the
+# mongod fork was never checked: the script pinged a dead port for ~10 minutes,
+# snapd restarted the service, and the cycle repeated forever while WeKan served
+# 502 Bad Gateway. Instead: switch to a COMPLETED FerretDB migration if one
+# exists, else (re)run the MongoDB → FerretDB migration (FerretDB is pure Go +
+# SQLite — no AVX needed; MongoDB 3.x data is read with the bundled 3.2 tools),
+# with a counter so a persistently failing migration cannot ping-pong forever.
+# #6471: the database files are from a MongoDB this snap has no reader for (4.x /
+# 5.x: mongod 7 says "too recent to start up on the existing data files", and the
+# bundled 3.2 tools cannot open them either). migration-control writes this marker
+# after finding that out. Starting mongod here would fail in exactly the same way,
+# be restarted by snapd, re-trigger the migration, and loop - so do not start it at
+# all. wekan-control serves the explanatory page; the data is untouched.
+MONGODB_DATA_TOO_OLD="${SNAP_COMMON}/.mongodb-data-too-old"
+# #6471: a marker written by an OLDER revision is not an answer about this one.
+# It records that no reader in THAT snap could open the data - and v10.81 added a
+# third reader (mongod 4.2) for exactly these databases. An instance that had
+# already failed on v10.79/v10.80 carried the marker, so the version with the fix
+# refused to start mongod, never ran the migration, and printed none of the new
+# messages: upgrading changed nothing, which is what the reporter saw. Same
+# revision, same refusal; new revision, new chance.
+if [ -f "$MONGODB_DATA_TOO_OLD" ] && bash "$SNAP/bin/stale-marker" "$MONGODB_DATA_TOO_OLD"; then
+    echo "The 'database too old' marker was written by a different snap revision; this one may have readers it did not. Trying again."
+    rm -f "$MONGODB_DATA_TOO_OLD" "${MONGODB_DATA_TOO_OLD}.revision"
+    rm -f "${SNAP_COMMON}/.mongod-start-failures"
+fi
+if [ -f "$MONGODB_DATA_TOO_OLD" ]; then
+    _can="$(cat "$MONGODB_DATA_TOO_OLD" 2>/dev/null)"
+    echo "MongoDB will NOT be started: the database files were made by an older MongoDB${_can:+ (MongoDB $_can or earlier can still read them)},"
+    echo "which this snap carries no reader for. Nothing has been changed - your data is untouched."
+    echo "See the page WeKan serves on its web port, or:"
+    echo "  1. sudo snap revert ${SNAP_INSTANCE_NAME:-wekan}   (and: sudo snap refresh --hold=forever ${SNAP_INSTANCE_NAME:-wekan})"
+    echo "  2. or dump the data with a MongoDB that can read it and restore it into this version."
+    echo "Remove ${MONGODB_DATA_TOO_OLD} to let the snap try again."
+    # 0, not 1: snapd restarts a failing service forever, and there is nothing here
+    # that a restart can fix.
+    exit 0
+fi
+MONGOD_FAIL_COUNT_FILE="${SNAP_COMMON}/.mongod-start-failures"
+# A COMPLETED FerretDB migration exists (marker + non-empty SQLite): switch the
+# snap to it and exit. (A PARTIAL migration — SQLite present but no marker — is
+# NOT switched to.) Returns 1 when there is no completed migration.
+switch_to_completed_ferretdb() {
+    local svc="${SNAP_INSTANCE_NAME:-${SNAP_NAME:-wekan}}"
+    # #6583: "completed" is not the same as "up to date". The migration is a
+    # SNAPSHOT and nothing keeps it in step, so if MongoDB went on being written
+    # to afterwards - which is what a `snap revert` to a mongod revision produces,
+    # for as long as the revert lasts - the SQLite beside it is behind by that
+    # much. Switching to it then serves data from the day the migration ran and
+    # hides everything since, which is not a lost database (it is all still in
+    # $SNAP_COMMON, which `snap revert` does not roll back) but is indistinguishable
+    # from one to the person looking at it.
+    local stale_rc=0
+    bash "$SNAP/bin/ferretdb-migration-stale" "$SNAP_COMMON" || stale_rc=$?
+    if [ "$stale_rc" -eq 0 ]; then
+        echo "NOT switching to FerretDB: the migrated copy is OLDER than the MongoDB data."
+        echo "MongoDB keeps serving, so the newest data is the data you see. To move to"
+        echo "FerretDB, migrate again so the copy is current:  snap run wekan.migrate"
+        return 1
+    fi
+    # AMBIGUOUS (2): both copies have been written to since the migration, so which
+    # one is "the database" is not something a timestamp knows. Switching here is
+    # an automatic, silent choice between two databases that both contain work -
+    # so it does not happen. mongod is already up; it keeps serving, and the admin
+    # is told what to look at. (#6583, comment 5259638482: an automatic switch made
+    # on the wrong evidence is exactly how the wrong copy gets served.)
+    if [ "$stale_rc" -eq 2 ]; then
+        echo "NOT switching to FerretDB: both it and MongoDB have been written to since"
+        echo "the migration, and which holds the work you want cannot be told from"
+        echo "timestamps. MongoDB keeps serving - nothing has been changed or deleted."
+        echo "The next start reads both databases and brings what MongoDB has into"
+        echo "FerretDB (inserting what is missing, overwriting nothing), so the work done"
+        echo "on either one ends up in the card History of the database WeKan serves."
+        return 1
+    fi
+    if [ -f "$SNAP_COMMON/.migration-to-ferretdb-done" ] && \
+       bash "$SNAP/bin/ferretdb-has-data" "$SNAP_COMMON/files/db" 2>/dev/null; then
+        echo "A completed FerretDB migration exists; starting FerretDB and stopping MongoDB."
+        snapctl start --enable "${svc}.ferretdb" 2>/dev/null || true
+        snapctl restart "${svc}.ferretdb" 2>/dev/null || true
+        snapctl restart "${svc}.wekan" 2>/dev/null || true
+        snapctl stop --disable "${svc}.mongodb" 2>/dev/null || true
+        exit 0
+    fi
+    return 1
+}
+handle_mongod_start_failure() {
+    local rc="$1"
+    echo "ERROR: mongod failed to start (exit code ${rc})."
+    if [ "$rc" -eq 132 ]; then
+        echo "Exit 132 = SIGILL (Illegal instruction): MongoDB 5.0+ x86_64 binaries require a CPU"
+        echo "with AVX support (arm64: ARMv8.2-A), and this CPU has none — and no working"
+        echo "qemu-user was available to emulate it (see cpu-exec in the log above)."
+        echo "FerretDB (pure Go + SQLite) has no such CPU requirements and is the supported fallback."
+    fi
+    if [ "$rc" -eq 134 ]; then
+        # An upgrade report: an admin restored a dump into the new snap, then copied
+        # the WHOLE old common directory back on top of it ("cp -pR /root/common/*
+        # /var/snap/wekan/common/") to get their attachments. That replaced the data
+        # files mongod had open, mongod aborted seconds later, and after the restart
+        # every board was gone. The abort is all the log shows, so say what it
+        # usually means - docs/Backup/Backup.md says which directory to copy back.
+        echo "Exit 134 = SIGABRT: mongod aborted. The usual cause is the data directory being"
+        echo "changed underneath a RUNNING mongod - typically an old backup copied on top of it,"
+        echo "e.g. 'cp -pR /root/common/* $SNAP_COMMON/'. Only the 'files' directory (attachments"
+        echo "and avatars) may be copied back like that; the raw database files (*.wt, WiredTiger*,"
+        echo "_mdb_catalog.wt, sizeStorer.wt, storage.bson, mongod.lock, journal/) must not be."
+        echo "If that is what happened, restore your dump again:  snap run ${SNAP_INSTANCE_NAME:-wekan}.database-restore <archive>"
+    fi
+    echo "Last mongod log lines:"
+    tail -n 5 "$MONGO_LOG_FILE" 2>/dev/null || true
+    if tail -n 50 "$MONGO_LOG_FILE" 2>/dev/null | grep -q "Failed to open the spill WiredTiger instance"; then
+        # MongoDB 8.2's scratch instance for queries that spill to disk. mongod
+        # empties it on every start; when that fails after an abort it opens the
+        # half-emptied directory, finds no version file, calls it corruption and
+        # fasserts - on every start, forever. The real data is untouched. This
+        # script deletes the directory before each start (clear_spill_directory),
+        # so reaching this branch means that deletion did not happen either.
+        echo "The failure is MongoDB's scratch directory ${MONGO_DATA_DIR}/_tmp/spilldb, not the data:"
+        echo "delete that directory (only that one) and start again - see docs/Databases/MongoDB/Storage-Requirements.md"
+    fi
+
+    switch_to_completed_ferretdb || true
+
+    # #6471: the count belongs to a REVISION, not to the installation. Three
+    # failures is loop protection - it stops migration<->mongod restarting each
+    # other forever - but it was never reset, so an instance that had failed more
+    # than three times on an older snap would not even attempt the migration on a
+    # newer one that could have completed it. A different revision starts at zero.
+    local fails=0
+    if [ -f "$MONGOD_FAIL_COUNT_FILE" ] && \
+       ! bash "$SNAP/bin/stale-marker" "$MONGOD_FAIL_COUNT_FILE"; then
+        fails="$(cat "$MONGOD_FAIL_COUNT_FILE" 2>/dev/null || echo 0)"
+    fi
+    case "$fails" in (*[!0-9]*|'') fails=0;; esac
+    fails=$((fails + 1))
+    echo "$fails" > "$MONGOD_FAIL_COUNT_FILE"
+    bash "$SNAP/bin/stale-marker" --stamp "$MONGOD_FAIL_COUNT_FILE"
+
+    # MongoDB data that this mongod cannot serve: the only way forward is the
+    # MongoDB → FerretDB migration. Re-enable and run it now (it RESUMES from its
+    # checkpoint if one exists), unless it keeps failing too (counter guards
+    # against a migration↔mongod restart loop).
+    # ...or a migration that COMPLETED but has since fallen behind the MongoDB data
+    # (#6583). mongod cannot start, so keeping MongoDB is not on offer here and the
+    # only two outcomes are a FRESH copy or a stale one. Migrate again: the
+    # migration reads the data with its own temporary mongod and the 4.2/3.2
+    # readers, none of which is the mongod that just failed, so it can still reach
+    # everything written since. Serving the stale copy instead would show data from
+    # the day it ran and say nothing about it.
+    #
+    # ONLY exit 0 counts, and that matters more here than anywhere else: this is
+    # the branch that goes on to DELETE files/db. AMBIGUOUS (2) means the SQLite
+    # has been written to since the migration - it holds work of its own - so
+    # wiping it to re-copy MongoDB would destroy the very thing in doubt. The `if`
+    # gives that for free, and it must stay a test for 0 rather than "not 1".
+    local stale_migration=1
+    if [ -f "$SNAP_COMMON/.migration-to-ferretdb-done" ] && \
+       bash "$SNAP/bin/ferretdb-migration-stale" "$SNAP_COMMON" 2>/dev/null; then
+        stale_migration=0
+    fi
+    if [ "$fails" -le 3 ] && \
+       { [ ! -f "$SNAP_COMMON/.migration-to-ferretdb-done" ] || [ "$stale_migration" -eq 0 ]; } && \
+       { [ -f "$SNAP_COMMON/WiredTiger" ] || ls "$SNAP_COMMON"/collection-*.wt >/dev/null 2>&1; }; then
+        if [ "$stale_migration" -eq 0 ]; then
+            # A stale migration has to be RESTARTED, not resumed. migration-control
+            # exits immediately while the marker is there ("already handled"), and
+            # the checkpoint plus the old SQLite describe a finished copy of
+            # last month's data - resuming onto that would keep every row the
+            # revert period added out of it. Clear the three things that say
+            # "already done" so the migration reads MongoDB again from the start.
+            # The MongoDB data itself is never touched, here or by the migration.
+            echo "The completed FerretDB migration is older than the MongoDB data; migrating again from scratch so nothing written since is left out."
+            rm -f "$SNAP_COMMON/.migration-to-ferretdb-done"
+            rm -f "$SNAP_COMMON/migration-progress.json"
+            rm -f "$SNAP_COMMON/.attachments-files-v2-done"
+            rm -rf "${SNAP_COMMON:?}/files/db/"* 2>/dev/null || true
+        fi
+        echo "mongod cannot serve this data; running the MongoDB -> FerretDB migration instead (attempt ${fails}/3)."
+        snapctl set migrate=on 2>/dev/null || true
+        rm -f "${SNAP_COMMON}/mongodb.pid"
+        exec bash "$SNAP/bin/migration-control"
+    fi
+
+    echo "mongod cannot start, and the MongoDB -> FerretDB migration has not completed (attempt ${fails})."
+    echo "Fix the problem, then retry/resume the migration with:  snap run wekan.migrate"
+    echo "Diagnostics: ${MONGO_LOG_FILE} and ${SNAP_COMMON}/migration-*.log"
+    exit 1
+}
+
+# #6458: CPU features the bundled MongoDB 7 needs: AVX on x86_64 (missing on
+# old CPUs and on hypervisors/sandboxes that mask it — the #6458 report runs
+# inside QEMU without AVX), ARMv8.2-A on arm64 ('atomics'/LSE is the practical
+# /proc/cpuinfo proxy; Raspberry Pi 4 and older lack it). cpu-exec runs mongod
+# directly when the CPU has them and through qemu-user emulation when not —
+# the general mechanism replacing the old amd64-only PATH wrappers that every
+# absolute-path invocation bypassed.
+MONGOD_CPU_FEATURES="x86_64=avx,aarch64=atomics"
+CPU_EXEC="$SNAP/bin/cpu-exec"
+if [ "$(uname -m)" = "x86_64" ] && ! grep -qw avx /proc/cpuinfo 2>/dev/null; then
+    echo "NOTE: This x86_64 CPU has no AVX. MongoDB 7 will run through qemu-user emulation (slower)."
+    echo "The native-speed alternative is FerretDB:  snap run wekan.migrate"
+    # If the FerretDB migration already completed, prefer it over emulation.
+    switch_to_completed_ferretdb || true
+fi
+
 # Check if MongoDB is already running
 if check_mongodb_running; then
     echo "MongoDB is already running. Exiting to prevent multiple instances."
     exit 0
 fi
+
+# MongoDB 8.2+ keeps a throwaway WiredTiger instance under _tmp/spilldb for
+# queries that spill to disk, and empties it itself on every start. A reported
+# crash loop (a full disk, an abort, then "Failed to clear dbpath of the
+# internal WiredTiger instance: Directory not empty" followed by "Failed to
+# open the spill WiredTiger instance ... database corruption detected" on
+# every start after) showed that its own emptying can fail and leave it
+# unstartable with the data intact. No mongod is running here (checked
+# above), so the directory holds nothing: delete it before every start.
+# Nothing else under the data directory is ever touched by this.
+clear_spill_directory() {
+    local spill="${MONGO_DATA_DIR:?}/_tmp/spilldb"
+    [ -d "$spill" ] || return 0
+    echo "Removing MongoDB's scratch directory ${spill} before start (mongod recreates it)."
+    rm -rf "${MONGO_DATA_DIR:?}/_tmp/spilldb" || echo "WARNING: could not remove ${spill}; mongod will try itself."
+}
+clear_spill_directory
 
 # Start MongoDB 7.x server
 echo "Starting MongoDB 7.x server..."
@@ -151,69 +443,62 @@ echo "Replica set member host: ${RS_MEMBER_HOST}"
 # MongoDB instances from other parallel snap installs.
 TEMP_PID_FILE="${SNAP_COMMON}/mongod-temp.pid"
 echo "Starting MongoDB temporarily to check replica set configuration..."
-$SNAP/bin/mongod \
+bash "$CPU_EXEC" --features "$MONGOD_CPU_FEATURES" $SNAP/bin/mongod \
     --dbpath="$MONGO_DATA_DIR" \
     --logpath="$MONGO_LOG_FILE" \
     --logappend $BIND_OPTIONS \
-    --storageEngine wiredTiger --wiredTigerCacheSizeGB 32 \
+    --storageEngine wiredTiger --wiredTigerCacheSizeGB "${WT_CACHE_GB}" \
     --timeZoneInfo /usr/share/zoneinfo \
     --setParameter logicalSessionRefreshMillis=900000 \
     --setParameter localLogicalSessionTimeoutMinutes=45 \
     --replSet rs0 --oplogSize 20480 --fork \
-    --pidfilepath="$TEMP_PID_FILE"
+    --pidfilepath="$TEMP_PID_FILE" \
+    || handle_mongod_start_failure $?
+# ^ #6458/#6466: cpu-exec runs mongod through qemu-user when the CPU lacks the
+# features it needs (AVX / ARMv8.2-A). And with --fork, mongod's parent only
+# returns 0 once the child is up; a SIGILL (no AVX, no qemu) or "data files too
+# recent" (3.x data) failure returns non-zero and previously fell through to
+# ~10 minutes of pinging a dead port, forever.
 
-# Wait for MongoDB to accept connections (up to 30 s)
+# Wait for MongoDB to accept connections (up to 30 s). db-eval uses the bundled
+# Node.js + `mongodb` driver; directConnection reaches this node before the
+# replica set is initiated.
 echo "Waiting for MongoDB to accept connections on port ${_RS_PORT}..."
+_RS_URL="mongodb://127.0.0.1:${_RS_PORT}/?directConnection=true"
 _wait=0
-until $SNAP/bin/mongosh --port "${_RS_PORT}" --quiet \
-        --eval "db.adminCommand({ping:1})" >/dev/null 2>&1; do
+until "$DB_EVAL" ping "$_RS_URL" >/dev/null 2>&1; do
     _wait=$((_wait + 1))
-    if [ $_wait -ge 30 ]; then
-        echo "WARNING: MongoDB did not respond within 30 seconds"
+    # 90 s, not 30 s: a large production database can need more than 30 s to replay its
+    # WiredTiger journal on first open. If we gave up at 30 s we would skip the replica-set
+    # initialise/reconfig below, and the final mongod would then run with no elected PRIMARY
+    # — WeKan would loop "MongoDB not ready yet, retrying..." forever (#6454).
+    if [ $_wait -ge 90 ]; then
+        echo "WARNING: MongoDB did not respond within 90 seconds"
         break
     fi
     sleep 1
 done
+# mongod is answering: clear the start-failure counter (see
+# handle_mongod_start_failure) so past failures don't count against future ones.
+[ $_wait -lt 90 ] && rm -f "$MONGOD_FAIL_COUNT_FILE" "${MONGOD_FAIL_COUNT_FILE}.revision"
 
-# Check replica set status and current member host
-_rs_check=$($SNAP/bin/mongosh --port "${_RS_PORT}" --quiet --eval "
-    try {
-        var s = rs.status();
-        var c = rs.conf();
-        print('OK:' + c.members[0].host);
-    } catch(e) {
-        print('ERROR:' + e.message);
-    }
-" 2>/dev/null)
+# Check replica set status and current member host (prints OK:<host> or ERROR:<msg>)
+_rs_check=$("$DB_EVAL" rs-conf-host "$_RS_URL" 2>/dev/null)
 echo "Replica set check: ${_rs_check}"
 
 if echo "$_rs_check" | grep -q "^OK:"; then
     _current_member=$(echo "$_rs_check" | sed 's/^OK://')
     if [ "$_current_member" != "$RS_MEMBER_HOST" ]; then
         echo "Member host mismatch: current='${_current_member}', expected='${RS_MEMBER_HOST}'. Reconfiguring..."
-        $SNAP/bin/mongosh --port "${_RS_PORT}" --eval "
-            try {
-                rs.reconfig({_id:'rs0', members:[{_id:0, host:'${RS_MEMBER_HOST}'}]}, {force:true});
-                print('Replica set reconfigured successfully.');
-            } catch(e) { print('Reconfig error: ' + e.message); }
-        " 2>/dev/null || true
+        "$DB_EVAL" rs-reconfig "$_RS_URL" "$RS_MEMBER_HOST" 2>/dev/null || true
     else
         echo "Replica set config is valid."
     fi
 else
     # Not initialized or config is invalid — try initiate first, then reconfig
     echo "Replica set not ready. Initializing with member: ${RS_MEMBER_HOST}..."
-    $SNAP/bin/mongosh --port "${_RS_PORT}" --eval "
-        try {
-            rs.initiate({_id:'rs0', members:[{_id:0, host:'${RS_MEMBER_HOST}'}]});
-            print('Replica set initialized.');
-        } catch(e) {
-            try {
-                rs.reconfig({_id:'rs0', members:[{_id:0, host:'${RS_MEMBER_HOST}'}]}, {force:true});
-                print('Replica set reconfigured.');
-            } catch(e2) { print('Error: ' + e2.message); }
-        }
-    " 2>/dev/null || true
+    "$DB_EVAL" rs-initiate "$_RS_URL" "$RS_MEMBER_HOST" 2>/dev/null \
+        || "$DB_EVAL" rs-reconfig "$_RS_URL" "$RS_MEMBER_HOST" 2>/dev/null || true
 fi
 
 # Ensure init marker exists regardless of path taken above
@@ -222,8 +507,7 @@ fi
 # Shut down the temporary MongoDB process using its PID file so we only
 # kill this instance and never another parallel snap's mongod.
 echo "Stopping temporary MongoDB process..."
-$SNAP/bin/mongosh --port "${_RS_PORT}" --eval \
-    "db.getSiblingDB('admin').shutdownServer()" 2>/dev/null || true
+"$DB_EVAL" shutdown "$_RS_URL" 2>/dev/null || true
 sleep 2
 if [ -f "$TEMP_PID_FILE" ]; then
     kill "$(cat "$TEMP_PID_FILE")" 2>/dev/null || true
@@ -231,13 +515,23 @@ if [ -f "$TEMP_PID_FILE" ]; then
 fi
 sleep 1
 
-# Final start of MongoDB in foreground (this becomes the main process)
-exec $SNAP/bin/mongod \
+# Final start of MongoDB in foreground (this stays the main process; #6458/#6466:
+# not `exec` anymore, so an IMMEDIATE startup crash — SIGILL on non-AVX CPUs,
+# incompatible data files — is caught below instead of snapd blindly restarting
+# this service into the same crash forever)
+_mongod_start_ts=$(date +%s)
+bash "$CPU_EXEC" --features "$MONGOD_CPU_FEATURES" $SNAP/bin/mongod \
     --dbpath="$MONGO_DATA_DIR" \
     --logpath="$MONGO_LOG_FILE" \
     --logappend $BIND_OPTIONS \
-    --storageEngine wiredTiger --wiredTigerCacheSizeGB 32 \
+    --storageEngine wiredTiger --wiredTigerCacheSizeGB "${WT_CACHE_GB}" \
     --timeZoneInfo /usr/share/zoneinfo \
     --setParameter logicalSessionRefreshMillis=900000 \
     --setParameter localLogicalSessionTimeoutMinutes=45 \
     --replSet rs0 --oplogSize 20480
+_mongod_rc=$?
+if [ $_mongod_rc -ne 0 ] && [ $(( $(date +%s) - _mongod_start_ts )) -lt 15 ]; then
+    # Died within seconds of starting: a startup failure, not a normal shutdown.
+    handle_mongod_start_failure $_mongod_rc
+fi
+exit $_mongod_rc

@@ -3,26 +3,78 @@
 // Must be imported before model files that register API routes.
 
 const { Meteor } = require('meteor/meteor');
-const { Accounts } = require('meteor/accounts-base');
 const { WebApp } = require('meteor/webapp');
-const bodyParser = require('body-parser');
+const { safeJsonStringify } = require('/server/lib/apiResponseHelpers');
 
 // ---------------------------------------------------------------------------
 // 1. Body parsing (previously registered by json-routes)
 // ---------------------------------------------------------------------------
-WebApp.handlers.use(bodyParser.urlencoded({ limit: '50mb', extended: false }));
-WebApp.handlers.use(bodyParser.json({ limit: '50mb' }));
+// Reuse Meteor's Express parsers. Rspack 2 no longer brings body-parser into
+// the app's node_modules through its development server dependencies.
+// A bounce webhook's signature is over the bytes as they were sent (SendGrid,
+// Resend), so for those paths the raw body is kept beside the parsed one.
+const keepRawBody = (req, res, buf) => {
+  if (/^\/api\/inbound-email\/bounces\//.test(String(req.url || ''))) req.rawBody = buf.toString('utf8');
+};
+WebApp.handlers.use(WebApp.express.urlencoded({ limit: '50mb', extended: false, verify: keepRawBody }));
+WebApp.handlers.use(WebApp.express.json({ limit: '50mb', verify: keepRawBody }));
 
 // ---------------------------------------------------------------------------
 // 2. API gate — check WITH_API env var (previously in models/users.js)
 // ---------------------------------------------------------------------------
+// Express matches routes case-insensitively and on the decoded path, so the
+// gate must too: with WITH_API off, /API/... and /%61pi/... reached the API
+// (2026-10-02).
+function isApiPath(url) {
+  let pathname = String(url || '').split('?')[0];
+  try { pathname = decodeURIComponent(pathname); } catch (e) { /* keep it raw */ }
+  return /^\/api(\/|$)/i.test(pathname);
+}
+
+// The inbound email endpoints are not the REST API: a mail provider (or Amazon
+// SES through SNS) posts email to them, and they have gates of their own - the
+// Admin Panel's email-to-card switch and webhook secret, the reply address's
+// signature, SNS's message signature (server/routes/inboundEmail.js,
+// server/emailBounces.js). Email to card must not need the whole REST API
+// turned on, so these exact POST paths pass the WITH_API gate.
+const INBOUND_EMAIL_PATHS = ['/api/inbound-email', '/api/inbound-email/ses'];
+// The bounce webhooks of the other sending services (server/emailBounces.js).
+const BOUNCE_WEBHOOK_PATH = /^\/api\/inbound-email\/bounces\/(mailgun|sendgrid|postmark|brevo|mailjet|sparkpost|mandrill|resend)$/;
+function isInboundEmailPath(req) {
+  if (req.method !== 'POST') return false;
+  let pathname = String(req.url || '').split('?')[0];
+  try { pathname = decodeURIComponent(pathname); } catch (e) { return false; }
+  pathname = pathname.replace(/\/+$/, '');
+  return INBOUND_EMAIL_PATHS.includes(pathname) || BOUNCE_WEBHOOK_PATH.test(pathname);
+}
+
 WebApp.handlers.use(function apiGate(req, res, next) {
-  const api = req.url.startsWith('/api');
-  if ((api && process.env.WITH_API === 'true') || !api) {
+  const api = isApiPath(req.url);
+  // CacheBleed, API sibling (2026-10-02): every API answer is the caller's -
+  // exports, attachment downloads as base64, board data - and none said so, so
+  // a shared cache was free to keep one by heuristics. A route may still set
+  // its own policy.
+  if (api) res.setHeader('Cache-Control', 'no-store');
+  if ((api && process.env.WITH_API === 'true') || !api || isInboundEmailPath(req)) {
     return next();
   }
-  res.writeHead(301, { Location: '/' });
-  return res.end();
+  // REFUSED, IN WORDS - not a redirect to the front page.
+  //
+  // This used to answer `301 Location: /`, and every export in the interface is
+  // a download from an `/api/...` address: a board or a card to PDF, Excel,
+  // JSON, .zip, CSV. The browser followed the redirect, got WeKan's own HTML
+  // page, and wrote it to the file the download link had named - so "the API is
+  // off" arrived as a PDF that no reader could open, with nothing anywhere
+  // saying why. A 403 with a sentence in it cannot be mistaken for the file
+  // that was asked for, and it says what to change.
+  res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+  return res.end(
+    'WeKan API is disabled, so this address answers nothing.\n'
+    + '\n'
+    + 'Exports use it too - a board or card exported to PDF, Excel, JSON, .zip\n'
+    + 'or CSV is a download from /api/..., so with the API off none of them can\n'
+    + 'work. Set the environment variable WITH_API=true and restart WeKan.\n',
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -52,11 +104,7 @@ WebApp.handlers.use(function parseBearerToken(req, res, next) {
 WebApp.handlers.use(async function authenticateByToken(req, res, next) {
   if (req.authToken) {
     try {
-      const hashedToken = Accounts._hashLoginToken(req.authToken);
-      const user = await Meteor.users.findOneAsync(
-        { 'services.resume.loginTokens.hashedToken': hashedToken },
-        { fields: { _id: 1 } },
-      );
+      const user = await require('/server/lib/activeUser').activeUserByToken(req.authToken, 'apiMiddleware', req);
       if (user) {
         req.userId = user._id;
       }
@@ -68,9 +116,49 @@ WebApp.handlers.use(async function authenticateByToken(req, res, next) {
 });
 
 // ---------------------------------------------------------------------------
+// 4a. Sandstorm API keys: in a grain, the bridge says who is calling
+// (models/lib/sandstormApiIdentity.js). Never off Sandstorm, never in place of
+// a WeKan token, and only for an account that already exists and is enabled.
+// ---------------------------------------------------------------------------
+const isSandstormGrain = !!(Meteor.settings && Meteor.settings.public && Meteor.settings.public.sandstorm);
+WebApp.handlers.use(async function authenticateSandstormApiKey(req, res, next) {
+  if (req.userId || !isSandstormGrain) return next();
+  try {
+    const { sandstormApiIdentity } = require('/models/lib/sandstormApiIdentity');
+    const identity = sandstormApiIdentity(req.headers, { sandstorm: isSandstormGrain, method: req.method });
+    if (identity) {
+      const user = await Meteor.users.findOneAsync({ 'services.sandstorm.id': identity.sandstormId }, { fields: { _id: 1, loginDisabled: 1 } });
+      if (user && require('/server/lib/activeUser').allowActiveUser(user, 'sandstormApiKey', req)) {
+        req.userId = user._id;
+      }
+    }
+  } catch (e) {
+    // Ignore auth errors — routes handle missing userId themselves
+  }
+  next();
+});
+
+// ---------------------------------------------------------------------------
+// 4b. API usage counting (Admin Panel -> Problems -> API)
+// ---------------------------------------------------------------------------
+// After authentication, so a call has an account, and in front of the routes, so
+// a route cannot be added without being counted. It counts on the response's
+// `finish` event - by then Express has filled req.route.path, which is the route
+// PATTERN and therefore one row per endpoint rather than one per board id.
+WebApp.handlers.use(require('/server/lib/apiUsageLog').apiUsageMiddleware);
+
+// ---------------------------------------------------------------------------
 // 5. sendJsonResult — drop-in replacement for JsonRoutes.sendResult
 // ---------------------------------------------------------------------------
 function sendJsonResult(res, options) {
+  const { containsFields } = require('/models/lib/adminOnlyCustomFields');
+  if (!containsFields(options?.data)) return writeJsonResult(res, options);
+  return require('/server/lib/adminOnlyCustomFields').redactFields(options.data, res.req?.userId)
+    .then(data => writeJsonResult(res, { ...options, data }))
+    .catch(() => writeJsonResult(res, { code: 500, data: { error: 'Response unavailable' } }));
+}
+
+function writeJsonResult(res, options) {
   options = options || {};
 
   // Default response headers (matching json-routes behavior)
@@ -92,10 +180,42 @@ function sendJsonResult(res, options) {
     const shouldPrettyPrint = process.env.NODE_ENV === 'development';
     const spacer = shouldPrettyPrint ? 2 : null;
     res.setHeader('Content-Type', 'application/json');
-    res.write(JSON.stringify(options.data, null, spacer));
+    // Use a crash-proof serializer: some error payloads (e.g. a circular
+    // SimpleSchema validation error) would otherwise throw inside
+    // JSON.stringify and surface as a generic HTTP 500. See #5804.
+    res.write(safeJsonStringify(options.data, spacer));
   }
 
   res.end();
 }
 
-module.exports = { sendJsonResult };
+// GHSA-3gcg-g6rf-w2rx: an export route that throws must not escape as an unhandled
+// promise rejection. This app turns one of those into a full process crash - the
+// note in server/ldapGroupSync.js explains why - so a single crafted request could
+// take the server down for everyone. Every route body wrapped in this answers with a
+// 500 instead. Only the registered route pattern and a fixed error category
+// are folded into API Problems; concrete requests and exception text are secret.
+//
+// The guards inside the handlers are still the real fix; this is the net under them,
+// so the next missing null check is one broken request rather than an outage.
+function safeRoute(handler) {
+  return async function safeRouteHandler(req, res, ...rest) {
+    try {
+      return await handler.call(this, req, res, ...rest);
+    } catch (error) {
+      try { require('/server/lib/apiFailureLog').recordApiFailure(req, error); }
+      catch (_) { /* Logging is best effort and must never prevent the response. */ }
+      try {
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+        }
+        res.end('Internal server error');
+      } catch (_) {
+        // The response is already gone; nothing left to answer with.
+      }
+      return undefined;
+    }
+  };
+}
+
+module.exports = { sendJsonResult, safeRoute };

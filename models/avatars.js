@@ -1,6 +1,10 @@
 import { Meteor } from 'meteor/meteor';
 import { FilesCollection } from 'meteor/ostrio:files';
+import { Random } from 'meteor/random';
+const { safeUploadFileId } = require('/models/lib/uploadFileId');
+const { isFilesRoot } = require('/models/lib/filesRoot');
 import { generateUniversalAvatarUrl } from '/models/lib/universalUrlGenerator';
+const { cleanFileName } = require('/imports/lib/fileNameDisplay');
 
 const { filesize } = require('filesize');
 const getTAPi18n = () => require('/imports/i18n').TAPi18n;
@@ -12,7 +16,7 @@ let avatarsUploadSize = 72000;
 // - Snap (WRITABLE_PATH=$SNAP_COMMON/files): $SNAP_COMMON/files/avatars
 const computeAvatarStoragePath = () => {
   const basePath = process.env.WRITABLE_PATH || process.cwd();
-  const endsWithFiles = basePath.endsWith('/files') || basePath.endsWith('\\files');
+  const endsWithFiles = isFilesRoot(basePath);
   if (endsWithFiles) {
     // Snap: WRITABLE_PATH already includes /files
     return basePath + '/avatars';
@@ -27,10 +31,17 @@ const storagePath = Meteor.isServer ? computeAvatarStoragePath() : 'assets/app/u
 const Avatars = new FilesCollection({
   debug: false, // Change to `true` for debugging
   collectionName: 'avatars',
+  // CacheBleed (GHSA-w3qg-pf27-g68r): Meteor-Files' default is a public, one-year
+  // cache; this file is served only after an access check.
+  cacheControl: require('/models/lib/fileCacheHeaders').PRIVATE_FILE_CACHE_CONTROL,
+  // WeKan serves current and legacy avatars through its guarded canonical
+  // /cdn/storage/avatars route. Meteor-Files' broad middleware must not
+  // intercept that URL first and reject an authenticated legacy file.
+  downloadRoute: '/meteor-files-internal',
   allowClientCode: true,
   storagePath: storagePath,
   namingFunction(opts) {
-    let filenameWithoutExtension = ""
+    let filenameWithoutExtension = "";
     let fileId = "";
     if (opts?.name) {
       // Client
@@ -40,7 +51,10 @@ const Avatars = new FilesCollection({
     } else if (opts?.file?.name) {
       // Server
       if (opts.file.extension) {
-        filenameWithoutExtension = opts.file.name.replace(new RegExp(opts.file.extensionWithDot + "$"), "")
+        // A literal suffix, never a RegExp built from the uploaded name.
+        const name = opts.file.name;
+        const suffix = opts.file.extensionWithDot;
+        filenameWithoutExtension = name.endsWith(suffix) ? name.slice(0, -suffix.length) : name;
       } else {
         // file has no extension, so don't replace anything, otherwise the last character is removed (because extensionWithDot = '.')
         filenameWithoutExtension = opts.file.name;
@@ -52,6 +66,9 @@ const Avatars = new FilesCollection({
       filenameWithoutExtension = Math.random().toString(36).slice(2);
       fileId = Math.random().toString(36).slice(2);
     }
+    // UploadPathBleed, avatar sibling (2026-10-02): the id is client-supplied
+    // and starts the on-disk name, so "../../x" wrote outside the store.
+    fileId = safeUploadFileId(fileId, { source: 'Avatars.namingFunction', fresh: () => Random.id(), isServer: Meteor.isServer });
     // Strip shell metacharacters and path-traversal sequences from the
     // user-supplied portion of the filename.  The result is used as part of
     // the on-disk path passed to external commands, so only safe characters
@@ -65,20 +82,15 @@ const Avatars = new FilesCollection({
     return str.replace(/[^a-zA-Z0-9_.\-]/g, '_');
   },
   onBeforeUpload(file) {
-    // Block SVG files for avatars to prevent XSS attacks
-    if (file.name && file.name.toLowerCase().endsWith('.svg')) {
-      if (process.env.DEBUG === 'true') {
-        console.warn('Blocked SVG file upload for avatar:', file.name);
-      }
-      return 'SVG files are not allowed for avatars due to security reasons. Please use PNG, JPG, or GIF format.';
-    }
-
-    if (file.type === 'image/svg+xml') {
-      if (process.env.DEBUG === 'true') {
-        console.warn('Blocked SVG MIME type upload for avatar:', file.type);
-      }
-      return 'SVG files are not allowed for avatars due to security reasons. Please use PNG, JPG, or GIF format.';
-    }
+    // An avatar belongs to a signed-in user; nobody else uploads one.
+    if (!this.userId) return 'Please sign in to upload an avatar.';
+    file.name = cleanFileName(file && file.name) || 'image';
+    // SVG is allowed (#6802, maintainer decision 2026-10-25): every uploaded SVG
+    // is sanitized on the server before it is stored - no script, event handler,
+    // javascript: URI, foreignObject or DOCTYPE/ENTITY XML loop
+    // (models/lib/sanitizeUploadedFile.js) - and sanitized again whenever it is
+    // served, inline under a script-free sandbox (server/lib/svgResponse.js).
+    // It used to be refused here after JVN#74210258.
 
     if (file.size <= avatarsUploadSize && file.type.startsWith('image/')) {
       return true;

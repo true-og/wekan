@@ -1,0 +1,170 @@
+// Database health probe, the Meteor half of models/lib/databaseHealth.js.
+//
+// Runs once at startup and then every five minutes - on one server of the
+// installation per period, see claimProbe in models/lib/databaseHealth.js -
+// asks MongoDB what it can
+// answer from WeKan's side of the socket - serverStatus, dbStats,
+// getCmdLineOpts - and, when the data directory is a path this process can
+// see, asks the kernel what filesystem it is on. Each finding is one row in
+// Admin Panel / Problems / Database problems (the `database` stream), with
+// what it means and what to do, folded per type so a problem that persists
+// is one row with a count, not a row per probe.
+//
+// FerretDB answers only some of these commands (no opLatencies, no
+// fsTotalSize); every step is independent and wrapped, so what it cannot
+// answer is skipped and the rest still runs. Nothing here can throw into
+// startup, and nothing here is on a request path.
+import { Meteor } from 'meteor/meteor';
+import fs from 'fs';
+import { getRawDb } from '/server/lib/mongoStartup';
+import { recordDatabaseHealth } from '/server/lib/databaseProblems';
+const health = require('/models/lib/databaseHealth');
+
+const PROBE_MS = 5 * 60 * 1000;
+
+const state = {
+  scanned: null,
+  // At start, only what is logged from now on: older lines were seen by the
+  // process before a restart, or belong to a time this one cannot explain.
+  logSeenMs: Date.now(),
+  uptime: null,
+  restarts: 0,
+  opLatencies: null,
+  networkFsReported: false,
+};
+
+async function serverStatus(db) {
+  try {
+    return await db.admin().command({ serverStatus: 1 });
+  } catch (e) {
+    return null;
+  }
+}
+
+// The last ~1000 lines of MongoDB's own log. Needs the getLog privilege
+// (clusterMonitor); without it, or where the database does not keep MongoDB's
+// log format (FerretDB), this check finds nothing and is skipped.
+async function globalLog(db) {
+  try {
+    const result = await db.admin().command({ getLog: 'global' });
+    return Array.isArray(result && result.log) ? result.log : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function dbStats(db) {
+  try {
+    return await db.command({ dbStats: 1 });
+  } catch (e) {
+    return null;
+  }
+}
+
+async function dataDirectory(db) {
+  try {
+    const opts = await db.admin().command({ getCmdLineOpts: 1 });
+    const parsed = opts && opts.parsed;
+    return (parsed && parsed.storage && parsed.storage.dbPath) || '';
+  } catch (e) {
+    return '';
+  }
+}
+
+// The data directory is only inspectable when this process shares a
+// filesystem with mongod - the snap, the bundle with its embedded database,
+// or a container that mounts the same volume. A separate database container
+// or host has a dbPath that does not exist here, and that is simply skipped.
+function checkDataDirectory(dbPath) {
+  if (state.networkFsReported || !dbPath || typeof fs.statfs !== 'function') return;
+  if (!fs.existsSync(dbPath)) return;
+  fs.statfs(dbPath, (error, stats) => {
+    if (error || !stats) return;
+    const name = health.networkFilesystem(stats.type);
+    if (!name) return;
+    state.networkFsReported = true;
+    recordDatabaseHealth(health.networkFilesystemProblem(name, dbPath));
+  });
+}
+
+export async function probeDatabaseHealth() {
+  let db;
+  try {
+    db = getRawDb();
+  } catch (e) {
+    return;
+  }
+  if (!db) return;
+
+  const dbPath = await dataDirectory(db);
+
+  // One server probes the database per period; the others only check what is
+  // local to them (the data directory below).
+  const claims = db.collection('databaseHealthProbe');
+  const { claimed, shared } = await health.claimProbe(claims, Date.now(), PROBE_MS)
+    // A claim that cannot be made (a database that refuses it) must not stop
+    // the probe: this server then probes for itself, as before.
+    .catch(() => ({ claimed: true, shared: {} }));
+  if (!claimed) {
+    checkDataDirectory(dbPath);
+    return;
+  }
+  for (const k of health.SHARED_STATE) if (shared[k] !== undefined) state[k] = shared[k];
+
+  const status = await serverStatus(db);
+  if (status) {
+    const uptime = Number(status.uptime);
+    if (health.restartDetected(state.uptime, uptime)) {
+      state.restarts += 1;
+      recordDatabaseHealth(health.restartProblem(state.restarts, dbPath));
+    }
+    if (Number.isFinite(uptime)) state.uptime = uptime;
+
+    if (status.opLatencies) {
+      const avg = health.readLatencyMs(state.opLatencies, status.opLatencies);
+      const ops = state.opLatencies && state.opLatencies.reads
+        ? Number(status.opLatencies.reads.ops) - Number(state.opLatencies.reads.ops) : 0;
+      if (health.slowStorage(avg, ops)) recordDatabaseHealth(health.slowStorageProblem(avg, ops));
+      state.opLatencies = status.opLatencies;
+    }
+  }
+
+  // How much the database reads, between two probes (#6826).
+  const scanned = status && status.metrics && status.metrics.queryExecutor
+    && Number(status.metrics.queryExecutor.scannedObjects);
+  if (Number.isFinite(scanned)) {
+    const now = Date.now();
+    const perSecond = state.scanned
+      ? health.scanRate(state.scanned.value, scanned, (now - state.scanned.at) / 1000) : null;
+    if (perSecond !== null && perSecond > health.SCAN_RATE_PER_SEC) recordDatabaseHealth(health.scanRateProblem(perSecond));
+    state.scanned = { value: scanned, at: now };
+  }
+
+  // Queries without an index, from the "Slow query" lines MongoDB keeps. Only
+  // lines newer than the last probe, so one scan is reported once per process.
+  const log = await globalLog(db);
+  if (log) {
+    const { groups, newestMs } = health.collectionScans(log, state.logSeenMs);
+    state.logSeenMs = newestMs;
+    if (groups.length) recordDatabaseHealth(health.collectionScanProblem(groups));
+  }
+
+  const stats = await dbStats(db);
+  const space = health.diskSpace(stats);
+  if (space && space.critical) recordDatabaseHealth(health.diskSpaceProblem(space, dbPath));
+
+  await claims.updateOne({ _id: health.PROBE_CLAIM_ID }, { $set: health.sharedState(state) }).catch(() => {});
+  checkDataDirectory(dbPath);
+}
+
+Meteor.startup(() => {
+  const run = () => {
+    probeDatabaseHealth().catch(e => {
+      if (process.env.DEBUG === 'true') console.warn('database health probe failed:', e && e.message);
+    });
+  };
+  // Not in the way of the rest of startup: the first probe waits until the
+  // server has settled, and the indexes ensureIndex may be creating are done.
+  Meteor.setTimeout(run, 30 * 1000);
+  Meteor.setInterval(run, PROBE_MS);
+});

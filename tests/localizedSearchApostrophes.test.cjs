@@ -1,0 +1,246 @@
+'use strict';
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const path = require('node:path');
+const root = path.resolve(__dirname, '..');
+const read = filename => fs.readFileSync(path.join(root, filename), 'utf8');
+const en = JSON.parse(read('imports/i18n/data/en.i18n.json'));
+let labels = { ...en, 'operator-user': "lo'wI'", 'operator-title': "pong’le'" };
+const context = { TAPi18n: { __: key => labels[key] || key }, Boards: { colorMap: () => ({}) }, console };
+vm.createContext(context);
+vm.runInContext(read('config/search-const.js').replace(/export /g, '') + '\n' +
+  read('config/query-classes.js').replace(/import[\s\S]*?from ['"][^'"]+['"];\s*/g, '').replace(/export /g, '') +
+  '\nthis.Query = Query;', context);
+function query(text) {
+  const result = new context.Query();
+  result.buildParams(text);
+  return result;
+}
+assert.equal(query("lo'wI':Alice").getQueryParams().getPredicate('user'), 'Alice');
+assert.equal(query("pong’le':\"two words\"").getQueryParams().getPredicate('title'), 'two words');
+assert.equal(query('board:Roadmap').getQueryParams().getPredicate('board'), 'Roadmap');
+assert.equal(query('board:"two words"').getQueryParams().getPredicate('board'), 'two words');
+assert.equal(query("unknown'operator:value").hasErrors(), true);
+assert.equal(query("'plain words'").getQueryParams().text, 'plain words');
+labels = JSON.parse(read('imports/i18n/data/tlh.i18n.json'));
+for (const [key, operator] of [
+  ['operator-user', 'user'], ['operator-member', 'members'],
+  ['operator-assignee', 'assignees'], ['operator-creator', 'userId'],
+  ['operator-board', 'board'], ['operator-swimlane', 'swimlane'],
+  ['operator-list', 'list'], ['operator-title', 'title'],
+  ['operator-description', 'description'], ['operator-attachment-text', 'attachment-text'], ['operator-checklist-text', 'checklist-text'],
+]) {
+  const parsed = query(`${labels[key]}:"two words"`);
+  assert.equal(parsed.hasErrors(), false, key);
+  assert.equal(parsed.getQueryParams().getPredicate(operator), 'two words', key);
+}
+labels = JSON.parse(read('imports/i18n/data/ca@valencia.i18n.json'));
+const valencianChecklist = query(`${labels['operator-checklist-text']}:"two words"`);
+assert.equal(valencianChecklist.hasErrors(), false);
+assert.equal(valencianChecklist.getQueryParams().getPredicate('checklist-text'), 'two words');
+for (const absent of [false, true]) {
+  const parsed = query(`${labels['operator-has']}:${absent ? '-' : ''}${labels['predicate-checklist']}`);
+  assert.equal(parsed.hasErrors(), false);
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed.getQueryParams().getPredicate('has'))), { field: 'checklist', exists: !absent });
+}
+assert.equal(query(`${labels['operator-has']}:nonexistent-field`).hasErrors(), true);
+labels = JSON.parse(read('imports/i18n/data/ve-PP.i18n.json'));
+assert.equal(labels['operator-title'], 'nimi');
+for (const text of ['nimi:"Demo card"', 'nimi:Demo']) {
+  const parsed = query(text);
+  assert.equal(parsed.hasErrors(), false);
+  assert.equal(parsed.getQueryParams().getPredicate('title'), text.includes('"') ? 'Demo card' : 'Demo');
+}
+assert.equal(query('unknownoperator:Demo').hasErrors(), true);
+assert.equal(query('lugetiž:Blocked').getQueryParams().getPredicate('list'), 'Blocked');
+assert.equal(query('lugetiž:"Kodvi"').getQueryParams().getPredicate('list'), 'Kodvi');
+context.now = () => new Date('2026-09-14T15:42:37.123Z');
+context.formatDate = date => date.toISOString().slice(0, 10);
+const overdue = query(`${labels['operator-due']}:${labels['predicate-overdue']}`);
+assert.equal(overdue.hasErrors(), false);
+assert.equal(overdue.getQueryParams().getPredicate('dueAt').operator, '$lt');
+assert.equal(overdue.getQueryParams().getPredicate('dueAt').value, '2026-09-14T15:42:37.123Z',
+  'overdue retains the instant instead of excluding deadlines earlier today');
+assert.equal(query(`${labels['operator-due']}:overdue`).hasErrors(), false);
+assert.equal(query(`${labels['operator-due']}:unknown-predicate`).hasErrors(), true);
+assert.equal(query(`${labels['operator-created']}:${labels['predicate-overdue']}`).hasErrors(), true);
+console.log('localizedSearchApostrophes: localized operators, quoted values, ordinary operators and unknown names verified');
+
+labels = JSON.parse(read('imports/i18n/data/zgh.i18n.json'));
+assert.equal(labels['operator-customfield'], 'ⵉⴳⵔⵉⵥⵍⵉⵏ');
+assert.doesNotMatch(labels['operator-customfield'], /\s|Champ/);
+for (const value of ['Priority', '"two words"']) {
+  const parsed = query(`${labels['operator-customfield']}:${value}`);
+  assert.equal(parsed.hasErrors(), false);
+  assert.equal(parsed.getQueryParams().getPredicate('customfield'), value.replaceAll('"', ''));
+}
+
+// The real parser must preserve the offending limit for translated %s output.
+for (const value of ['abc', '-2']) {
+  const parsed = query(`${labels['operator-limit']}:${value}`);
+  assert.equal(parsed.hasErrors(), true);
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed.errors())), [
+    { tag: 'operator-limit-invalid', value },
+  ]);
+  assert.equal((labels['operator-limit-invalid'].match(/%s/g) || []).length, 1);
+}
+for (const value of ['0', '12']) {
+  const parsed = query(`${labels['operator-limit']}:${value}`);
+  assert.equal(parsed.hasErrors(), false);
+  assert.equal(parsed.errors().length, 0);
+  if (value === '12') assert.equal(parsed.getQueryParams().getPredicate('limit'), 12);
+}
+
+for (const [key, field] of [['predicate-start', 'startAt'], ['predicate-end', 'endAt']]) {
+  for (const absent of [false, true]) {
+    const parsed = query(`${labels['operator-has']}:${absent ? '-' : ''}${labels[key]}`);
+    assert.equal(parsed.hasErrors(), false, key);
+    assert.deepEqual(JSON.parse(JSON.stringify(parsed.getQueryParams().getPredicate('has'))),
+      { field, exists: !absent });
+  }
+  // These existence predicates must not become valid sort predicates.
+  assert.equal(query(`${labels['operator-sort']}:${labels[key]}`).hasErrors(), true);
+}
+
+context.subtract = (date, days, unit) => {
+  assert.equal(unit, 'days');
+  return new Date(date.getTime() - days * 86400000);
+};
+const createdFilter = query(`${labels['operator-created']}:3`);
+assert.equal(createdFilter.hasErrors(), false);
+assert.deepEqual(JSON.parse(JSON.stringify(createdFilter.getQueryParams().getPredicate('createdAt'))),
+  { operator: '$gte', value: '2026-09-11' });
+assert.equal(query(`${labels['operator-created']}:invalid-period`).hasErrors(), true);
+for (const [prefix, order] of [['', 'asc'], ['-', 'des']]) {
+  const parsed = query(`${labels['operator-sort']}:${prefix}${labels['predicate-created']}`);
+  assert.equal(parsed.hasErrors(), false);
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed.getQueryParams().getPredicate('sort'))),
+    { name: 'createdAt', order });
+}
+
+labels = JSON.parse(read('imports/i18n/data/wa-RR.i18n.json'));
+for (const [key, field] of [
+  ['operator-board', 'board'], ['operator-swimlane', 'swimlane'], ['operator-list', 'list'],
+  ['operator-user', 'user'], ['operator-member', 'members'], ['operator-assignee', 'assignees'],
+  ['operator-creator', 'userId'], ['operator-title', 'title'], ['operator-description', 'description'],
+  ['operator-customfield', 'customfield'], ['operator-attachment-text', 'attachment-text'],
+  ['operator-checklist-text', 'checklist-text'],
+]) {
+  const parsed = query(`${labels[key]}:"two words"`);
+  assert.equal(parsed.hasErrors(), false, key);
+  assert.equal(parsed.getQueryParams().getPredicate(field), 'two words', key);
+}
+for (const absent of [false, true]) {
+  const parsed = query(`${labels['operator-has']}:${absent ? '-' : ''}${labels['predicate-attachment']}`);
+  assert.equal(parsed.hasErrors(), false);
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed.getQueryParams().getPredicate('has'))),
+    { field: 'attachment', exists: !absent });
+}
+assert.equal(query(`${labels['operator-has']}:unknownpredicate`).hasErrors(), true);
+const warayModified = query(`${labels['operator-modified']}:3`);
+assert.equal(warayModified.hasErrors(), false);
+assert.deepEqual(JSON.parse(JSON.stringify(warayModified.getQueryParams().getPredicate('modifiedAt'))),
+  { operator: '$gte', value: '2026-09-11' });
+
+labels = JSON.parse(read('imports/i18n/data/ak.i18n.json'));
+for (const [key, field] of [
+  ['operator-board', 'board'], ['operator-swimlane', 'swimlane'], ['operator-list', 'list'],
+  ['operator-assignee', 'assignees'], ['operator-creator', 'userId'],
+  ['operator-title', 'title'], ['operator-description', 'description'],
+  ['operator-customfield', 'customfield'], ['operator-attachment-text', 'attachment-text'],
+  ['operator-checklist-text', 'checklist-text'],
+]) {
+  const parsed = query(`${labels[key]}:"two words"`);
+  assert.equal(parsed.hasErrors(), false, key);
+  assert.equal(parsed.getQueryParams().getPredicate(field), 'two words', key);
+}
+for (const [key, field] of [['predicate-attachment','attachment'],['predicate-start','startAt'],['predicate-end','endAt']]) {
+  for (const absent of [false, true]) {
+    const parsed = query(`${labels['operator-has']}:${absent ? '-' : ''}${labels[key]}`);
+    assert.equal(parsed.hasErrors(), false, key);
+    assert.deepEqual(JSON.parse(JSON.stringify(parsed.getQueryParams().getPredicate('has'))), {field, exists: !absent});
+  }
+}
+for (const value of ['abc','-2']) assert.equal(query(`${labels['operator-limit']}:${value}`).hasErrors(), true);
+assert.equal(query(`${labels['operator-limit']}:12`).getQueryParams().getPredicate('limit'), 12);
+assert.equal(query(`${labels['operator-has']}:unknownpredicate`).hasErrors(), true);
+const akanModified = query(`${labels['operator-modified']}:3`);
+assert.equal(akanModified.hasErrors(), false);
+assert.deepEqual(JSON.parse(JSON.stringify(akanModified.getQueryParams().getPredicate('modifiedAt'))),
+  {operator: '$gte', value: '2026-09-11'});
+for (const [prefix, order] of [['','asc'],['-','des']]) {
+  const parsed = query(`${labels['operator-sort']}:${prefix}${labels['predicate-modified']}`);
+  assert.equal(parsed.hasErrors(), false);
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed.getQueryParams().getPredicate('sort'))), {name: 'modifiedAt', order});
+}
+
+// Bislama search terms must be usable query syntax, not prose wrappers.
+labels = JSON.parse(read('imports/i18n/data/bi.i18n.json'));
+for (const [key, field] of [
+  ['operator-board', 'board'], ['operator-swimlane', 'swimlane'],
+  ['operator-list', 'list'], ['operator-assignee', 'assignees'],
+  ['operator-creator', 'userId'], ['operator-customfield', 'customfield'],
+  ['operator-attachment-text', 'attachment-text'],
+]) {
+  const parsed = query(`${labels[key]}:"two words"`);
+  assert.equal(parsed.hasErrors(), false, key);
+  assert.equal(parsed.getQueryParams().getPredicate(field), 'two words', key);
+}
+for (const key of ['operator-board-abbrev', 'operator-swimlane-abbrev', 'operator-list-abbrev', 'operator-label-abbrev', 'operator-user-abbrev', 'operator-member-abbrev']) {
+  assert.equal(labels[key], en[key], key);
+}
+for (const [key, field] of [['predicate-attachment', 'attachment'], ['predicate-assignee', 'assignees']]) {
+  for (const absent of [false, true]) {
+    const parsed = query(`${labels['operator-has']}:${absent ? '-' : ''}${labels[key]}`);
+    assert.equal(parsed.hasErrors(), false, key);
+    assert.deepEqual(JSON.parse(JSON.stringify(parsed.getQueryParams().getPredicate('has'))), { field, exists: !absent });
+  }
+}
+assert.equal(query('unknownoperator:Demo').hasErrors(), true);
+assert.equal(query(`${labels['operator-limit']}:12`).getQueryParams().getPredicate('limit'), 12);
+assert.equal(query(`${labels['operator-limit']}:invalid`).hasErrors(), true);
+const bislamaOverdue = query(`${labels['operator-due']}:${labels['predicate-overdue']}`);
+assert.equal(bislamaOverdue.hasErrors(), false);
+assert.equal(bislamaOverdue.getQueryParams().getPredicate('dueAt').operator, '$lt');
+const bislamaOperators = [...read('config/query-classes.js').matchAll(/'(operator-[^']+)':\s*OPERATOR_/g)]
+  .map(([, key]) => labels[key].toLowerCase());
+for (const operator of bislamaOperators) {
+  assert.match(operator, /^(?:[\p{Letter}\p{Mark}'’]+|[#@])$/u, operator);
+}
+assert.equal(new Set(bislamaOperators).size, bislamaOperators.length,
+  'every registered Bislama operator has an unambiguous name');
+
+labels = JSON.parse(read('imports/i18n/data/co.i18n.json'));
+for (const [key, field] of [['operator-customfield', 'customfield'], ['operator-attachment-text', 'attachment-text'], ['operator-checklist-text', 'checklist-text']]) {
+  const parsed = query(`${labels[key]}:"two words"`);
+  assert.equal(parsed.hasErrors(), false, key);
+  assert.equal(parsed.getQueryParams().getPredicate(field), 'two words', key);
+}
+for (const [key, field] of [['predicate-attachment', 'attachment'], ['predicate-checklist', 'checklist'], ['predicate-start', 'startAt']]) {
+  for (const absent of [false, true]) {
+    const parsed = query(`${labels['operator-has']}:${absent ? '-' : ''}${labels[key]}`);
+    assert.equal(parsed.hasErrors(), false, key);
+    assert.deepEqual(JSON.parse(JSON.stringify(parsed.getQueryParams().getPredicate('has'))), { field, exists: !absent });
+  }
+}
+const corsicanOverdue = query(`${labels['operator-due']}:${labels['predicate-overdue']}`);
+assert.equal(corsicanOverdue.hasErrors(), false);
+assert.equal(corsicanOverdue.getQueryParams().getPredicate('dueAt').operator, '$lt');
+assert.equal(query(`${labels['operator-has']}:nonexistent-field`).hasErrors(), true);
+assert.equal(query(`${labels['operator-created']}:${labels['predicate-overdue']}`).hasErrors(), true);
+
+for (const [key, field] of [['predicate-due', 'dueAt'], ['predicate-created', 'createdAt'], ['predicate-modified', 'modifiedAt']]) {
+  for (const descending of [false, true]) {
+    const parsed = query(`${labels['operator-sort']}:${descending ? '-' : ''}${labels[key]}`);
+    assert.equal(parsed.hasErrors(), false, key);
+    assert.deepEqual(JSON.parse(JSON.stringify(parsed.getQueryParams().getPredicate('sort'))),
+      { name: field, order: descending ? 'des' : 'asc' });
+  }
+}
+assert.equal(query(`${labels['operator-sort']}:not-a-sort`).hasErrors(), true);
+
+const corsicanCardNumber = query(`${labels['operator-number']}:42`);
+assert.equal(corsicanCardNumber.hasErrors(), false);
+assert.equal(corsicanCardNumber.getQueryParams().getPredicate('cardNumber'), 42);
+assert.equal(query(`${labels['operator-number']}:not-a-number`).hasErrors(), true);

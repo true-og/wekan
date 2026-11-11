@@ -7,15 +7,198 @@ const BASE_URL = process.env.WEKAN_BASE_URL || 'http://localhost:3000';
  * This avoids UI flakiness and rate-limiting, and works even when the login page
  * has rendering issues (one of the bugs we're testing separately).
  */
-async function loginWithToken(page, userId, token) {
-  await page.goto(`${BASE_URL}/sign-in`, { waitUntil: 'commit' });
-  await waitForMeteor(page);
+// Pages whose init script has already been installed (see below). A WeakSet, so a
+// closed page does not keep anything alive.
+const resumeDisabled = new WeakSet();
 
-  const result = await page.evaluate(
-    async ({ tok, expectedId }) =>
+// The one-shot flag the init script below looks for. It is ARMED just before the
+// reload that starts a login, and the init script consumes it, so exactly one page
+// load starts without a stored session.
+const ARM_KEY = 'wekan-e2e-clear-session';
+
+async function loginWithToken(page, userId, token) {
+  // With clientStorage:none, a token login is intentionally memory-only.
+  // Navigating to a board creates a new DDP connection, so seed the same
+  // HttpOnly cookie a real Meteor login uses before doing the in-memory login.
+  // Browser automation can set an HttpOnly cookie through the browser context;
+  // page JavaScript cannot read it, which keeps this helper on the production
+  // authentication path instead of reintroducing Local Storage credentials.
+  await page.context().addCookies([{
+    name: 'meteor_login_token',
+    value: token,
+    url: BASE_URL,
+    httpOnly: true,
+    sameSite: 'Lax',
+  }]);
+
+  // Stop the PREVIOUS session from resuming. Meteor's accounts-base reads
+  // localStorage at startup and logs the stored user back in, asynchronously - so
+  // on a reload the sequence could be: page loads, our logout check sees no user
+  // yet (the resume has not landed), we log the new user in, and THEN the resume
+  // completes and puts the OLD user back. The poll below then waits 15s and
+  // reports "Unexpected userId after login: <the previous user>", which is the
+  // 33-board-domains failure - in WebKit first, then in Chromium, because it is a
+  // race and not a browser.
+  //
+  // Removing exactly the three Accounts keys before any script runs means there is
+  // nothing to resume. Everything else in localStorage - board view, list widths,
+  // the settings tests rely on - is left alone.
+  //
+  // ONE-SHOT, and that is the whole point: an init script runs on EVERY navigation
+  // of the page, so clearing unconditionally logged the test OUT again the moment
+  // it opened the board it had just logged in for - every private board answered
+  // "Board not found" and the whole browser suite failed in the fixture. The script
+  // therefore clears only when the flag below is armed, and disarms it.
+  if (!resumeDisabled.has(page)) {
+    await page.addInitScript(armKey => {
+      try {
+        if (window.localStorage.getItem(armKey) !== '1') return;
+        window.localStorage.removeItem(armKey);
+        window.localStorage.removeItem('Meteor.loginToken');
+        window.localStorage.removeItem('Meteor.loginTokenExpires');
+        window.localStorage.removeItem('Meteor.userId');
+      } catch (e) { /* a page without storage access is already resume-free */ }
+    }, ARM_KEY);
+    resumeDisabled.add(page);
+  }
+
+  // Reuse an already-loaded WeKan page. Several security tests deliberately do
+  // logged-out work first and authenticate later on the same page; navigating
+  // back to the identical sign-in document only redownloads the large dev
+  // bundle and was the remaining waitForMeteor timeout.
+  const onLoadedApp = page.url().startsWith(BASE_URL) && await page
+    .evaluate(() => typeof Meteor !== 'undefined' && typeof Meteor.subscribe === 'function')
+    .catch(() => false);
+  if (!onLoadedApp) {
+    // Meteor answers more than 30 refreshes of the HttpOnly login cookie per 10
+    // seconds from one address with 429, and every test runs from localhost, so
+    // a run that switches users quickly can hit it: the resume then never lands
+    // and the page stays on sign-in. Notice exactly that answer, and only after
+    // it wait the window out and load once more; any other failure still fails.
+    let throttled = false;
+    const onResponse = response => {
+      if (response.status() === 429 && response.url().includes('/_accounts/cookie/refresh')) throttled = true;
+    };
+    // Real pages always have events; the unit tests' stand-in page does not.
+    const listens = typeof page.on === 'function' && typeof page.off === 'function';
+    if (listens) page.on('response', onResponse);
+    const resume = async () => {
+      await page.goto(`${BASE_URL}/sign-in`, { waitUntil: 'commit' });
+      await waitForMeteor(page);
+      // Cookie retrieval precedes Accounts.loggingIn(). Wait for the resume itself,
+      // rather than interpreting that initial false value as a finished login.
+      await page.waitForFunction(
+        id => Meteor.userId() === id && !Meteor.loggingIn(), userId, { timeout: 30_000 },
+      );
+    };
+    try {
+      await resume();
+    } catch (error) {
+      if (!throttled) throw error;
+      throttled = false;
+      await page.waitForTimeout(11_000);
+      await resume();
+    } finally {
+      if (listens) page.off('response', onResponse);
+    }
+  }
+
+  // Wait for any stored-session resume that is still in flight to finish, so the
+  // state we are about to read is settled rather than half-way.
+  await page.evaluate(
+    () =>
+      new Promise(resolve => {
+        const deadline = Date.now() + 10000;
+        const settle = () => {
+          if (typeof Meteor.loggingIn !== 'function' || !Meteor.loggingIn() ||
+              Date.now() > deadline) {
+            resolve();
+          } else {
+            setTimeout(settle, 50);
+          }
+        };
+        settle();
+      }),
+  );
+
+  // Switching users in the same page: end the previous session first and wait
+  // for it to be empty. Without this, `Meteor.userId()` can still be the OLD
+  // user while the new login is in flight, and the poll below cannot tell "the
+  // new login has not landed yet" from "it landed on the wrong user" - it just
+  // times out and reports the old id. That is the WebKit failure of
+  // 33-board-domains: the admin id was still there when the test switched to
+  // the non-admin.
+  //
+  // It ends the session in the CLIENT, and that is the whole point of this
+  // block being what it is. It used to call `Meteor.logout()`, which is a
+  // SERVER call: it deletes the resume token from the user document. A seeded
+  // test user has exactly one token, shared by every page of the test, so one
+  // logout stranded all of them - the next login with that token answered
+  //
+  //   Token login failed: You've been logged out by the server. Please log in again.
+  //
+  // which is how 02-cards-open-view's copy-link test (the only one that logs a
+  // SECOND page in) failed in all three browsers at once. Dropping the three
+  // Accounts keys and reloading leaves the token alone and still gives the page
+  // a connection with no user on it.
+  const wrongUser = await page.evaluate(
+    expectedId => Boolean(Meteor.userId()) && Meteor.userId() !== expectedId,
+    userId,
+  );
+  if (wrongUser) {
+    await page.evaluate(armKey => {
+      try { window.localStorage.setItem(armKey, '1'); } catch (e) { /* no storage */ }
+    }, ARM_KEY);
+    await page.reload({ waitUntil: 'commit' });
+    await waitForMeteor(page);
+    // The replacement cookie resumes the requested user on this fresh page.
+    // Waiting for an empty state races its asynchronous retrieval and can start
+    // a duplicate token login during navigation.
+    await page.waitForFunction(
+      id => Meteor.userId() === id && !Meteor.loggingIn(), userId, { timeout: 15_000 },
+    );
+  }
+
+  // A fresh/logged-out page needs no reload. Removing the old persisted keys
+  // after Accounts has finished its resume check is enough; loginWithToken below
+  // establishes the requested in-memory session. The init-script + reload path
+  // above remains only for a real switch away from another logged-in user.
+  await page.evaluate(() => {
+    try {
+      window.localStorage.removeItem('Meteor.loginToken');
+      window.localStorage.removeItem('Meteor.loginTokenExpires');
+      window.localStorage.removeItem('Meteor.userId');
+    } catch (_error) { /* a page without storage access is already resume-free */ }
+  });
+
+  // Cookie authentication may already have resumed this exact user. A second
+  // login rebuilds subscriptions and can lose the published profile (#6677).
+  const alreadyAuthenticated = await page.evaluate(id => Meteor.userId() === id, userId);
+  const result = alreadyAuthenticated ? { error: null, userId } : await page.evaluate(
+    ({ tok, expectedId }) =>
       new Promise(resolve => {
         Meteor.loginWithToken(tok, err => {
-          resolve({ error: err ? (err.reason || err.message) : null, userId: Meteor.userId() });
+          if (err) {
+            resolve({ error: err.reason || err.message, userId: Meteor.userId() });
+            return;
+          }
+          // Meteor.userId() can lag the loginWithToken callback (the reactive
+          // login state updates a tick later), which made the assertion below
+          // flaky ("Unexpected userId after login"). Poll until it settles on the
+          // expected id, or give up after a short timeout so a genuine mismatch
+          // still surfaces.
+          // A loaded run (three browsers, WebKit in Docker) can take longer than
+          // five seconds to settle the reactive login state.
+          const deadline = Date.now() + 15000;
+          const tick = () => {
+            const uid = Meteor.userId();
+            if (uid === expectedId || Date.now() > deadline) {
+              resolve({ error: null, userId: uid });
+            } else {
+              setTimeout(tick, 50);
+            }
+          };
+          tick();
         });
       }),
     { tok: token, expectedId: userId },
@@ -24,7 +207,18 @@ async function loginWithToken(page, userId, token) {
   if (result.error) throw new Error(`Token login failed: ${result.error}`);
   if (result.userId !== userId) throw new Error(`Unexpected userId after login: ${result.userId}`);
 
-  await page.goto(BASE_URL, { waitUntil: 'commit' });
+  // The login happened on a fully loaded app with an authenticated DDP
+  // connection. Do not throw that connection away with page.goto(BASE_URL): it
+  // downloads and executes the entire development bundle a second time and can
+  // leave waitForMeteor waiting on a load that never finishes under Playwright.
+  // Real links use client-side routing too, so move to All Boards on the same
+  // live connection.
+  await navigateInApp(page, '/');
+  await page.waitForFunction(
+    expectedId => typeof Meteor !== 'undefined' && Meteor.userId() === expectedId,
+    userId,
+    { timeout: 15_000 },
+  );
 }
 
 /** Login using the actual username/password form (tests the login UI). */
@@ -89,24 +283,104 @@ async function waitForMeteor(page) {
     () =>
       typeof Meteor !== 'undefined' &&
       typeof Meteor.subscribe !== 'undefined',
-    { timeout: 30_000 },
+    // 2nd arg is the (unused) page-function argument; the timeout MUST be the
+    // 3rd arg. Passing { timeout } as the 2nd arg silently falls back to the
+    // config actionTimeout (15s), which is too short for WebKit-in-Docker under
+    // the full parallel "Run ALL tests" load. Generous: the client bundle is
+    // large and slower browsers can take a while to execute it even after
+    // globalSetup warms the server. See global-setup.js.
+    undefined,
+    { timeout: 60_000 },
   );
 }
 
 /** Navigate to a board and wait for it to render lists. */
 async function openBoard(page, boardId, slug) {
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    await page.goto(`${BASE_URL}/b/${boardId}/${slug}`, { waitUntil: 'commit' });
+  // Up to 5 attempts so the slowest browser (WebKit) survives the contention
+  // of the 3-browser parallel run against a single shared dev server.
+  //
+  // Bounded by a DEADLINE, not just by the attempt count: five attempts of a
+  // 20s wait plus a 1s pause is ~105s, and the test timeout is 60s (see
+  // playwright.config.js). The loop could therefore never reach its own error -
+  // Playwright killed the whole test first, and what a webkit run reported was
+  //
+  //     Test timeout of 60000ms exceeded while setting up "boardPage".
+  //     Error: page.waitForTimeout: Target page, context or browser has been closed
+  //
+  // which says nothing about the board. Retrying past the point where the result
+  // can still be used is not resilience, it is just a worse error message. The
+  // budget leaves room for the rest of the fixture, the first attempt keeps the
+  // full generous wait, and later attempts get whatever is left - so a slow
+  // board still gets one long look, and a hopeless one fails with the reason.
+  const BUDGET_MS = 45_000;
+  const MIN_WAIT_MS = 3_000;
+  const deadline = Date.now() + BUDGET_MS;
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    const remaining = deadline - Date.now();
+    if (remaining < MIN_WAIT_MS) break;
+    // The navigation itself can fail, not just the rendering: WebKit answers
+    // "WebKit encountered an internal error" now and then under the load of a
+    // three-browser run, and a throw here escaped the retry loop that exists for
+    // exactly this - one flaky navigation failed a test with four attempts left.
+    try {
+      await page.goto(`${BASE_URL}/b/${boardId}/${slug}`, { waitUntil: 'commit' });
+    } catch (error) {
+      lastError = error;
+      if (deadline - Date.now() < MIN_WAIT_MS) break;
+      await page.waitForTimeout(1_000);
+      continue;
+    }
+
     const hasList = await page
       .locator('.js-list:not(.js-list-composer)')
       .first()
-      .waitFor({ timeout: 15_000 })
+      .waitFor({ timeout: Math.min(20_000, Math.max(MIN_WAIT_MS, deadline - Date.now())) })
       .then(() => true)
       .catch(() => false);
     if (hasList) return;
+    if (deadline - Date.now() < MIN_WAIT_MS) break;
     await page.waitForTimeout(1_000);
   }
-  throw new Error(`Board ${boardId} did not render any lists`);
+
+  // Say which of the two it was: a board that never rendered, or a navigation
+  // that never succeeded.
+  if (lastError) {
+    throw new Error(
+      `Board ${boardId} could not be opened after 5 attempts; last navigation error: ${lastError.message}`,
+    );
+  }
+
+  throw new Error(
+    `Board ${boardId} did not render any lists within ${BUDGET_MS / 1000}s`,
+  );
 }
 
-module.exports = { loginWithToken, loginWithCredentials, logout, waitForMeteor, openBoard };
+/** Navigate without replacing the authenticated Meteor connection.
+ *
+ * With HttpOnly cookie sessions a full document load briefly has no userId;
+ * protected route guards can therefore send browser automation to All Boards
+ * before cookie resume settles. Real in-app links use FlowRouter on the live
+ * connection. A history popstate exercises that same public browser path while
+ * still allowing tests to address a precise route.
+ */
+async function navigateInApp(page, path) {
+  const prefix = new URL(BASE_URL).pathname.replace(/\/+$/, '');
+  const nextPath = prefix && path.startsWith('/') && path !== prefix &&
+    !path.startsWith(`${prefix}/`) ? prefix + path : path;
+  await waitForMeteor(page);
+  await page.evaluate(nextPath => {
+    window.history.pushState({}, '', nextPath);
+    window.dispatchEvent(new PopStateEvent('popstate'));
+  }, nextPath);
+}
+
+module.exports = {
+  loginWithToken,
+  loginWithCredentials,
+  logout,
+  waitForMeteor,
+  openBoard,
+  navigateInApp,
+};

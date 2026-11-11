@@ -1,0 +1,284 @@
+'use strict';
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const i18next = require('i18next');
+const sprintf = require('i18next-sprintf-postprocessor');
+const root = path.resolve(__dirname, '..');
+const data = JSON.parse(fs.readFileSync(path.join(root, 'imports/i18n/data/mk.i18n.json'), 'utf8'));
+(async () => {
+  const translator = i18next.createInstance().use(sprintf);
+  await translator.init({ lng: 'mk', fallbackLng: false, keySeparator: false,
+    interpolation: { prefix: '__', suffix: '__', escapeValue: false },
+    resources: { mk: { translation: data } }, postProcess: ['sprintf'] });
+  assert.equal(translator.t('act-a-endAt', { timeValue: 'NEW_TIME', timeOldValue: 'OLD_TIME' }),
+    'го промени времето на завршување во NEW_TIME од (OLD_TIME)');
+  assert.equal(translator.t('activity-added-label', { sprintf: ['LABEL', 'CARD'] }),
+    'додаде ознака «LABEL» на CARD');
+  assert.equal(translator.t('activity-dueDate', { sprintf: ['DATE', 'CARD'] }),
+    'го промени рокот во DATE на картата CARD');
+  for (const [key, phrase] of [['activity-endDate', 'датумот на завршување'],
+    ['activity-receivedDate', 'датумот на прием'], ['activity-startDate', 'датумот на почеток']]) {
+    assert.equal(translator.t(key, { sprintf: ['DATE', 'CARD'] }), `го промени ${phrase} во DATE на картата CARD`);
+  }
+  assert.match(data['admin-people-filter-inactive'], /Неактивни/);
+  assert.doesNotMatch(data['admin-people-user-active'], /платном|платен/);
+  assert.equal(translator.t('activity-checklist-uncompleted', { sprintf: ['CHECKLIST', 'CARD'] }),
+    'го поништи завршувањето на списокот за проверка CHECKLIST на CARD');
+  assert.match(data['act-newDue'], /првата потсетница/);
+  assert.match(data['act-removeChecklist'], /го отстрани списокот за проверка/);
+  assert.doesNotMatch(data['act-removeChecklist'], /елемент|ставка/);
+  assert.match(data['act-atUserComment'], /ве спомена/);
+  assert.match(data['globalSearch-instructions-notes-2'], /\*ИЛИ\*/);
+  assert.match(data['globalSearch-instructions-notes-3'], /\*И\*/);
+  assert.match(data['globalSearch-instructions-notes-4'], /не разликуваат мали и големи букви/);
+  assert.match(data['globalSearch-instructions-notes-3'], /`__operator_list__:Available __operator_label__:red`/);
+  assert.match(data['globalSearch-instructions-operator-at'], /`__operator_user_abbrev__username`/);
+  assert.match(data['globalSearch-instructions-operator-has'], /`has:-due`/);
+  assert.doesNotMatch(data['globalSearch-instructions-operator-has'], /има:-/);
+  assert.match(data['globalSearch-instructions-operator-label'], /бојата .* или името/);
+  assert.match(data['globalSearch-instructions-status-ended'], /со датум на завршување/);
+  assert.doesNotMatch(data['globalSearch-instructions-status-ended'], /окончани|завршени карти/);
+  assert.match(data['globalSearch-instructions-status-private'], /само во приватни табли/);
+  assert.match(data['globalSearch-instructions-status-public'], /само во јавни табли/);
+  assert.match(data['hideCheckedChecklistItems'], /означените ставки/);
+  assert.match(data['import-board-instruction-wekan'], /'Извези табла'/);
+  assert.doesNotMatch(data['import-board-instruction-wekan'], /Унеси|Увези/);
+  for (const menu of ['Menu', 'More', 'Print and Export', 'Export JSON']) {
+    assert.ok(data['import-board-instruction-trello'].includes(`'${menu}'`));
+  }
+  assert.match(data['invite-people-success'], /регистрација/);
+  assert.match(data['import-members-map-note'], /тековниот корисник/);
+  assert.match(data['keyboard-shortcuts-disabled'], /Кликнете за да ги овозможите/);
+  assert.match(data['keyboard-shortcuts-enabled'], /Кликнете за да ги оневозможите/);
+  assert.match(data['list-delete-pop'], /нема да можете да го вратите списокот/);
+  assert.match(data['list-delete-pop'], /не може да се поништи/);
+  assert.match(data['last-admin-desc'], /барем еден администратор/);
+  assert.equal(translator.t('list-title-not-found', { sprintf: ['LIST'] }), "Списокот 'LIST' не е пронајден.");
+  assert.match(data['migration-cpu-threshold-description'], /надмине овој процент \(10-90\)/);
+  assert.match(data['migration-batch-size-description'], /\(1-100\)/);
+  assert.match(data['migration-delay-ms-description'], /\(100-10000\)/);
+  assert.match(data['migration-info-text'], /продолжува во заднина дури и ако го затворите прелистувачот/);
+  assert.match(data['migration-warning-text'], /Не го затворајте прелистувачот/);
+  assert.match(data['migrations-admin-only'], /^Само администраторите на таблата/);
+  for (const key of ['migrate-all-to-s3', 'move-all-attachments-of-board-to-s3']) {
+    assert.match(data[key], /S3/);
+    assert.doesNotMatch(data[key], /Amazon|облак/);
+  }
+  assert.match(data['normal-assigned-only-desc'], /^Видливи се само доделените карти/);
+  assert.doesNotMatch(data['normal-assigned-only-desc'], /сите карти|пуна права/);
+  assert.match(data['normal-desc'], /Не може да ги менува поставките/);
+  assert.match(data['notify-participate'], /создавач или член/);
+  assert.equal(translator.t('n-cards-found', { sprintf: ['7'] }), 'Пронајдени се 7 карти');
+  assert.doesNotMatch(data['move-all-attachments-to-s3'], /Amazon|облак/);
+  assert.match(data['operator-limit-invalid'], /позитивен цел број/);
+  assert.equal(translator.t('operator-number-expected', { operator: 'LIMIT', value: 'BAD' }), "Операторот LIMIT очекуваше број, а доби 'BAD'");
+  assert.equal(translator.t('page-maybe-private', { sprintf: ['/login'] }), "Оваа страница можеби е приватна. Можеби ќе можете да ја видите ако <a href='/login'>се најавите</a>.");
+  assert.match(data['push-invite-text'], /ве поканува да се придружите/);
+  assert.doesNotMatch(data['push-invite-text'], /пун увид|целосен пристап/);
+  assert.match(data['public-desc'], /Само луѓето додадени на таблата можат да ја уредуваат/);
+  for (const key of ['read-assigned-only-desc', 'read-only-desc']) {
+    assert.match(data[key], /Не може да ги уредува/);
+  }
+  assert.match(data['read-assigned-only-desc'], /само доделените карти/);
+  assert.match(data['r-d-move-to-bottom-gen'], /дното на нејзиниот список/);
+  assert.match(data['r-d-move-to-top-gen'], /врвот на нејзиниот список/);
+  assert.match(data['remove-labels-multiselect'], /1-9/);
+  assert.match(data['remove-member-pop'], /Ќе добие известување/);
+  assert.doesNotMatch(data['remove-organization-from-board'], /забран|увид/);
+  assert.match(data['run-restore-lost-cards-migration-confirm'], /само неархивираните ставки/);
+  assert.match(data['run-restore-all-archived-migration-confirm'], /СИТЕ архивирани ленти, списоци и карти/);
+  assert.match(data['run-restore-all-archived-migration-confirm'], /не може лесно да се поништи/);
+  assert.match(data['run-delete-duplicate-empty-lists-migration-confirm'], /празните списоци што имаат дупликат со ист наслов што содржи карти/);
+  for (const field of ['swimlaneId', 'listId']) assert.ok(data['restore-lost-cards-migration-description'].includes(field));
+  assert.match(data['s3-enabled-description'], /AWS S3 или MinIO/);
+  assert.doesNotMatch(data['s3-ssl-enabled-description'], /Amazon/);
+  assert.match(data['search-cards'], /описите и приспособените полиња/);
+  for (const command of ['sudo snap logs wekan.wekan', 'sudo docker logs wekan-app']) {
+    assert.ok(data['server-error-troubleshooting'].includes('`' + command + '`'));
+  }
+  for (const endpoint of ['s3.amazonaws.com', 'minio.example.com']) assert.ok(data['s3-endpoint-description'].includes(endpoint));
+  assert.match(data['set-swimlane-height-value'], /пиксели/);
+  assert.match(data['show-parent-in-minicard'], /родителската карта/);
+  assert.match(data['showSum-field-on-list'], /збирот на полињата/);
+  assert.doesNotMatch(data['showSum-field-on-list'], /број придружени/);
+  assert.match(data['show-at-all-boards-page'], /Сите табли/);
+  assert.equal(data['sidebar-close'], 'Затворете страничната лента');
+  assert.equal(data['sidebar-open'], 'Отворете страничната лента');
+  assert.match(data['smtp-port-description'], /излезни е-пораки/);
+  assert.match(data['starred-boards-description'], /на врвот на вашиот список со табли/);
+  assert.match(data['support-info-only-for-logged-in-users'], /само за најавени корисници/);
+  assert.doesNotMatch(data['subtaskDeletePopup-title'], /посao|предмет/);
+  const english = JSON.parse(fs.readFileSync(path.join(root, 'imports/i18n/data/en.i18n.json'), 'utf8'));
+  for (const example of ["Field1 == Value1", "'Field 1' == 'Value 1'", "Field1 == I\\'m", "F1 == V1 || F1 == V2", "F1 == V1 && ( F2 == V2 || F2 == V3 )", "F1 == /Tes.*/i"]) {
+    assert.ok(english['advanced-filter-description'].includes(example));
+    assert.ok(data['advanced-filter-description'].includes(example));
+  }
+  assert.match(data['swimlane-height-error-message'], /позитивен цел број/);
+  assert.match(data['vote-public'], /кој за што гласал/);
+  assert.match(data['toggle-assignees'], /1-9/);
+  const { repairProgress } = await import('../releases/translations/audit-progress.mjs');
+  assert.equal(repairProgress().pendingByLocale.mk || 0, 0);
+  assert.equal(data.list, 'Список');
+  assert.equal(data.swimlane, 'Лента');
+  console.log('macedonianAuditedTranslations: actual date and label rendering, checklist removal meaning and native labels passed');
+})().catch(error => { console.error(error); process.exitCode = 1; });
+
+const englishRecoverySource = require('../imports/i18n/data/en.i18n.json');
+const { translationTokens } = require('../releases/translations/placeholder-tokens.mjs');
+const interruptedImportKeys = Object.keys(englishRecoverySource).filter(key => key.startsWith('interrupted-import-'));
+assert.equal(interruptedImportKeys.length, 25);
+for (const key of interruptedImportKeys) {
+  assert.notEqual(data[key], englishRecoverySource[key], key);
+  assert.deepEqual(translationTokens(data[key]), translationTokens(englishRecoverySource[key]), key);
+  assert.match(data[key], /[ЃѓЌќЏџЉљЊњЈјЅѕА-Яа-я]/u, key);
+}
+assert.match(data['interrupted-import-description'], /изворната датотека не се чува/);
+assert.match(data['interrupted-import-description'], /сè што е додадено потоа/);
+assert.match(data['interrupted-import-discard-confirm'], /трајно се отстрануваат/);
+assert.match(data['interrupted-import-keep-confirm'], /Ништо не се отстранува/);
+assert.match(data['interrupted-import-foreign-board'], /не е променето/);
+assert.match(data['interrupted-import-truncated'], /50 најстари/);
+assert.match(data['interrupted-import-scrum-busy'], /сè уште се запишува или обновува/);
+
+const syncRecoveryKeys = Object.keys(englishRecoverySource).filter(key => key.startsWith('stuck-sync-operation-'));
+assert.equal(syncRecoveryKeys.length, 23);
+for (const key of syncRecoveryKeys) {
+  assert.notEqual(data[key], englishRecoverySource[key], key);
+  assert.deepEqual(translationTokens(data[key]), translationTokens(englishRecoverySource[key]), key);
+}
+assert.match(data['stuck-sync-operation-description'], /веќе применетите промени остануваат/);
+assert.match(data['stuck-sync-operation-description'], /преостанатите зачувани промени никогаш не се запишуваат/);
+assert.match(data['stuck-sync-operation-reason-access-denied'], /право за запишување во целиот список/);
+assert.match(data['stuck-sync-operation-replayable-now'], /не може да се отфрли/);
+assert.match(data['stuck-sync-operation-not-stuck'], /не може да се отфрли/);
+assert.match(data['stuck-sync-operation-truncated'], /50 најстари/);
+assert.match(data['stuck-sync-operation-busy'], /се синхронизира во моментов/);
+
+const translatedPlanningControls = ["board-announcement", "board-announcement-enabled", "cards-use-list-color", "import-board-instruction-opml", "import-board-instruction-orgmode", "import-board-instruction-todoist", "external-link-rules", "external-link-rules-description", "external-link-identifier-aliases", "read-only-field", "r-moved-forward", "r-moved-back", "r-assignee", "r-add-actinguser-assignee", "r-remove-all-assignees", "ldap-sync-now", "ldap-sync-now-done", "ldap-sync-now-error", "ldap-sync-now-nothing", "oauth-providers-allowed-email-domains", "login-origin-mismatch", "scrum-release-scope", "scrum-releases-select-help", "scrum-import-into-board", "scrum-import-into-board-hint", "scrum-import-preview", "scrum-import-choose-file", "scrum-import-invalid-file", "scrum-import-preview-sprints", "scrum-import-preview-releases", "scrum-import-preview-cards", "scrum-import-preview-nothing", "scrum-import-into-board-done", "scrum-import-card-not-matched", "scrum-import-card-ambiguous", "scrum-import-card-on-another-board", "scrum-import-record-ambiguous", "scrum-import-record-not-imported", "scrum-import-sprint-finished", "sync-planning-sprint", "sync-planning-releases", "sync-planning-fields", "sync-planning-hint", "scrum-history-checkpoint-stuck", "scrum-history-checkpoint-counts", "scrum-history-checkpoint-hint", "scrum-history-checkpoint-rollback", "scrum-history-checkpoint-discard", "scrum-history-checkpoint-discard-confirm", "scrum-history-checkpoint-ask-admin", "login-setting-env-only"];
+for (const key of translatedPlanningControls) {
+  assert.notEqual(data[key], englishRecoverySource[key], key);
+  assert.deepEqual(translationTokens(data[key]), translationTokens(englishRecoverySource[key]), key);
+}
+for (const literal of ['TODO', 'DONE', 'SCHEDULED', 'DEADLINE', 'CLOSED']) {
+  assert.ok(data['import-board-instruction-orgmode'].includes(literal), literal);
+}
+for (const literal of ['@labels', 'p1', 'p3', 'CSV']) {
+  assert.ok(data['import-board-instruction-todoist'].includes(literal), literal);
+}
+assert.ok(data['external-link-rules-description'].includes('[{identifier}:{number}] = https://tracker.example.com/{identifier}/{number}'));
+assert.ok(data['external-link-identifier-aliases'].includes('TK=Task, IN=Incident'));
+for (const literal of ['LDAP_BACKGROUND_SYNC_IMPORT_NEW_USERS', 'LDAP_BACKGROUND_SYNC_KEEP_EXISTANT_USERS_UPDATED']) {
+  assert.ok(data['ldap-sync-now-nothing'].includes(literal), literal);
+}
+assert.match(data['login-origin-mismatch'], /ROOT_URL/);
+assert.match(data['sync-planning-hint'], /првата синхронизација никогаш не го отстранува/);
+assert.match(data['scrum-import-into-board-hint'], /никогаш не се дуплираат/);
+assert.match(data['scrum-history-checkpoint-hint'], /никој друг.*не ги променил/);
+assert.match(data['scrum-history-checkpoint-hint'], /не менува записи/);
+assert.match(data['login-setting-env-only'], /само за читање/);
+
+// The locale tag requires Macedonian, even when an older value was non-English.
+assert.deepEqual(Object.keys(data), Object.keys(englishRecoverySource));
+for (const key of Object.keys(englishRecoverySource)) {
+  assert.deepEqual(translationTokens(data[key]), translationTokens(englishRecoverySource[key]), key);
+  assert.doesNotMatch(data[key], /[ћђъщыэЋЂЪЩЫЭ]/u, `${key}: non-Macedonian letters`);
+}
+assert.deepEqual(JSON.parse(require('node:child_process').execFileSync(process.execPath,
+  ['releases/translations/fill-translations.mjs', '--list', 'mk'], { cwd: root, encoding: 'utf8' })), {});
+assert.match(data['custom-field-links-hint'], /исто име и тип на двете карти/);
+assert.match(data['custom-field-links-hint'], /само на едната карта остануваат непроменети/);
+assert.match(data['custom-field-link-inactive'], /веќе не може да ги уредува двете карти.*архивирана/);
+assert.match(data['custom-field-link-both'], /Двонасочно.*која било карта/);
+assert.match(data['custom-field-link-send'], /Еднонасочно.*главната карта/);
+assert.match(data['field-link-not-allowed'], /уредувате двете карти/);
+assert.equal(data['import-members-mode-me'], 'Замени ги сите со мојата корисничка сметка');
+assert.match(data['import-many-boards-hint'], /без поврзување на членовите со корисници/);
+assert.match(data['import-many-boards-hint'], /самата е еден извоз.*е едно табло/);
+assert.match(data['export-all-boards-hint'], /можете да го извезете.*работна книга.*\.zip/);
+assert.match(data['webhook-payload-description'], /задржува наследената поставка/);
+assert.match(data['notification-delivery-quiet'], /почекај да завршат/);
+assert.match(data['r-wrike-workflow-note'], /како завршена.*Completed.*Cancelled.*како незавршена.*Active.*Deferred/);
+for (const literal of ['GET /workflows', 'Active', 'Completed', 'Deferred', 'Cancelled']) assert.ok(data['r-wrike-workflow-note'].includes(literal));
+assert.ok(data['webhook-payload-field-standard'].includes('WEBHOOKS_ATTRIBUTES'));
+assert.match(data['subtask-mark-done'], /како завршена$/);
+assert.match(data['subtask-mark-not-done'], /како незавршена$/);
+for (const name of ['taiga', 'vikunja']) assert.match(data[`import-board-instruction-${name}`], /Прилозите не се увезуваат/);
+assert.match(data['import-board-instruction-redmine'], /јазикот на англиски во My account пред извозот/);
+assert.match(data['import-board-instruction-businessmap'], /Title, Column, Lane, Owner, Deadline/);
+assert.match(data['import-board-instruction-plane'], /нема описи или прилози, па тие не се увезуваат/);
+for (const key of ['assignee', 'cardAssigneePopup-title', 'cardAssigneesPopup-title']) assert.equal(data[key], 'Задолжено лице');
+assert.equal(data['custom-fields'], 'Прилагодени полиња');
+assert.equal(data['filter-no-custom-fields'], 'Нема прилагодени полиња');
+assert.equal(data['thursday'], 'Четврток');
+assert.equal(data['friday'], 'Петок');
+assert.equal(data['saturday'], 'Сабота');
+assert.match(data['activity-checklist-uncompleted-card'], /како незавршен/);
+assert.match(data['attachment-delete-pop'], /трајно.*Не може да се поништи/);
+assert.match(data['list-delete-suggest-archive'], /зачувате активноста/);
+assert.equal(data['board-private-info'], 'Ова табло ќе биде <strong>приватно</strong>.');
+assert.match(data['add-card-to-top-of-list'], /врвот на списокот/);
+assert.match(data['add-card-to-bottom-of-list'], /дното на списокот/);
+assert.equal(data['r-trigger'], 'Активатор');
+assert.equal(data['card-end'], 'Крај');
+assert.match(data['flow-active'], /Отворени/);
+assert.match(data['flow-note-blockerAnalysis'], /избришаните карти.*зачувани снимки.*преклопуваат.*одделно/);
+assert.match(data['flow-note-processBehavior'], /времето на создавање.*времето на архивирање.*средна вредност.*најмалку две/);
+console.log('Macedonian full current catalog, native correction meanings and exact tokens pass');
+
+// Shared Cyrillic spelling did not make these Bulgarian/Serbian UI values Macedonian.
+assert.equal(data['allboards.add-workspace'], 'Додај работен простор');
+assert.equal(data['memberPopup-title'], 'Поставки за членот');
+assert.equal(data['boardMenuPopup-title'], 'Поставки за таблото');
+assert.equal(data['email-address'], 'Адреса на е-пошта');
+assert.equal(data.username, 'Корисничко име');
+assert.equal(data['email-invite-subject'], '__inviter__ ви испрати покана');
+assert.equal(data['card-edit-members'], 'Уреди ги членовите');
+assert.equal(data['export-card'], 'Извези карта');
+assert.equal(data['import-board-c'], 'Увези табло');
+assert.equal(data['dueCardsViewChange-choice-all'], 'Сите корисници');
+assert.equal(data['list-label-modifiedAt'], 'Време на последен пристап');
+assert.equal(data['filter-due-today'], 'Рокот е денес');
+assert.equal(data['filter-due-tomorrow'], 'Рокот е утре');
+assert.equal(data['filter-no-due-date'], 'Без рок');
+assert.equal(data['filter-custom-fields-label'], 'Филтрирај според прилагодените полиња');
+assert.match(data['shortcut-toggle-searchbar'], /Прикажи\/скриј.*за пребарување/);
+assert.match(data['shortcut-toggle-sidebar'], /Прикажи\/скриј.*на таблото/);
+assert.match(data['s3-access-key'], /Клуч за пристап/);
+assert.match(data['s3-secret-key-required'], /Потребен е таен клуч/);
+assert.match(data['s3-settings-saved'], /успешно зачувани/);
+assert.match(data['stop-all-migrations'], /Запри ги сите миграции/);
+assert.equal(data['migration-running'], 'Во тек...');
+assert.equal(data['migration-failed'], 'Миграцијата не успеа');
+assert.equal(data['start-time'], 'Време на почеток');
+assert.equal(data['every-10-minutes'], 'На секои 10 минути');
+assert.equal(data['every-30-minutes'], 'На секои 30 минути');
+assert.equal(data['accounts-lockout-user-locked'], 'Корисникот е заклучен');
+assert.equal(data['accounts-lockout-unlock-all'], 'Отклучи ги сите');
+assert.match(data['flow-error'], /не можеше да се вчита.*Проверете ги вредностите.*повторно/);
+assert.match(data['move-reason'], /Причина.*незадолжително/);
+assert.match(data['ask-move-reason'], /Побарај причина/);
+assert.match(data['time-adjustments'], /по автор/);
+assert.equal(data['date-format-yyyy-mm-dd'], 'YYYY-MM-DD');
+assert.equal(data['date-format-dd-mm-yyyy'], 'DD-MM-YYYY');
+assert.equal(data['date-format-mm-dd-yyyy'], 'MM-DD-YYYY');
+assert.equal(data['excel-font'], 'Arial');
+const sampleCards = JSON.parse(data['copyManyCardsPopup-format']);
+assert.equal(sampleCards.length, 3);
+for (const card of sampleCards) {
+  assert.deepEqual(Object.keys(card), ['title', 'description']);
+  assert.match(card.title, /^Наслов на .* карта$/);
+  assert.match(card.description, /^Опис на .* карта$/);
+}
+// Shared terms are valid Macedonian and must not be replaced just for matching.
+assert.equal(data['board-view-calendar-mode'], 'Календарски режим');
+assert.equal(data['blockly-FIELD_BITMAP_PIXEL_LABEL'], '%1, ред %2, колона %3');
+assert.equal(data['blockly-TEXT_APPEND_TITLE'], 'на %1 додај текст %2');
+assert.equal(data['import-trello-json-file'], 'Trello .json датотека');
+// Russian "Уведомления" and Bulgarian "Сваляне" had seeded these; Macedonian
+// says Известувања and Преземи, as the rest of the file already did.
+assert.equal(data['notifications'], 'Известувања');
+assert.equal(data['features-notifications'], 'Известувања');
+assert.equal(data['download'], 'Преземи');
+for (const [key, value] of Object.entries(data)) assert.doesNotMatch(value, /Уведомлени|Сваля/, key);
+console.log('Macedonian vocabulary review: actions, status, date formats, JSON structure and retained shared terms pass');

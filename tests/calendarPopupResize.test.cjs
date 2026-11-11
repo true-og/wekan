@@ -1,0 +1,144 @@
+'use strict';
+
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const path = require('node:path');
+let events;
+const context = {
+  window: { innerWidth: 1280, innerHeight: 900, getComputedStyle: () => ({ direction: 'ltr' }) },
+  Popup: { template: {
+    events(map) { events = map; }, onCreated() {}, helpers() {}, onRendered() {}, onDestroyed() {},
+  } },
+};
+const source = fs.readFileSync(path.join(__dirname, '../client/components/main/popup.js'), 'utf8');
+vm.runInNewContext(source.replace(/^import .*;\n/gm, ''), context);
+const element = {
+  dataset: {}, classList: { contains: () => false }, style: { setProperty(key, value) { this[key] = value; } },
+  getBoundingClientRect() {
+    return { left: 440, top: 12, width: Number.parseFloat(this.style.width) || 400,
+      height: Number.parseFloat(this.style.height) || 600 };
+  },
+};
+let captured;
+const button = { closest: () => element, setPointerCapture(id) { captured = id; } };
+const event = { button: 0, pointerId: 1, clientX: 800, clientY: 600,
+  currentTarget: button, preventDefault() {}, stopPropagation() {} };
+const tpl = {};
+events['pointerdown .js-date-popup-resize'](event, tpl);
+assert.equal(captured, 1, 'drag captures the pointer even when released outside');
+events['pointermove .js-date-popup-resize']({ ...event, clientX: 840, clientY: 640 }, tpl);
+assert.equal(element.style.width, '440px');
+assert.equal(element.style.height, '640px');
+events['pointermove .js-date-popup-resize']({ ...event, pointerId: 2, clientX: 1000 }, tpl);
+assert.equal(element.style.width, '440px', 'another pointer must not resize the popup');
+events['keydown .js-date-popup-resize']({ ...event, key: 'ArrowRight' });
+events['keydown .js-date-popup-resize']({ ...event, key: 'ArrowDown' });
+assert.equal(element.style.width, '460px');
+assert.equal(element.style.height, '660px');
+context.resizeDatePopup(element, 1, 1);
+assert.equal(element.style.width, '320px');
+assert.equal(element.style.height, '160px', 'shrinking leaves a scrollable content area');
+context.resizeDatePopup(element, 10000, 10000);
+assert.equal(element.style.width, '828px');
+assert.equal(element.style.height, '876px', 'resizing stays inside the viewport');
+context.window.innerWidth = 500;
+context.window.innerHeight = 400;
+context.resizeDatePopup(element, 10000, 10000);
+assert.equal(element.style.width, '48px');
+assert.equal(element.style.height, '376px', 'a short viewport still takes priority over the minimum');
+events['pointerup .js-date-popup-resize, pointercancel .js-date-popup-resize, lostpointercapture .js-date-popup-resize'](event, tpl);
+assert.equal(tpl._dateResize, null);
+console.log('calendarPopupResize: captured dragging, keyboard resizing, content minimum and viewport limits passed');
+context.window.innerWidth = 1280;
+context.window.innerHeight = 900;
+// No drag handle (drag handles off): the title bar moves the popup (#6839).
+element.querySelector = selector => (selector === '.js-popup-drag-handle' ? null : {});
+const title = { closest: () => null };
+const moveEvent = { ...event, target: title };
+events['pointerdown .header'](moveEvent, tpl);
+events['pointermove .header']({ ...moveEvent, clientX: 700, clientY: 700 }, tpl);
+assert.equal(element.style.left, '340px');
+assert.equal(element.style['inset-inline-start'], 'auto', 'logical anchor must not constrain physical dragging');
+assert.equal(element.style['inset-inline-end'], 'auto', 'RTL anchor must also be cleared before dragging');
+assert.equal(element.style.top, '112px');
+events['pointermove .header']({ ...moveEvent, pointerId: 3, clientX: 100 }, tpl);
+assert.equal(element.style.left, '340px', 'unrelated pointers cannot move the popup');
+events['pointermove .header']({ ...moveEvent, clientX: -10000, clientY: -10000 }, tpl);
+assert.equal(element.style.left, '12px');
+assert.equal(element.style.top, '12px');
+events['pointerup .header, pointercancel .header, lostpointercapture .header'](moveEvent, tpl);
+assert.equal(tpl._dateMove, null);
+events['pointerdown .header']({ ...moveEvent, target: { closest: () => ({}) } }, tpl);
+assert.equal(tpl._dateMove, null, 'header links and buttons do not start dragging');
+// #6839 changed this on purpose: every popup moves by its title bar now, not
+// only a date popup - and with drag handles on, by its handle alone.
+element.querySelector = () => null;
+events['pointerdown .header'](moveEvent, tpl);
+assert.ok(tpl._dateMove, 'any popup drags by its title bar while drag handles are off');
+events['pointerup .header, pointercancel .header, lostpointercapture .header'](moveEvent, tpl);
+element.querySelector = selector => (selector === '.js-popup-drag-handle' ? {} : null);
+events['pointerdown .header'](moveEvent, tpl);
+assert.equal(tpl._dateMove, null, 'negative: with a drag handle, the title bar does not drag');
+events['pointerdown .header']({ ...moveEvent, target: { closest: s => (s === '.js-popup-drag-handle' ? {} : null) } }, tpl);
+assert.ok(tpl._dateMove, 'the handle does');
+events['pointerup .header, pointercancel .header, lostpointercapture .header'](moveEvent, tpl);
+element.querySelector = () => null;
+console.log('Date popup title dragging, viewport limits and interactive header exclusions passed');
+
+element.dataset.popup = 'boardViewSettingsPopup';
+events['pointerdown .header'](moveEvent, tpl);
+assert.ok(tpl._dateMove, 'Board View Settings can drag without a date editor');
+events['pointermove .header']({ ...moveEvent, clientX: -10000 }, tpl);
+assert.equal(element.style.left, '12px', 'settings dragging stays visible');
+events['pointerup .header, pointercancel .header, lostpointercapture .header'](moveEvent, tpl);
+events['pointerdown .header']({ ...moveEvent, button: 2 }, tpl);
+assert.equal(tpl._dateMove, null, 'secondary click does not drag settings');
+const geometry = fs.readFileSync(path.join(__dirname, '../client/lib/popupOffset.js'), 'utf8');
+const offsetContext = {};
+vm.runInNewContext(geometry.replace(/export \{[^}]+\};/, ''), offsetContext);
+const offset = offsetContext.computePopupOffset({ viewportWidth: 1280,
+  viewportHeight: 720, scrollLeft: 100, scrollTop: 900,
+  popupName: 'boardViewSettingsPopup', opener: { left: 1250, top: 1500, height: 20 } });
+assert.equal(offset.left, 190, 'fixed wide settings ignores sidebar/document scroll');
+assert.equal(offset.top, 12);
+assert.equal(offset.maxHeight, 696);
+console.log('Board View Settings dragging and fixed viewport geometry passed');
+
+// RTL dragging grows leftward while preserving the opposite (right) edge.
+context.window.getComputedStyle = () => ({ direction: 'rtl' });
+element.style.width = '400px';
+element.style.height = '400px';
+events['pointerdown .js-date-popup-resize'](event, tpl);
+events['pointermove .js-date-popup-resize']({ ...event, clientX: 760 }, tpl);
+assert.equal(element.style.width, '440px');
+assert.equal(element.style.left, '400px');
+events['keydown .js-date-popup-resize']({ ...event, key: 'ArrowRight' });
+assert.equal(element.style.width, '420px', 'right arrow shrinks the left-hand RTL grip');
+console.log('RTL resize reverses horizontal input and keeps the right edge anchored');
+
+// A popup that GROWS while it is dragged stays inside the window. A long menu
+// (the member menu) gets its 960px column layout a frame after it is drawn
+// (client/lib/popupMenuLayout.js); a drag begun in that frame clamped with the
+// 380px it started at, so the grown popup ended at left 850 and mostly outside
+// a 1280px window (card-title-edit-and-move-6839.e2e.js, memberMenuPopup).
+context.window.getComputedStyle = () => ({ direction: 'ltr' });
+element.querySelector = () => null;
+element.style.width = '380px';
+element.style.height = '400px';
+events['pointerdown .header'](moveEvent, tpl);
+assert.ok(tpl._dateMove, 'the drag begins at the narrow size');
+element.style.width = '960px'; // the column layout arrives mid-drag
+events['pointermove .header']({ ...moveEvent, clientX: moveEvent.clientX + 1000 }, tpl);
+assert.equal(element.style.left, `${1280 - 960 - 12}px`,
+  'the clamp uses the size the popup has now, so all of it stays in the window');
+events['pointermove .header']({ ...moveEvent, clientX: moveEvent.clientX - 10000 }, tpl);
+assert.equal(element.style.left, '12px', 'and the left edge too');
+events['pointerup .header, pointercancel .header, lostpointercapture .header'](moveEvent, tpl);
+// Negative: a popup that does not change size moves exactly as dragged.
+element.style.width = '400px';
+events['pointerdown .header'](moveEvent, tpl);
+events['pointermove .header']({ ...moveEvent, clientX: moveEvent.clientX - 40 }, tpl);
+assert.equal(element.style.left, `${440 - 40}px`, 'an unchanged popup follows the pointer');
+events['pointerup .header, pointercancel .header, lostpointercapture .header'](moveEvent, tpl);
+console.log('A popup that grows during a drag is clamped by its current size');

@@ -31,7 +31,7 @@
 .attachments-content .compact-result-list,
 .setting-content .content-body .main-body .compact-result-list {
   margin: 6px 0 0;
-  padding-left: 20px;
+  padding-inline-start: 20px;
   font-size: 0.85em;
   font-family: monospace;
 }
@@ -161,22 +161,20 @@
   gap: 6px;
 }
 
-.setting-content .content-body .main-body .storage-rw-row input[type="checkbox"] {
-  position: static;
-  left: auto;
-  visibility: visible;
-  display: inline-block;
-  width: 16px;
-  height: 16px;
-  margin: 0;
-  flex-shrink: 0;
+/* The box and its label are one clickable item (#6465: `a.flex > .materialCheckBox
+   + span`, the markup the rest of WeKan uses). `.flex` alone would stretch it to
+   the row's full height and pull the box off its words. */
+.setting-content .content-body .main-body .storage-rw-item a.flex,
+.setting-content .content-body .main-body .storage-rw-row a.flex {
+  align-items: center;
+  height: auto;
   cursor: pointer;
 }
 
-.setting-content .content-body .main-body .storage-rw-row input[type="checkbox"]:disabled {
-  cursor: default;
-  opacity: 0.6;
-}
+/* The checkbox itself is the Admin Panel's one checkbox look (settingBody.css):
+   visible, square, with WeKan's own green tick - not the browser's rendering, which
+   on Ubuntu drew a big orange box that matched nothing else and ignored the theme.
+   Only the row's own spacing belongs here. */
 
 .setting-content .content-body .main-body .storage-rw-row label {
   margin: 0;
@@ -200,7 +198,7 @@
 .setting-content .content-body .main-body .gridfs-stats-table td {
   border: 1px solid #d0d7de;
   padding: 6px 8px;
-  text-align: left;
+  text-align: start;
   white-space: nowrap;
   min-width: 0 !important;
 }
@@ -239,4 +237,22 @@
   font-size: 0.82em;
   line-height: 1.4;
   margin-top: 2px;
+}
+
+/* #6465: "Please move the button down. This is too close" - Save sat directly
+   under the 1..28 day buttons of the monthly schedule, close enough to be hit
+   while aiming for a date. The gap is on the form-group that FOLLOWS the day
+   grid, so it applies wherever that grid is used and nowhere else. */
+.attachments-content .schedule-day-buttons + .form-group,
+.schedule-day-buttons + .form-group {
+  margin-top: 18px;
+}
+
+/* #6465: "The alignment is out of place" - the move button and the labelled
+   selects beside it are one row (align-items: flex-end), so a margin of the
+   button's own would offset it from the controls it acts on. Zero it, and let
+   the row do the aligning. */
+.attachments-content .move-storage-form > button {
+  margin: 0;
+  align-self: flex-end;
 }

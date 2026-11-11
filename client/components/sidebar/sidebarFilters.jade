@@ -4,32 +4,65 @@
   and #each x in y constructors to fix this.
 
 template(name="filterSidebar")
+  if currentUser
+    h3 {{_ 'filter-presets'}}
+    label(for="saved-filter-preset") {{_ 'filter-presets'}}
+    select.js-filter-preset-select(id="saved-filter-preset")
+      option(value="") {{_ 'filter-preset-choose'}}
+      each savedFilterPresets
+        option(value=_id)= name
+    button.js-apply-filter-preset(type="button" disabled=presetBusy) {{_ 'apply'}}
+    button.js-remove-filter-preset(type="button" disabled=presetBusy) {{_ 'delete'}}
+    form.js-save-filter-preset
+      label(for="saved-filter-name") {{_ 'filter-preset-name'}}
+      input.js-filter-preset-name(id="saved-filter-name" type="text" maxlength="80" required)
+      p.quiet {{_ 'filter-preset-replace-hint'}}
+      button.primary(type="submit" disabled=presetBusy) {{_ 'filter-preset-save'}}
+    if presetMessage
+      p.js-filter-preset-message(role="status") {{_ presetMessage}}
+    hr
   h3
     i.fa.fa-list
     | {{_ 'list-filter-label'}}
   ul.sidebar-list
     form.js-list-filter
-      input(type="text")
+      input(type="text" value=Filter.lists.value)
   hr
   h3
     i.fa.fa-list
-    | {{_ 'filter-card-title-label'}}
-  input.js-field-card-filter(type="text")
+    | {{_ 'filter-card-text-label'}}
+  input.js-field-card-filter(type="text" maxlength="512" value=Filter.text.value aria-label="{{_ 'filter-card-text-label'}}")
+  hr
+  h3
+    i.fa.fa-sitemap
+    | {{_ 'parent-card'}}
+  ul.sidebar-list
+    each parentFilterCards
+      li(class="{{#if Filter.parentId.isSelected _id}}active{{/if}}")
+        a.name.js-toggle-parent-filter(data-parent-id=_id)
+          span.sidebar-list-item-description= title
+          if Filter.parentId.isSelected _id
+            i.fa.fa-check
   hr
   h3
     i.fa.fa-tag
     | {{_ 'filter-labels-label'}}
+  select.js-label-filter-mode(aria-label="{{_ 'filter-labels-label'}}")
+    option(value="or" selected="{{#if $eq Filter.labelIds.mode 'or'}}selected{{/if}}") OR
+    option(value="and" selected="{{#if $eq Filter.labelIds.mode 'and'}}selected{{/if}}") AND
   ul.sidebar-list
     li(class="{{#if Filter.labelIds.isSelected undefined}}active{{/if}}")
-          a.name.js-toggle-label-filter(data-filter-id="__none__")
+          label.name.filter-native-choice.js-toggle-label-filter(data-filter-id="__none__")
+            input(type="checkbox" checked="{{Filter.labelIds.isSelected undefined}}")
             span.sidebar-list-item-description
               | {{_ 'filter-no-label'}}
             if Filter.labelIds.isSelected undefined
               i.fa.fa-check
     each currentBoard.labels
-      li
-        a.name.js-toggle-label-filter(data-filter-id="{{_id}}")
-          span.card-label.square(class="card-label-{{color}}")
+      li(class="{{#if Filter.labelIds.isSelected _id}}active{{/if}}{{#if Filter.excludedLabelIds.isSelected _id}} excluded{{/if}}")
+        label.name.filter-native-choice.js-toggle-label-filter(data-filter-id="{{_id}}")
+          input(type="checkbox" checked="{{Filter.labelIds.isSelected _id}}")
+          span.card-label.square(class="{{labelColorClass color}}" style="{{labelColorStyle color}}")
           span.sidebar-list-item-description
             if name
               = name
@@ -37,13 +70,16 @@ template(name="filterSidebar")
               span.quiet {{_ "label-default" (_ (concat "color-" color))}}
           if Filter.labelIds.isSelected _id
             i.fa.fa-check
+          if Filter.excludedLabelIds.isSelected _id
+            i.fa.fa-ban(title="{{_ 'filter-label-excluded'}}")
   hr
   h3
     i.fa.fa-users
     | {{_ 'filter-member-label'}}
   ul.sidebar-list
     li(class="{{#if Filter.members.isSelected undefined}}active{{/if}}")
-          a.name.js-toggle-member-filter(data-filter-id="__none__")
+          label.name.filter-native-choice.js-toggle-member-filter(data-filter-id="__none__")
+            input(type="checkbox" checked="{{Filter.members.isSelected undefined}}")
             span.sidebar-list-item-description
               | {{_ 'filter-no-member'}}
             if Filter.members.isSelected undefined
@@ -51,7 +87,8 @@ template(name="filterSidebar")
     each currentBoard.activeMembers
       with getUser userId
         li(class="{{#if Filter.members.isSelected _id}}active{{/if}}")
-          a.name.js-toggle-member-filter(data-filter-id="{{_id}}")
+          label.name.filter-native-choice.js-toggle-member-filter(data-filter-id="{{_id}}")
+            input(type="checkbox" checked="{{Filter.members.isSelected _id}}")
             +userAvatar(userId=this._id)
             span.sidebar-list-item-description
               = profile.fullname
@@ -64,7 +101,8 @@ template(name="filterSidebar")
     | {{_ 'filter-assignee-label'}}
   ul.sidebar-list
     li(class="{{#if Filter.assignees.isSelected undefined}}active{{/if}}")
-      a.name.js-toggle-assignee-filter(data-filter-id="__none__")
+      label.name.filter-native-choice.js-toggle-assignee-filter(data-filter-id="__none__")
+        input(type="checkbox" checked="{{Filter.assignees.isSelected undefined}}")
         span.sidebar-list-item-description
           | {{_ 'filter-no-assignee'}}
         if Filter.assignees.isSelected undefined
@@ -72,7 +110,8 @@ template(name="filterSidebar")
     each currentBoard.activeMembers
       with getUser userId
         li(class="{{#if Filter.assignees.isSelected _id}}active{{/if}}")
-          a.name.js-toggle-assignee-filter(data-filter-id="{{_id}}")
+          label.name.filter-native-choice.js-toggle-assignee-filter(data-filter-id="{{_id}}")
+            input(type="checkbox" checked="{{Filter.assignees.isSelected _id}}")
             +userAvatar(userId=this._id)
             span.sidebar-list-item-description
               = profile.fullname
@@ -81,45 +120,130 @@ template(name="filterSidebar")
               i.fa.fa-check
   hr
   h3
+    i.fa.fa-user-circle
+    | {{_ 'filter-creator-label'}}
+  ul.sidebar-list
+    each currentBoard.activeMembers
+      with getUser userId
+        li(class="{{#if Filter.userId.isSelected _id}}active{{/if}}")
+          label.name.filter-native-choice.js-toggle-creator-filter(data-filter-id="{{_id}}")
+            input(type="checkbox" checked="{{Filter.userId.isSelected _id}}")
+            +userAvatar(userId=this._id)
+            span.sidebar-list-item-description
+              = profile.fullname
+              | (<span class="username">{{ username }}</span>)
+            if Filter.userId.isSelected _id
+              i.fa.fa-check
+  hr
+  h3
     i.fa.fa-calendar
     | {{_ 'filter-dates-label' }}
-  ul.sidebar-list
-    li(class="{{#if Filter.dueAt.isSelected 'noDate'}}active{{/if}}")
-      a.name.js-toggle-no-due-date-filter
-        span.sidebar-list-item-description
-          | {{_ 'filter-no-due-date' }}
-        if Filter.dueAt.isSelected 'noDate'
-          i.fa.fa-check
-    li(class="{{#if Filter.dueAt.isSelected 'past'}}active{{/if}}")
-      a.name.js-toggle-overdue-filter
-        span.sidebar-list-item-description
-          | {{_ 'filter-overdue' }}
-        if Filter.dueAt.isSelected 'past'
-          i.fa.fa-check
-    li(class="{{#if Filter.dueAt.isSelected 'today'}}active{{/if}}")
-      a.name.js-toggle-due-today-filter
-        span.sidebar-list-item-description
-          | {{_ 'filter-due-today' }}
-        if Filter.dueAt.isSelected 'today'
-          i.fa.fa-check
-    li(class="{{#if Filter.dueAt.isSelected 'tomorrow'}}active{{/if}}")
-      a.name.js-toggle-due-tomorrow-filter
-        span.sidebar-list-item-description
-          | {{_ 'filter-due-tomorrow' }}
-        if Filter.dueAt.isSelected 'tomorrow'
-          i.fa.fa-check
-    li(class="{{#if Filter.dueAt.isSelected 'thisweek'}}active{{/if}}")
-      a.name.js-toggle-due-this-week-filter
-        span.sidebar-list-item-description
-          | {{_ 'filter-due-this-week' }}
-        if Filter.dueAt.isSelected 'thisweek'
-          i.fa.fa-check
-    li(class="{{#if Filter.dueAt.isSelected 'nextweek'}}active{{/if}}")
-      a.name.js-toggle-due-next-week-filter
-        span.sidebar-list-item-description
-          | {{_ 'filter-due-next-week' }}
-        if Filter.dueAt.isSelected 'nextweek'
-          i.fa.fa-check
+  each dateFilterProviderViews
+    +Template.dynamic(template=template data=data)
+  //- novalidate: the range is checked in the submit handler (rangeRefused in
+    sidebarFilters.js). WebKit keeps a half-edited date segment after Clear
+    empties a field and then refused every submit of the form, with no message.
+  form.js-card-movement-range(novalidate)
+    h4 {{_ 'filter-movement-range'}}
+    label(for="filter-card-movement-from") {{_ 'filter-date-range-from'}}
+    input.js-card-movement-from(id="filter-card-movement-from" type="date" value=movementFrom)
+    label(for="filter-card-movement-to") {{_ 'filter-date-range-to'}}
+    input.js-card-movement-to(id="filter-card-movement-to" type="date" value=movementTo)
+    button.primary(type="submit") {{_ 'apply'}}
+    button.js-clear-movement-range(type="button") {{_ 'filter-clear'}}
+    if movementRangeError
+      p.js-card-movement-range-error.filter-date-range-error(role="alert") {{_ 'filter-date-range-invalid'}}
+  form.js-card-date-range(novalidate)
+    label(for="filter-card-date-field") {{_ 'filter-date-range-field'}}
+    select.js-card-date-field(id="filter-card-date-field")
+      each dateRangeFields
+        option(value=id selected="{{#if dateRangeSelected id}}selected{{/if}}") {{_ label}}
+    label(for="filter-card-date-from") {{_ 'filter-date-range-from'}}
+    input.js-card-date-from(id="filter-card-date-from" type="date" value=dateRangeFrom)
+    label(for="filter-card-date-to") {{_ 'filter-date-range-to'}}
+    input.js-card-date-to(id="filter-card-date-to" type="date" value=dateRangeTo)
+    label
+      input.js-card-date-missing(type="checkbox" checked=dateRangeMissing)
+      | {{_ 'filter-date-range-missing'}}
+    button.primary(type="submit") {{_ 'apply'}}
+    button.js-clear-date-range(type="button") {{_ 'filter-clear'}}
+    if dateRangeError
+      p.js-card-date-range-error.filter-date-range-error(role="alert") {{_ 'filter-date-range-invalid'}}
+  hr
+  fieldset.filter-native-group
+    legend {{_ 'due-date'}}
+    label.filter-native-choice
+      input.js-due-unrestricted(type="radio" name="filter-due" value="" checked=dueUnrestricted)
+      span {{_ 'filter-due-any'}}
+    ul.sidebar-list
+      li(class="{{#if Filter.dueAt.isSelected 'noDate'}}active{{/if}}")
+        label.name.filter-native-choice.js-toggle-no-due-date-filter
+          input(type="radio" name="filter-due" value="noDate" checked="{{Filter.dueAt.isSelected 'noDate'}}")
+          span.sidebar-list-item-description
+            | {{_ 'filter-no-due-date' }}
+          if Filter.dueAt.isSelected 'noDate'
+            i.fa.fa-check
+      li(class="{{#if Filter.dueAt.isSelected 'past'}}active{{/if}}")
+        label.name.filter-native-choice.js-toggle-overdue-filter
+          input(type="radio" name="filter-due" value="past" checked="{{Filter.dueAt.isSelected 'past'}}")
+          span.sidebar-list-item-description
+            | {{_ 'filter-overdue' }}
+          if Filter.dueAt.isSelected 'past'
+            i.fa.fa-check
+      li(class="{{#if Filter.dueAt.isSelected 'today'}}active{{/if}}")
+        label.name.filter-native-choice.js-toggle-due-today-filter
+          input(type="radio" name="filter-due" value="today" checked="{{Filter.dueAt.isSelected 'today'}}")
+          span.sidebar-list-item-description
+            | {{_ 'filter-due-today' }}
+          if Filter.dueAt.isSelected 'today'
+            i.fa.fa-check
+      li(class="{{#if Filter.dueAt.isSelected 'tomorrow'}}active{{/if}}")
+        label.name.filter-native-choice.js-toggle-due-tomorrow-filter
+          input(type="radio" name="filter-due" value="tomorrow" checked="{{Filter.dueAt.isSelected 'tomorrow'}}")
+          span.sidebar-list-item-description
+            | {{_ 'filter-due-tomorrow' }}
+          if Filter.dueAt.isSelected 'tomorrow'
+            i.fa.fa-check
+      li(class="{{#if Filter.dueAt.isSelected 'previousweek'}}active{{/if}}")
+        label.name.filter-native-choice.js-toggle-due-previous-week-filter
+          input(type="radio" name="filter-due" value="previousweek" checked="{{Filter.dueAt.isSelected 'previousweek'}}")
+          span.sidebar-list-item-description {{_ 'filter-due-previous-week'}}
+          if Filter.dueAt.isSelected 'previousweek'
+            i.fa.fa-check
+      li(class="{{#if Filter.dueAt.isSelected 'thisweek'}}active{{/if}}")
+        label.name.filter-native-choice.js-toggle-due-this-week-filter
+          input(type="radio" name="filter-due" value="thisweek" checked="{{Filter.dueAt.isSelected 'thisweek'}}")
+          span.sidebar-list-item-description
+            | {{_ 'filter-due-this-week' }}
+          if Filter.dueAt.isSelected 'thisweek'
+            i.fa.fa-check
+      li(class="{{#if Filter.dueAt.isSelected 'nextweek'}}active{{/if}}")
+        label.name.filter-native-choice.js-toggle-due-next-week-filter
+          input(type="radio" name="filter-due" value="nextweek" checked="{{Filter.dueAt.isSelected 'nextweek'}}")
+          span.sidebar-list-item-description
+            | {{_ 'filter-due-next-week' }}
+          if Filter.dueAt.isSelected 'nextweek'
+            i.fa.fa-check
+      li(class="{{#if Filter.dueAt.isSelected 'nextmonth'}}active{{/if}}")
+        label.name.filter-native-choice.js-toggle-due-next-month-filter
+          input(type="radio" name="filter-due" value="nextmonth" checked="{{Filter.dueAt.isSelected 'nextmonth'}}")
+          span.sidebar-list-item-description {{_ 'filter-due-next-month'}}
+          if Filter.dueAt.isSelected 'nextmonth'
+            i.fa.fa-check
+  hr
+  h3
+    i.fa.fa-list
+    | {{_ 'filter-column-age'}}
+  form.js-column-age-filter
+    label {{_ 'list'}}
+    select.js-column-age-list
+      option(value="") {{_ 'filter-column-age-disabled'}}
+      each columnAgeLists
+        option(value=_id selected="{{#if columnAgeSelected _id}}selected{{/if}}") {{title}}
+    label {{_ 'filter-column-age-days'}}
+    input.js-column-age-days(type="number" min="1" max="365000" required value=columnAgeDays)
+    p.quiet {{_ 'filter-column-age-hint'}}
+    button.primary(type="submit") {{_ 'apply'}}
   hr
   h3
     i.fa.fa-list
@@ -140,6 +264,18 @@ template(name="filterSidebar")
             i.fa.fa-check
   hr
   h3
+    i.fa.fa-link
+    | {{_ 'filter-dependencies-label'}}
+  ul.sidebar-list
+    each dependencyTypes
+      li(class="{{#if Filter.cardDependencies.isSelected id}}active{{/if}}")
+        a.name.js-toggle-dependency-filter(data-filter-id="{{id}}")
+          span.sidebar-list-item-description
+            | {{_ label}}
+          if Filter.cardDependencies.isSelected id
+            i.fa.fa-check
+  hr
+  h3
     | {{_ 'other-filters-label'}}
   ul.sidebar-list
     li(class="{{#if Filter.archive.isSelected _id}}active{{/if}}")
@@ -156,80 +292,97 @@ template(name="filterSidebar")
         if Filter.hideEmpty.isSelected _id
           i.fa.fa-check
   hr
+  each filterProviderViews
+    .filter-provider(data-provider-id=id)
+      +Template.dynamic(template=template data=data)
   h3 {{_ 'advanced-filter-label'}}
-  input.js-field-advanced-filter(type="text")
+  input.js-field-advanced-filter(type="text" value=Filter.advanced.value)
   span {{_ 'advanced-filter-description'}}
+  p.quiet {{_ 'advanced-filter-card-dates-hint'}}
   if Filter.isActive
     hr
-    a.sidebar-btn.js-clear-all
-      i.fa.fa-search
-      span {{_ 'filter-clear'}}
     a.sidebar-btn.js-filter-to-selection
       i.fa.fa-check
       span {{_ 'filter-to-selection'}}
+    a.sidebar-btn.js-clear-all
+      i.fa.fa-search
+      span {{_ 'filter-clear'}}
 
 template(name="multiselectionSidebar")
-  h3
-    i.fa.fa-tag
-    | {{_ 'multi-selection-label'}}
-  ul.sidebar-list
-    each currentBoard.labels
-      li
-        a.name.js-toggle-label-multiselection
-          span.card-label.square(class="card-label-{{color}}")
-          span.sidebar-list-item-description
-            if name
-              = name
-            else
-              span.quiet {{_ "label-default" (_ (concat "color-" color))}}
-          if allSelectedElementHave 'label' _id
-            i.fa.fa-check
-          else if someSelectedElementHave 'label' _id
-            | ⋯
-  hr
-  h3
-    i.fa.fa-users
-    | {{_ 'multi-selection-member'}}
-  ul.sidebar-list
-    each currentBoard.activeMembers
-      with getUser userId
-        li(class="{{#if Filter.members.isSelected _id}}active{{/if}}")
-          a.name.js-toggle-member-multiselection
-            +userAvatar(userId=this._id)
+  if MultiSelection.hasObjects
+    if canModifyBoard
+      a.sidebar-btn.js-move-selection
+        i.fa.fa-upload
+        span {{_ 'move-selection'}}
+  else
+    h3
+      i.fa.fa-tag
+      | {{_ 'multi-selection-label'}}
+    ul.sidebar-list
+      each currentBoard.labels
+        li
+          a.name.js-toggle-label-multiselection
+            span.card-label.square(class="{{labelColorClass color}}" style="{{labelColorStyle color}}")
             span.sidebar-list-item-description
-              = profile.fullname
-              | (<span class="username">{{ username }}</span>)
-            if allSelectedElementHave 'member' _id
+              if name
+                = name
+              else
+                span.quiet {{_ "label-default" (_ (concat "color-" color))}}
+            if allSelectedElementHave 'label' _id
               i.fa.fa-check
-            else if someSelectedElementHave 'member' _id
+            else if someSelectedElementHave 'label' _id
               | ⋯
-  if currentUser.isBoardAdmin
     hr
-    a.sidebar-btn.js-selection-color
-      i.fa.fa-paint-brush
-      span {{_ 'selection-color'}}
-    a.sidebar-btn.js-copy-selection
-      i.fa.fa-clipboard
-      span {{_ 'copy-selection'}}
-    a.sidebar-btn.js-move-selection
-      i.fa.fa-upload
-      span {{_ 'move-selection'}}
-    a.sidebar-btn.js-archive-selection
-      i.fa.fa-archive
-      span {{_ 'archive-selection'}}
+    h3
+      i.fa.fa-users
+      | {{_ 'multi-selection-member'}}
+    ul.sidebar-list
+      each currentBoard.activeMembers
+        with getUser userId
+          li(class="{{#if Filter.members.isSelected _id}}active{{/if}}")
+            a.name.js-toggle-member-multiselection
+              +userAvatar(userId=this._id)
+              span.sidebar-list-item-description
+                = profile.fullname
+                | (<span class="username">{{ username }}</span>)
+              if allSelectedElementHave 'member' _id
+                i.fa.fa-check
+              else if someSelectedElementHave 'member' _id
+                | ⋯
+    if currentUser.isBoardAdmin
+      hr
+      a.sidebar-btn.js-selection-color
+        i.fa.fa-paint-brush
+        span {{_ 'selection-color'}}
+      a.sidebar-btn.js-copy-selection
+        i.fa.fa-clipboard
+        span {{_ 'copy-selection'}}
+      a.sidebar-btn.js-move-selection
+        i.fa.fa-upload
+        span {{_ 'move-selection'}}
+      a.sidebar-btn.js-archive-selection
+        i.fa.fa-archive
+        span {{_ 'archive-selection'}}
 
 template(name="disambiguateMultiLabelPopup")
   p {{_ 'what-to-do'}}
-  button.wide.js-remove-label {{_ 'remove-label'}}
-  button.wide.js-add-label {{_ 'add-label'}}
+  button.wide.js-remove-selection-label {{_ 'remove-label'}}
+  button.wide.js-add-selection-label {{_ 'add-label'}}
 
 template(name="disambiguateMultiMemberPopup")
   p {{_ 'what-to-do'}}
   button.wide.js-unassign-member {{_ 'unassign-member'}}
   button.wide.js-assign-member {{_ 'assign-member'}}
 
-template(name="moveSelectionPopup")
-  h3 {{_ 'moveSelectionPopup-title'}}
+//- WHERE THE SELECTED CARDS GO: board, swimlane, list, above or below which
+  card, and Done. Move selection and Copy selection asked it with the same
+  form; only the heading above it and what happens on Done differ, and both of
+  those stay with the popups (sidebarFilters.js).
+//-
+//- `idSuffix` is the one thing the two copies really did differ in: the radio
+  buttons' ids, so a label clicks its OWN radio. The name stays `position` in
+  both, which is what the handler reads.
+template(name="selectionDestinationPicker")
   label {{_ 'boards'}}:
   select.js-select-boards
     each boards
@@ -251,46 +404,22 @@ template(name="moveSelectionPopup")
       option(value="{{_id}}") {{add @index 1}}. {{title}}
 
   div
-    input(type="radio" name="position" value="above" checked id="position-above-move" style="display: inline")
-    label(for="position-above-move") {{_ 'above-selected-card'}}
+    input(type="radio" name="position" value="above" checked id="position-above-{{idSuffix}}" style="display: inline")
+    label(for="position-above-{{idSuffix}}") {{_ 'above-selected-card'}}
   div
-    input(type="radio" name="position" value="below" id="position-below-move" style="display: inline")
-    label(for="position-below-move") {{_ 'below-selected-card'}}
+    input(type="radio" name="position" value="below" id="position-below-{{idSuffix}}" style="display: inline")
+    label(for="position-below-{{idSuffix}}") {{_ 'below-selected-card'}}
 
   .edit-controls.clearfix
     button.primary.confirm.js-done {{_ 'done'}}
+
+template(name="moveSelectionPopup")
+  h3 {{_ 'moveSelectionPopup-title'}}
+  +selectionDestinationPicker(dialog=dialog idSuffix="move")
 
 template(name="copySelectionPopup")
   h3 {{_ 'copySelectionPopup-title'}}
-  label {{_ 'boards'}}:
-  select.js-select-boards
-    each boards
-      option(value="{{_id}}" selected="{{#if isDialogOptionBoardId _id}}selected{{/if}}") {{add @index 1}}. {{title}}
-
-  label {{_ 'swimlanes'}}:
-  select.js-select-swimlanes
-    each swimlanes
-      option(value="{{_id}}" selected="{{#if isDialogOptionSwimlaneId _id}}selected{{/if}}") {{add @index 1}}. {{isTitleDefault title}}
-
-  label {{_ 'lists'}}:
-  select.js-select-lists
-    each lists
-      option(value="{{_id}}" selected="{{#if isDialogOptionListId _id}}selected{{/if}}") {{add @index 1}}. {{title}}
-
-  label {{_ 'cards'}}:
-  select.js-select-cards
-    each cards
-      option(value="{{_id}}") {{add @index 1}}. {{title}}
-
-  div
-    input(type="radio" name="position" value="above" checked id="position-above-copy" style="display: inline")
-    label(for="position-above-copy") {{_ 'above-selected-card'}}
-  div
-    input(type="radio" name="position" value="below" id="position-below-copy" style="display: inline")
-    label(for="position-below-copy") {{_ 'below-selected-card'}}
-
-  .edit-controls.clearfix
-    button.primary.confirm.js-done {{_ 'done'}}
+  +selectionDestinationPicker(dialog=dialog idSuffix="copy")
 
 template(name="setSelectionColorPopup")
   h3 {{_ 'setSelectionColorPopup-title'}}
@@ -300,5 +429,25 @@ template(name="setSelectionColorPopup")
         span.card-label.palette-color.js-palette-color(class="card-details-{{color}}")
           if(isSelected color)
             i.fa.fa-check
+    +customCardColorSwatches(colors=customColors selected=selectedColor)
+    //- The same custom color as one card's popup (#5514): one '#rrggbb' hex,
+      written to every selected card the user may edit.
+    .color-wheel-wrap
+      label(for="selectionColorWheel") {{_ 'custom-color'}}
+      input.js-selection-color-wheel#selectionColorWheel(type="color" value=currentColorHex title="{{_ 'custom-color'}}")
     button.primary.confirm.js-submit {{_ 'save'}}
-    button.js-remove-color.negate.wide.right {{_ 'unset-color'}}
+    button.js-remove-color.negate.wide.right {{_ 'remove-btn'}}
+
+template(name="cardRecencyFilter")
+  each field in dateRecencyFields
+    fieldset.filter-native-group
+      legend {{_ field.label}}
+      each preset in dateRecencyPresets
+        label.filter-native-choice
+          input.js-card-date-recency(type="radio" name="filter-recency-{{field.id}}" data-field=field.id value=preset.id checked="{{dateRecencySelected field.id preset.id}}")
+          span {{_ preset.label}}
+
+template(name="textFilterProvider")
+  label
+    span {{_ labelKey}}
+    input.js-provider-text(type="text" value=providerTextValue maxlength="512")

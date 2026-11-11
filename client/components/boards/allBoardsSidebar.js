@@ -1,0 +1,309 @@
+import { ReactiveVar } from 'meteor/reactive-var';
+import { BOARD_COPY_FIELDS, allBoardCopyOptions, toggleBoardCopyOption } from '/models/lib/boardCopyOptions';
+import { ReactiveCache } from '/imports/reactiveCache';
+import { FlowRouter } from 'meteor/ostrio:flow-router-extra';
+const {
+  allBoardsPath,
+  SECTION_HOME,
+  SECTION_ARCHIVE,
+} = require('/models/lib/allBoardsUrls');
+import { TAPi18n } from '/imports/i18n';
+import { BoardMultiSelection } from '/client/lib/boardMultiSelection';
+import { massExportFormats, massExportUrl } from '/client/components/boards/exportScope';
+import { allBoardsSearchVar, allBoardsMenuVar } from '/client/lib/allBoardsView';
+import {
+  allBoardsSidebarView,
+  isAllBoardsSidebarOpen,
+  openAllBoardsSidebar,
+  closeAllBoardsSidebar,
+} from '/client/lib/allBoardsSidebar';
+import {
+  SIDEBAR_HOME,
+  SIDEBAR_SEARCH,
+  SIDEBAR_MULTISELECTION,
+  sidebarViewTitleKey,
+  sidebarViewTemplate,
+} from '/models/lib/allBoardsSidebar';
+import { selectedStarTitleKey, selectedStarAction } from '/models/lib/selectedStars';
+import { errorMessage } from '/client/lib/errorMessage';
+
+// The All Boards right sidebar. Its shell mirrors the board sidebar's; what it
+// shows is this page's own. docs/Features/Board-Header/Search.md,
+// docs/Features/General/Multi-Selection.md
+
+Template.allBoardsSidebar.helpers({
+  isSidebarOpen() {
+    return isAllBoardsSidebarOpen();
+  },
+  // The theme the panel is painted with.
+  //
+  // `.sidebar .sidebar-content .sidebar-btn` is a light grey box whose text is
+  // WHITE; what makes that readable on a board is a `.board-color-*` ancestor
+  // replacing the grey with a themed colour. This page has no board, so without
+  // a class here every button was white on light grey - unreadable, which is
+  // exactly what it looked like.
+  //
+  // `board-color-belize` is the established default for a themed thing outside
+  // a board: client/components/main/globalSearch.js falls back to the same one.
+  themeClass() {
+    return 'board-color-belize';
+  },
+  sidebarViewTemplate() {
+    return sidebarViewTemplate(allBoardsSidebarView());
+  },
+  // Home has no title and no back arrow: there is nothing behind it.
+  sidebarViewTitle() {
+    const key = sidebarViewTitleKey(allBoardsSidebarView());
+    return key ? TAPi18n.__(key) : null;
+  },
+});
+
+Template.allBoardsSidebar.events({
+  'click .js-close-all-boards-sidebar'(evt) {
+    evt.preventDefault();
+    // Selection mode deliberately keeps this sidebar visible, so its X must
+    // turn the mode off before closeAllBoardsSidebar() will accept the close.
+    if (BoardMultiSelection.isActive()) BoardMultiSelection.disable();
+    closeAllBoardsSidebar();
+  },
+  'click .js-all-boards-sidebar-home'(evt) {
+    evt.preventDefault();
+    openAllBoardsSidebar(SIDEBAR_HOME);
+  },
+});
+
+Template.allBoardsHomeSidebar.helpers({
+  canMultiSelectBoards() {
+    const currentUser = ReactiveCache.getCurrentUser();
+    return currentUser && !currentUser.isCommentOnly();
+  },
+});
+
+Template.allBoardsHomeSidebar.events({
+  'click .js-all-boards-sidebar-search'(evt) {
+    evt.preventDefault();
+    openAllBoardsSidebar(SIDEBAR_SEARCH);
+  },
+  'click .js-all-boards-sidebar-multiselection'(evt) {
+    evt.preventDefault();
+    BoardMultiSelection.activate();
+    openAllBoardsSidebar(SIDEBAR_MULTISELECTION);
+  },
+  // Boards in Archive is a page. This row had no handler at all: the one it
+  // relied on lived in the header bar's events map and went when that map was
+  // rewritten, so the button did nothing.
+  'click .js-export-all-boards'(evt) {
+    evt.preventDefault();
+    Popup.open('exportAllBoards').call({ boardIds: null }, evt);
+  },
+  'click .js-open-archived-board'(evt) {
+    evt.preventDefault();
+    closeAllBoardsSidebar();
+    // The SECTION of this page, not the full-width page it replaced.
+    // docs/Features/All-Boards/Archive.md
+    FlowRouter.go(allBoardsPath(SECTION_ARCHIVE, []));
+  },
+});
+
+Template.allBoardsSearchSidebar.helpers({
+  boardSearch() {
+    return allBoardsSearchVar.get();
+  },
+});
+
+// The search term is the page's, not this template's: the board list behind the
+// sidebar filters as you type, which is what the header bar's search field did
+// before it became a sidebar view.
+Template.allBoardsSearchSidebar.events({
+  'input .js-board-search-input'(evt) {
+    allBoardsSearchVar.set(evt.currentTarget.value);
+  },
+  'keydown .js-board-search-input'(evt) {
+    if (evt.key === 'Escape') {
+      // Clear first, close second: Escape on a search box that has text in it
+      // means "undo the search", and only an already-empty box falls through to
+      // the sidebar's own Escape.
+      if (allBoardsSearchVar.get()) {
+        evt.preventDefault();
+        evt.stopPropagation();
+        allBoardsSearchVar.set('');
+        evt.currentTarget.value = '';
+      }
+    }
+  },
+  'click .js-board-search-clear'(evt, tpl) {
+    evt.preventDefault();
+    allBoardsSearchVar.set('');
+    const input = tpl.find('.js-board-search-input');
+    if (input) {
+      input.value = '';
+      input.focus();
+    }
+  },
+});
+
+// What the "Selected: ★" row would do if clicked right now, and to which
+// boards. The same function the header bar used - see models/lib/selectedStars.
+function currentSelectedStarAction() {
+  const user = ReactiveCache.getCurrentUser();
+  return selectedStarAction(BoardMultiSelection.getSelectedBoardIds(), id =>
+    Boolean(user && user.hasStarred(id)),
+  );
+}
+
+Template.allBoardsMultiSelectionSidebar.helpers({
+  selectedStarTitle() {
+    return TAPi18n.__(selectedStarTitleKey(currentSelectedStarAction().action));
+  },
+  isArchiveSelection() {
+    return allBoardsMenuVar.get() === SECTION_ARCHIVE;
+  },
+  isHomeSelection() {
+    return allBoardsMenuVar.get() === SECTION_HOME;
+  },
+  canPermanentlyDeleteArchivedBoards() {
+    const user = ReactiveCache.getCurrentUser();
+    const setting = ReactiveCache.getCurrentSetting();
+    return allBoardsMenuVar.get() === SECTION_ARCHIVE
+      && user?.isAdmin === true
+      && !!(setting && setting.enablePermanentDelete);
+  },
+});
+
+function selectedBoardIdsOrWarn() {
+  const ids = BoardMultiSelection.getSelectedBoardIds();
+  if (!ids.length) {
+    alert(TAPi18n.__('no-boards-selected'));
+    return null;
+  }
+  return ids;
+}
+
+function selectedHomeBoardIdOrWarn() {
+  const ids = BoardMultiSelection.getSelectedBoardIds();
+  if (ids.length !== 1) {
+    alert(TAPi18n.__('select-only-one-board'));
+    return null;
+  }
+  return ids[0];
+}
+
+Template.exportAllBoardsPopup.helpers({
+  formats() {
+    const boardIds = (this && this.boardIds) || null;
+    return massExportFormats().map(format => ({
+      label: format.label,
+      url: massExportUrl(format.key, boardIds),
+      filename: format.key === 'excel' ? 'wekan-boards.xlsx' : `wekan-boards-${format.key}.zip`,
+    }));
+  },
+});
+
+Template.allBoardsMultiSelectionSidebar.events({
+  'click .js-export-selected-boards'(evt) {
+    evt.preventDefault();
+    const boardIds = selectedBoardIdsOrWarn();
+    if (!boardIds) return;
+    Popup.open('exportAllBoards', { titleKey: 'export-selected-boards' }).call({ boardIds }, evt);
+  },
+  'click .js-delete-selected-boards'(evt) {
+    evt.preventDefault();
+    const ids = selectedBoardIdsOrWarn();
+    if (!ids || !confirm(TAPi18n.__('delete-board-confirm-popup'))) return;
+    Meteor.call('permanentlyDeleteArchivedBoards', ids, (err) => {
+      if (err) {
+        alert(errorMessage(err));
+        return;
+      }
+      BoardMultiSelection.reset();
+    });
+  },
+  // Only the boards that must CHANGE are toggled: toggleBoardStar flips one
+  // board, so calling it for an already-starred one in the mixed case would
+  // un-star it.
+  'click .js-star-selected'(evt) {
+    evt.preventDefault();
+    const ids = selectedBoardIdsOrWarn();
+    if (!ids) return;
+    currentSelectedStarAction().boardIds.forEach((id) => {
+      Meteor.call('toggleBoardStar', id);
+    });
+  },
+  'click .js-home-selected'(evt) {
+    evt.preventDefault();
+    const boardId = selectedHomeBoardIdOrWarn();
+    if (!boardId) return;
+    Meteor.call('toggleDefaultBoard', boardId);
+  },
+  'click .js-archive-selected-boards'(evt) {
+    evt.preventDefault();
+    const selectedBoards = selectedBoardIdsOrWarn();
+    if (!selectedBoards) return;
+    if (
+      confirm(TAPi18n.__('archive-board-confirm'))
+    ) {
+      selectedBoards.forEach((boardId) => {
+        Meteor.call('archiveBoard', boardId, (err) => {
+          if (err) alert(errorMessage(err));
+        });
+      });
+      BoardMultiSelection.reset();
+    }
+  },
+  'click .js-duplicate-selected-boards'(evt) {
+    evt.preventDefault();
+    const boardIds = selectedBoardIdsOrWarn();
+    if (!boardIds) return;
+    Popup.open('duplicateSelectedBoards', { titleKey: 'duplicate-board' }).call({ boardIds }, evt);
+  },
+  'click .js-multiselection-reset'(evt) {
+    evt.preventDefault();
+    BoardMultiSelection.disable();
+    closeAllBoardsSidebar();
+  },
+});
+
+
+Template.duplicateSelectedBoardsPopup.onCreated(function () {
+  this.options = new ReactiveVar(allBoardCopyOptions());
+  this.busy = new ReactiveVar(false);
+  this.error = new ReactiveVar('');
+  this.remainingBoardIds = [...this.data.boardIds];
+});
+Template.duplicateSelectedBoardsPopup.helpers({
+  copyFields() {
+    const options = Template.instance().options.get();
+    return BOARD_COPY_FIELDS.map(field => ({ ...field, checked: options[field.key] }));
+  },
+  copyBusy() { return Template.instance().busy.get(); },
+  copyError() { return Template.instance().error.get(); },
+});
+Template.duplicateSelectedBoardsPopup.events({
+  'click .js-copy-select-all'(event, tpl) { event.preventDefault(); if (!tpl.busy.get()) tpl.options.set(allBoardCopyOptions()); },
+  'click .js-copy-select-none'(event, tpl) { event.preventDefault(); if (!tpl.busy.get()) tpl.options.set(allBoardCopyOptions(false)); },
+  'click .js-copy-field-toggle'(event, tpl) {
+    event.preventDefault();
+    if (!tpl.busy.get()) tpl.options.set(toggleBoardCopyOption(tpl.options.get(), event.currentTarget.dataset.field));
+  },
+  'click .js-copy-cancel'(event, tpl) { event.preventDefault(); if (!tpl.busy.get()) Popup.close(); },
+  async 'submit .js-duplicate-boards-form'(event, tpl) {
+    event.preventDefault();
+    if (tpl.busy.get()) return;
+    tpl.busy.set(true);
+    tpl.error.set('');
+    try {
+      // Retain only unfinished boards if an error requires retrying the batch.
+      while (tpl.remainingBoardIds.length) {
+        await Meteor.callAsync('copyBoard', tpl.remainingBoardIds[0], {
+          sort: ReactiveCache.getBoards({ archived: false }).length,
+          type: 'board', copyOptions: tpl.options.get(),
+        });
+        tpl.remainingBoardIds.shift();
+      }
+      BoardMultiSelection.reset();
+      Popup.close();
+    } catch (error) {
+      tpl.error.set(error.reason || error.message);
+    } finally { tpl.busy.set(false); }
+  },
+});

@@ -1,0 +1,3344 @@
+{
+  "keys": [
+    {
+      "key": "rule-email-recovery-dropped",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-recovery-review",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-recovery-recipients",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-recovery-recipient-accepted",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-recovery-recipient-unconfirmed",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-recovery-actions-hint",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-recovery-wait",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-recovery-resends",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-recovery-resend",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-recovery-mark-sent",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-recovery-drop",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-recovery-resend-confirm",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-recovery-mark-sent-confirm",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-recovery-drop-confirm",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-resolution-too-early",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-resolution-already-resolved",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-resolution-resend-in-flight",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-resolution-nothing-to-resend",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-resolution-resend-uncertain",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-resolution-busy",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-resolution-command-changed",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-resolution-attempt-invalid",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-resolution-failed",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-legacy-heading",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-legacy-description",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-legacy-source",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-legacy-mail",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-legacy-reason",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-legacy-reason-unbound",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-legacy-reason-details-snapshot",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-legacy-rebind",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-legacy-discard",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-legacy-rebind-confirm",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-legacy-discard-confirm",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-legacy-empty",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-legacy-unavailable",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-legacy-access-denied",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-legacy-source-changed",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-legacy-source-unavailable",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-legacy-plan-unavailable",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-legacy-attempt-exists",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-legacy-not-legacy",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "rule-email-legacy-failed",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "import-board-instruction-todotxt",
+      "since": "2026-09-29"
+    },
+    {
+      "key": "show-my-dependencies",
+      "since": "2026-10-01"
+    },
+    {
+      "key": "show-board-dependencies",
+      "since": "2026-10-01"
+    },
+    {
+      "key": "my-dependencies",
+      "since": "2026-10-01"
+    },
+    {
+      "key": "board-dependencies",
+      "since": "2026-10-01"
+    },
+    {
+      "key": "importMemberDependenciesPopup-title",
+      "since": "2026-10-01"
+    },
+    {
+      "key": "exportMemberDependenciesPopup-title",
+      "since": "2026-10-01"
+    },
+    {
+      "key": "dependencies-open-a-board",
+      "since": "2026-10-01"
+    },
+    {
+      "key": "dependencies-board-edit-required",
+      "since": "2026-10-01"
+    },
+    {
+      "key": "import-dependencies-merged",
+      "since": "2026-10-01"
+    },
+    {
+      "key": "dependency-layer-mine",
+      "since": "2026-10-01"
+    },
+    {
+      "key": "dependency-read-only",
+      "since": "2026-10-01"
+    },
+    {
+      "key": "features-desc",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "feature-views-table",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "feature-views-table-desc",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "feature-views-calendar",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "feature-views-calendar-desc",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "feature-views-time",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "feature-views-time-desc",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "feature-views-overview",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "feature-views-overview-desc",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "feature-views-gantt",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "feature-views-gantt-desc",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "feature-views-scrum",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "feature-views-scrum-desc",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "feature-views-flow-charts",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "feature-views-flow-charts-desc",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "feature-views-map",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "feature-views-map-desc",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "feature-awaiting-approval",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "feature-approval-required",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "feature-preview-admins",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "feature-pilot-users",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "feature-pilot-users-placeholder",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "feature-pilot-users-unknown",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "feature-saved",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "import-board-instruction-taskwarrior",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "drag-to-reorder",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "sync-estimate-source",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "sync-estimate-source-weight",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "sync-estimate-source-time",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "sync-estimate-field-gitlab",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "sync-estimate-field-gitlab-hint",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "scrum-scope-history",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "scrum-scope-history-help",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "scrum-scope-history-inconsistent",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "scrum-scope-history-truncated",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "scrum-scope-history-empty",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "scrum-scope-cause-start",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "scrum-scope-cause-scrum",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "scrum-scope-cause-customFields",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "scrum-scope-cause-dates",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "scrum-scope-cause-position",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "scrum-scope-cause-lifecycle",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "scrum-show-more",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "scrum-import-resume",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "scrum-import-discard",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "scrum-import-recovery-hint",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "import-board-instruction-focalboard",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-description",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-enabled",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-target",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-include",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-database",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-logs",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-engine",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-engine-auto",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-engine-oplog",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-engine-sqlite",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-engine-litestream",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-engine-chosen",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-engine-none",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-sqlite-interval",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-file-scan",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-base-every",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-keep-days",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-litestream-binary",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-litestream-url",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-status",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-running",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-stopped",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-generation",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-last-change",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-errors",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-restore-points",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-from",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-until",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-restore-to",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-restore-what",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-restore-sqlite",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-restore-confirm",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-restore-done",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-saved",
+      "since": "2026-10-02"
+    },
+    {
+      "key": "continuous-backup-apply-on-restart",
+      "since": "2026-10-03"
+    },
+    {
+      "key": "continuous-backup-encrypt",
+      "since": "2026-10-03"
+    },
+    {
+      "key": "continuous-backup-key-file",
+      "since": "2026-10-03"
+    },
+    {
+      "key": "continuous-backup-upload",
+      "since": "2026-10-03"
+    },
+    {
+      "key": "continuous-backup-upload-none",
+      "since": "2026-10-03"
+    },
+    {
+      "key": "continuous-backup-upload-prefix",
+      "since": "2026-10-03"
+    },
+    {
+      "key": "continuous-backup-fetch",
+      "since": "2026-10-03"
+    },
+    {
+      "key": "continuous-backup-fetched",
+      "since": "2026-10-03"
+    },
+    {
+      "key": "scrum-rollover-progress",
+      "since": "2026-10-03"
+    },
+    {
+      "key": "scrum-history-job-running",
+      "since": "2026-10-03"
+    },
+    {
+      "key": "scrum-history-job-failed",
+      "since": "2026-10-03"
+    },
+    {
+      "key": "shortcut-edit-due-date",
+      "since": "2026-10-07"
+    },
+    {
+      "key": "card-field-visibility",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "card-field-visibility-desc",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "login-setting-env-only",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "ldap-sync-now",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "ldap-sync-now-done",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "ldap-sync-now-error",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "ldap-sync-now-nothing",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "import-board-instruction-todoist",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "import-board-instruction-opml",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "import-board-instruction-orgmode",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "r-add-actinguser-assignee",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "r-remove-all-assignees",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "oauth-providers-allowed-email-domains",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "scrum-release-scope",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "scrum-releases-select-help",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "stuck-sync-operation-heading",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "stuck-sync-operation-description",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "stuck-sync-operation-list",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "stuck-sync-operation-applied",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "stuck-sync-operation-reason-scope-changed",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "stuck-sync-operation-reason-access-denied",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "stuck-sync-operation-reason-trigger-unknown",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "stuck-sync-operation-reason-intent-missing",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "stuck-sync-operation-reason-unknown",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "stuck-sync-operation-replayable-now",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "stuck-sync-operation-discard-confirm",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "stuck-sync-operation-empty",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "stuck-sync-operation-truncated",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "stuck-sync-operation-unavailable",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "stuck-sync-operation-missing",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "stuck-sync-operation-not-stuck",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "stuck-sync-operation-replayable",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "stuck-sync-operation-busy",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "read-only-field",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "scrum-history-checkpoint-stuck",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "scrum-history-checkpoint-counts",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "scrum-history-checkpoint-hint",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "scrum-history-checkpoint-rollback",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "scrum-history-checkpoint-discard",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "scrum-history-checkpoint-discard-confirm",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "scrum-history-checkpoint-ask-admin",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "cards-use-list-color",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "board-announcement",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "board-announcement-enabled",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "external-link-rules",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "external-link-rules-description",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "external-link-identifier-aliases",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "r-moved-forward",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "r-moved-back",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "sync-planning-sprint",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "sync-planning-releases",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "sync-planning-fields",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "sync-planning-hint",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "scrum-import-into-board",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "scrum-import-into-board-hint",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "scrum-import-choose-file",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "scrum-import-invalid-file",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "scrum-import-preview-sprints",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "scrum-import-preview-releases",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "scrum-import-preview-cards",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "scrum-import-preview-nothing",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "scrum-import-into-board-done",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "scrum-import-card-not-matched",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "scrum-import-card-ambiguous",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "scrum-import-card-on-another-board",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "scrum-import-record-ambiguous",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "scrum-import-record-not-imported",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "scrum-import-sprint-finished",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "interrupted-import-heading",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "interrupted-import-description",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "interrupted-import-progress",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "interrupted-import-created",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "interrupted-import-source",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "interrupted-import-state-stopped",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "interrupted-import-state-failed",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "interrupted-import-state-discarding",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "interrupted-import-scrum",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "interrupted-import-counts",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "interrupted-import-no-board",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "interrupted-import-keep",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "interrupted-import-keep-confirm",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "interrupted-import-discard-confirm",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "interrupted-import-empty",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "interrupted-import-truncated",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "interrupted-import-unavailable",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "interrupted-import-missing",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "interrupted-import-not-interrupted",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "interrupted-import-foreign-board",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "interrupted-import-scrum-busy",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "login-origin-mismatch",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "import-board-instruction-planner",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "import-board-instruction-meistertask",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "import-board-instruction-obsidian",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "import-board-instruction-linear",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "import-board-instruction-ticktick",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "import-board-instruction-clickup",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "import-board-instruction-nullboard",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "import-board-instruction-kanri",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "import-board-instruction-pivotal",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "import-board-instruction-tasksorg",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "import-board-instruction-monday",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "import-board-instruction-superproductivity",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "import-board-instruction-taiga",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "import-board-instruction-vikunja",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "import-board-instruction-quire",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "import-board-instruction-wrike",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "import-board-instruction-teamwork",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "import-board-instruction-businessmap",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "import-board-instruction-redmine",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "import-board-instruction-notion",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "import-board-instruction-plane",
+      "since": "2026-10-08"
+    },
+    {
+      "key": "r-wrike-workflow",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "r-wrike-workflow-note",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "r-export-wrike-workflow",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "r-import-wrike-workflow",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "r-import-wrike-workflow-done",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "import-many-boards",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "import-many-boards-hint",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "import-one-board-per-project",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "import-one-board-per-project-hint",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "import-many-progress",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "import-many-results-heading",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "import-many-imported",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "export-all-boards",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "export-selected-boards",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "export-all-boards-hint",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "exportAllBoardsPopup-title",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "import-members-mode-heading",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "import-members-mode-map",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "import-members-mode-placeholder",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "import-members-mode-me",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "csv-mapping-title",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "csv-mapping-description",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "csv-mapping-not-in-file",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "csv-mapping-column-number",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "csv-mapping-list-missing",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "csv-mapping-list-name",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "csv-mapping-custom-fields",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "csv-mapping-boards",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "csv-mapping-skipped-sheets",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "csv-mapping-title-required",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "csv-mapping-list-required",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "invalid-import-mapping",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "import-file-label",
+      "since": "2026-10-09"
+    },
+    {
+      "key": "attach-card",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "attach-card-hint",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "attached-card-unavailable",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "detach-card",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "attach-card-self",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "attach-card-limit",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "attach-card-not-found",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "attachCardPopup-title",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "subtask-mark-done",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "subtask-mark-not-done",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "subtask-done-no-permission",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "webhook-payload-heading",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "webhook-payload-description",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "webhook-payload-text",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "webhook-payload-fields",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "webhook-payload-field-standard",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "webhook-payload-field-ids",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "webhook-payload-field-names",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "webhook-payload-field-links",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "webhook-payload-field-actor",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "webhook-payload-field-people",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "webhook-payload-field-details",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "webhook-hide-identity",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "webhook-someone",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "custom-field-links",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "custom-field-links-hint",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "custom-field-links-none",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "custom-field-link-unavailable",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "custom-field-link-fields",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "custom-field-link-no-fields",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "custom-field-link-inactive",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "custom-field-unlink",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "custom-field-link-target",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "custom-field-link-direction",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "custom-field-link-both",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "custom-field-link-send",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "custom-field-link-sends",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "custom-field-link-receives",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "custom-field-link-add",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "field-link-self",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "field-link-limit",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "field-link-archived",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "field-link-invalid",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "field-link-not-found",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "field-link-not-allowed",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "cardCustomFieldLinksPopup-title",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "board-view-calendar-mode",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "notification-delivery-layout-classic",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "notification-delivery-layout-clear",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "notification-delivery-parts",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "notification-delivery-part-board",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "notification-delivery-part-actor",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "notification-delivery-part-card",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "notification-delivery-part-details",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "notification-delivery-part-dates",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "notification-delivery-part-link",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "notification-delivery-grouping",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "notification-delivery-grouping-all",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "notification-delivery-grouping-board",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "notification-delivery-grouping-card",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "notification-delivery-grouping-none",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "notification-delivery-schedule",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "notification-delivery-schedule-immediate",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "notification-delivery-schedule-interval",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "notification-delivery-schedule-daily",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "notification-delivery-interval",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "notification-delivery-minutes",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "notification-delivery-daily-time",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "notification-delivery-quiet",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "notification-delivery-quiet-to",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "notification-delivery-quiet-clear",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "notification-delivery-timezone",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "notification-delivery-invalid",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "notification-group-card",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "notification-group-board",
+      "since": "2026-10-10"
+    },
+    {
+      "key": "exportToTrelloPopup-title",
+      "since": "2026-10-13"
+    },
+    {
+      "key": "trello-export-desc",
+      "since": "2026-10-13"
+    },
+    {
+      "key": "trello-export-include-attachments",
+      "since": "2026-10-13"
+    },
+    {
+      "key": "trello-export-start",
+      "since": "2026-10-13"
+    },
+    {
+      "key": "trello-export-open-board",
+      "since": "2026-10-13"
+    },
+    {
+      "key": "trello-export-warnings",
+      "since": "2026-10-13"
+    },
+    {
+      "key": "sandstorm-trello-access-needed",
+      "since": "2026-10-13"
+    },
+    {
+      "key": "sandstorm-allow-trello-access",
+      "since": "2026-10-13"
+    },
+    {
+      "key": "sandstorm-trello-access-granted",
+      "since": "2026-10-13"
+    },
+    {
+      "key": "sandstorm-forget-access",
+      "since": "2026-10-13"
+    },
+    {
+      "key": "sandstorm-trello-save-label",
+      "since": "2026-10-13"
+    },
+    {
+      "key": "roles-status-move",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "custom-roles",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "custom-roles-desc",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "custom-role-name",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "add-custom-role",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "custom-role-sees-all",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "instance-editing-allowed",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "instance-editing",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "instance-editing-desc",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "board-key",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "board-key-desc",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "board-key-taken",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "board-key-invalid",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "shared-labels",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "shared-labels-desc",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "shared-label-scope-instance",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "shared-label-scope-org",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "shared-label-scope-team",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "add-shared-label",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "listPermissionsPopup-title",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "list-permissions-desc",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "list-permission-board",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "list-permission-allow",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "list-permission-deny",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "list-permission-signed-in",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "sandstorm-webhook-grant",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "sandstorm-webhook-granted",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "sandstorm-sync-grant",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "sandstorm-sync-granted",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "board-view-version-control",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "feature-views-version-control",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "feature-views-version-control-desc",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-issues",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-milestones",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-new-issue",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-submit-issue",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-open",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-closed",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-sort-created-desc",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-sort-created-asc",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-sort-updated-desc",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-sort-comments-desc",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-opened-by",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-comment-count",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-open-issues",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-due",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-no-due-date",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-no-issues",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-no-milestones",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-no-labels",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-no-files",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-no-description",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-none",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-leave-comment",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-close",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-reopen",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-open-card",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-issue-title-required",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-issue-title-too-long",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-issue-body-too-long",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-no-list",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "card-qr-code",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "card-qr-code-desc",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "card-qr-code-too-long",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-sync-now",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-synced-from",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-synced-issue",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "sync-issue-details",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "cardQrCodePopup-title",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "r-commented",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "r-add-comment",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "r-add-comment-placeholder",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "r-on-cron-schedule",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "r-for-cards-in-list",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "r-cron-invalid",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "rule-disabled",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-releases",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-wiki",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-wiki-pages",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-no-releases",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "vcs-no-wiki",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "github-org-import",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "github-org-import-desc",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "github-org-import-owner",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "github-org-import-token",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "github-org-import-token-hint",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "github-org-import-issues",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "github-org-import-releases",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "github-org-import-release-files",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "github-org-import-actions",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "github-org-import-wiki",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "github-org-import-forks",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "github-org-import-start",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "github-org-import-progress",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "github-org-import-result",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "github-org-import-owner-invalid",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "github-org-import-no-repos",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "github-org-import-running",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "optional-apis",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "optional-apis-desc",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "optional-api-trello",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "optional-api-trello-desc",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "optional-api-jira",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "optional-api-jira-desc",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "optional-api-github",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "optional-api-github-desc",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "optional-api-gitea",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "optional-api-gitea-desc",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "bots",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "bots-none",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "bots-name",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "bots-url",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "bots-token",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "bots-add",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "bots-live",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "bots-no-runs",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "bots-summary",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "bots-status-queued",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "bots-status-running",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "bots-status-awaiting_input",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "bots-status-review",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "bots-status-done",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "bots-status-failed",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "bots-status-stopped",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "bots-dispatch",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "bots-stop",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "bots-reply",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "bots-send",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "r-dispatch-bot",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "bot-not-found",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "bot-option-not-found",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "bot-reply-empty",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "search-step",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "sort-by-label-order",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "webhook-internal-hosts",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "webhook-internal-hosts-desc",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "webhook-internal-hosts-rejected",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "activity-recovery-retry-all",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "activity-recovery-cancel-older",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "activity-recovery-cancel-older-prompt",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "activity-recovery-bulk-result",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "keep-title-tags",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "keep-title-tags-description",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "deposit-subtasks-swimlane",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "deposit-subtasks-swimlane-auto",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "rules-read-only-for-members",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "rules-read-only-for-members-desc",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "rules-visible-to-members",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "r-rules-not-shown",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "account-webhook",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "account-webhook-desc",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "account-webhook-on-login",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "account-webhook-on-register",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "account-webhook-fields",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "account-webhook-field-email",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "account-webhook-field-ip",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "account-webhook-field-fullname",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "account-webhook-field-authMethod",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "r-email-add-member",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "r-email-members-hint",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "ntfy",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "ntfy-description",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "ntfy-enabled",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "ntfy-topic-url",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "ntfy-token",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "ntfy-invalid-topic-url",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "ntfy-invalid-token",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "webhook-mattermost-dm",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "webhook-mattermost-dm-desc",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "share-target-title",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "share-target-pick-board",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "share-target-create",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "share-target-empty",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "log-out-everywhere",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "logoutEverywherePopup-title",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "log-out-everywhere-confirm",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "passkeysPopup-title",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "passkeys-description",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "passkeys-none",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "passkey-name",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "passkey-add",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "passkeys-unsupported",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "passkey-added",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "passkey-invalid",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "passkey-sign-in",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "passkey-sign-in-failed",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "passkey-expired",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "passkey-exists",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "passkey-too-many",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "passkey-needs-https",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "passkey-cancelled",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "hide-board",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "hiddenBoardsPopup-title",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "hidden-boards-none",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "subtask-from-board",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "checklist-item-assignee",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "checklist-item-assignee-none",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "checklistItemAssigneePopup-title",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "shared-list-headers",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "shared-list-headers-desc",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "board-label-name",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "board-label-name-includes",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "board-label-apply",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "board-label-remove",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "board-facet-clear",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "cardKindPopup-title",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "card-kind-none",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "card-kind-story",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "card-kind-task",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "custom-field-card-kinds",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "show-unread-changes",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "show-unread-changes-desc",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "card-has-unread-changes",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "webhook-activities",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "webhook-activities-all",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "activity-feed-title",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "activity-feed-empty",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "activity-feed-more",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "web-push",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "web-push-description",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "web-push-enable",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "web-push-disable",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "web-push-denied",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "web-push-failed",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "link-list-from-board",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "link-list-create",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "linkListPopup-title",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "link-list-board",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "link-list-list",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "board-view-column-sets",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "feature-views-column-sets",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "feature-views-column-sets-desc",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "column-sets",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "column-set-new",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "column-new",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "column-set-remove",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "column-remove",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "column-not-placed",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "column-sets-empty",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "column-color",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "cardDrawingPopup-title",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "card-drawing-new",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "card-drawing-undo",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "card-drawing-clear",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "card-drawing-download-svg",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "card-drawing-saved",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "group-member-add",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "group-member-remove",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "group-members-read-only",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "activity-pub-enabled",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "activity-pub-desc",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "caldav-sync",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "caldav-sync-desc",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "caldav-url",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "caldav-app-password",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "caldav-enabled",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "caldav-sync-now",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "caldav-invalid-url",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "caldav-not-linked",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "webdav-storage",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "webdav-storage-description",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "webdav-endpoint",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "webdav-password",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "webdav-folder",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "move-storage-webdav",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "sqrl-enabled",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "sqrl-desc",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "sqrl-sign-in",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "sqrl-scan",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "sqrl-open-client",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "sqrl-expired",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "sqrl-sign-in-failed",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "sqrl-needs-https",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "sqrlPopup-title",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "sqrl-description",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "sqrl-add",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "sqrl-added",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "sqrl-none",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "sqrl-remove",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "sqrl-disabled-by-client",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "sqrl-only-on",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "sqrl-hardlock-on",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "sqrl-only",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "sqrl-hardlock",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "windows-sso-sign-in",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "windows-sso-failed",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "sync-write-back",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "sync-write-back-error",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "api-import-desc",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "api-import-url",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "api-import-username",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "api-import-password",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "api-import-token",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "api-import-account",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "api-import-list",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "api-import-choose",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "api-import-fetch",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "api-import-fetched",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "api-import-failed",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "api-import-nothing",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "import-board-instruction-planka",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "import-board-instruction-mstodo",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "import-board-instruction-kanbanflow",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "import-board-instruction-basecamp",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "import-board-instruction-googletasks",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "import-board-instruction-googlekeep",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "act-removedChecklistItem",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "act-moveCardBoard",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "act-deleteBoard",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "act-changedBoardTitle",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "act-changedListTitle",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "act-changedSwimlaneTitle",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "act-restoredList",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "act-restoredSwimlane",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "act-joinAssignee",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "act-unjoinAssignee",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "chat-view-unread",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "chat-view-all-cards",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "chat-view-message-cards",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "sandstorm-sync-jira-hint",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "import-attachment-auth",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "import-attachment-auth-hint",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "import-attachment-auth-url",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "import-attachment-auth-token",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "board-load-failed",
+      "since": "2026-10-14"
+    },
+    {
+      "key": "restoreAllSkippedPopup-title",
+      "since": "2026-10-15"
+    },
+    {
+      "key": "restore-card-wip-limit-reached",
+      "since": "2026-10-15"
+    },
+    {
+      "key": "restore-card-no-list-with-room",
+      "since": "2026-10-15"
+    },
+    {
+      "key": "restore-all-skipped-wip-limit",
+      "since": "2026-10-15"
+    },
+    {
+      "key": "due-from-title",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "due-from-title-keep",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "similar-cards",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "similar-cards-none",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "possible-duplicate",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "rule-suggestions",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "rule-suggestion-when-moved",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "rule-suggestion-when-created",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "rule-suggestion-when-label",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "rule-suggestion-then-label",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "rule-suggestion-then-member",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "rule-suggestion-then-archive",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "rule-suggestion-count",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "rule-suggestion-create",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "rule-suggestion-dismiss",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "feature-rule-suggestions",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "feature-rule-suggestions-desc",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "summary-last-day",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "summary-last-week",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "summary-copy",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "summary-commented",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "feature-board-summary",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "feature-board-summary-desc",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "since-last-visit",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "since-last-visit-count",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "since-visit-none",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "since-visit-created",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "since-visit-moved",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "since-visit-commented",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "since-visit-due",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "since-visit-member",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "since-visit-archived",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "since-visit-label",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "since-visit-edited",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "feature-since-last-visit",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "feature-since-last-visit-desc",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "at-risk",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "at-risk-reason-overdue",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "at-risk-reason-due-soon",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "at-risk-reason-blocked",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "at-risk-reason-idle",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "at-risk-reason-sent-back",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "suggested-members",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "forecast",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "forecast-done",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "forecast-not-enough",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "checklist-from-description",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "from-description",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "make-checklist",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "make-subtasks",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "action-items",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "action-items-create",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "action-items-from",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "search-phrase-my-overdue-cards",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "search-phrase-my-cards",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "search-phrase-overdue-cards",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "search-phrase-due-this-week",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "search-phrase-unassigned-cards",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "search-phrase-cards-without-due-date",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "search-phrase-created-today",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "search-phrase-changed-this-week",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "search-phrase-archived-cards",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "search-phrase-cards-with-attachments",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "search-phrases-searching",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "feature-search-phrases",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "feature-search-phrases-desc",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "whiteboard",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "whiteboard-open",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "whiteboard-clear-mine",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "whiteboard-save-picture",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "whiteboard-read-only",
+      "since": "2026-10-17"
+    },
+    {
+      "key": "data-health-never-run",
+      "since": "2026-10-27"
+    },
+    {
+      "key": "keep-add-card-form-open",
+      "since": "2026-10-28"
+    },
+    {
+      "key": "keep-add-card-form-open-description",
+      "since": "2026-10-28"
+    },
+    {
+      "key": "card-settings-show",
+      "since": "2026-10-28"
+    },
+    {
+      "key": "cardSettingsSectionPopup-title",
+      "since": "2026-10-28"
+    },
+    {
+      "key": "cardSettingsItemPopup-title",
+      "since": "2026-10-28"
+    },
+    {
+      "key": "password-pwned",
+      "since": "2026-10-30"
+    },
+    {
+      "key": "password-too-short",
+      "since": "2026-10-30"
+    },
+    {
+      "key": "password-same-as-username",
+      "since": "2026-10-30"
+    },
+    {
+      "key": "two-factor-required-title",
+      "since": "2026-10-30"
+    },
+    {
+      "key": "two-factor-required-text",
+      "since": "2026-10-30"
+    },
+    {
+      "key": "admin-audit-log",
+      "since": "2026-10-30"
+    },
+    {
+      "key": "admin-audit-log-info",
+      "since": "2026-10-30"
+    },
+    {
+      "key": "admin-audit-log-when",
+      "since": "2026-10-30"
+    },
+    {
+      "key": "admin-audit-log-who",
+      "since": "2026-10-30"
+    },
+    {
+      "key": "admin-audit-log-action",
+      "since": "2026-10-30"
+    },
+    {
+      "key": "admin-audit-log-details",
+      "since": "2026-10-30"
+    },
+    {
+      "key": "admin-audit-log-empty",
+      "since": "2026-10-30"
+    },
+    {
+      "key": "s3-sse",
+      "since": "2026-10-30"
+    },
+    {
+      "key": "s3-sse-none",
+      "since": "2026-10-30"
+    },
+    {
+      "key": "s3-sse-description",
+      "since": "2026-10-30"
+    },
+    {
+      "key": "s3-sse-kms-key-id",
+      "since": "2026-10-30"
+    },
+    {
+      "key": "password-length-report-title",
+      "since": "2026-10-31"
+    },
+    {
+      "key": "password-length-report-desc",
+      "since": "2026-10-31"
+    },
+    {
+      "key": "password-length-no-results",
+      "since": "2026-10-31"
+    },
+    {
+      "key": "password-length-first-login",
+      "since": "2026-10-31"
+    },
+    {
+      "key": "password-length-last-login",
+      "since": "2026-10-31"
+    },
+    {
+      "key": "password-length-login-count",
+      "since": "2026-10-31"
+    },
+    {
+      "key": "password-length-fixed",
+      "since": "2026-10-31"
+    },
+    {
+      "key": "password-length-filter-short",
+      "since": "2026-10-31"
+    },
+    {
+      "key": "password-length-filter-fixed",
+      "since": "2026-10-31"
+    },
+    {
+      "key": "password-length-filter-all",
+      "since": "2026-10-31"
+    },
+    {
+      "key": "password-min-length",
+      "since": "2026-10-31"
+    },
+    {
+      "key": "password-min-length-description",
+      "since": "2026-10-31"
+    },
+    {
+      "key": "password-min-length-enforce",
+      "since": "2026-10-31"
+    },
+    {
+      "key": "password-min-length-enforce-description",
+      "since": "2026-10-31"
+    },
+    {
+      "key": "password-length-saved",
+      "since": "2026-10-31"
+    },
+    {
+      "key": "password-length-from-environment",
+      "since": "2026-10-31"
+    },
+    {
+      "key": "password-change-required-title",
+      "since": "2026-10-31"
+    },
+    {
+      "key": "password-change-required-text",
+      "since": "2026-10-31"
+    },
+    {
+      "key": "login-background-color",
+      "since": "2026-11-03"
+    },
+    {
+      "key": "cloud",
+      "since": "2026-11-07"
+    },
+    {
+      "key": "cloud-settings-desc",
+      "since": "2026-11-07"
+    },
+    {
+      "key": "cloud-panel-domain",
+      "since": "2026-11-07"
+    },
+    {
+      "key": "cloud-superadmin-username",
+      "since": "2026-11-07"
+    },
+    {
+      "key": "cloud-saved",
+      "since": "2026-11-07"
+    },
+    {
+      "key": "cloud-panel-not-allowed",
+      "since": "2026-11-07"
+    },
+    {
+      "key": "cloud-customer-name",
+      "since": "2026-11-07"
+    },
+    {
+      "key": "cloud-customer-email",
+      "since": "2026-11-07"
+    },
+    {
+      "key": "cloud-billing-email",
+      "since": "2026-11-07"
+    },
+    {
+      "key": "cloud-start-date",
+      "since": "2026-11-07"
+    },
+    {
+      "key": "cloud-end-date",
+      "since": "2026-11-07"
+    },
+    {
+      "key": "cloudflare-api-key",
+      "since": "2026-11-07"
+    },
+    {
+      "key": "cloudflare-api-key-desc",
+      "since": "2026-11-07"
+    },
+    {
+      "key": "cloudflare-api-key-set",
+      "since": "2026-11-07"
+    },
+    {
+      "key": "cloudflare-api-key-not-set",
+      "since": "2026-11-07"
+    }
+  ]
+}

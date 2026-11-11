@@ -15,6 +15,10 @@ err_context = 3
 
 
 def get_req_body_elems(obj, elems):
+    # An absent child is valid JavaScript: `let x;` has no init, `for (;;)`
+    # has no test, `[a, , b]` has a hole. There is nothing to read in it.
+    if obj is None:
+        return ''
     if obj.type in ['FunctionExpression', 'ArrowFunctionExpression']:
         get_req_body_elems(obj.body, elems)
     elif obj.type == 'BlockStatement':
@@ -65,6 +69,10 @@ def get_req_body_elems(obj, elems):
     elif obj.type in ('LogicalExpression', 'BinaryExpression', 'AssignmentExpression'):
         get_req_body_elems(obj.left, elems)
         get_req_body_elems(obj.right, elems)
+    elif obj.type == 'ConditionalExpression':
+        get_req_body_elems(obj.test, elems)
+        get_req_body_elems(obj.consequent, elems)
+        get_req_body_elems(obj.alternate, elems)
     elif obj.type == 'ChainExpression':
         get_req_body_elems(obj.expression, elems)
     elif obj.type in ('ReturnStatement', 'UnaryExpression'):
@@ -128,6 +136,36 @@ def load_return_type_jsdoc_json(data):
     return json.loads(data)
 
 
+def static_route_path(node):
+    '''Return the URL path string for a route's path-argument AST node, or None
+    if it cannot be resolved statically.
+
+    Handles plain string literals (`'/api/...'`) and template literals
+    (`` `/api/boards/:boardId/export/${format}` ``): a `${identifier}` segment
+    becomes a `:identifier` path parameter (which the existing `:name` -> `{name}`
+    conversion then turns into an OpenAPI path parameter). A template literal with
+    a non-identifier interpolation cannot be documented and yields None.'''
+    if node is None:
+        return None
+    value = getattr(node, 'value', None)
+    if value is not None:
+        return value
+    if getattr(node, 'type', None) == 'TemplateLiteral':
+        quasis = getattr(node, 'quasis', None) or []
+        exprs = getattr(node, 'expressions', None) or []
+        parts = []
+        for i, quasi in enumerate(quasis):
+            parts.append((quasi.value.cooked if quasi.value else '') or '')
+            if i < len(exprs):
+                expr = exprs[i]
+                if getattr(expr, 'type', None) == 'Identifier':
+                    parts.append(':' + expr.name)
+                else:
+                    return None
+        return ''.join(parts)
+    return None
+
+
 class EntryPoint(object):
     def __init__(self, schema, method_name, path_node, body_node, loc_node):
         self.schema = schema
@@ -166,7 +204,7 @@ class EntryPoint(object):
         schema.used = True
 
     def compute_path(self):
-        return self._path.value.rstrip('/')
+        return static_route_path(self._path).rstrip('/')
 
     def log(self, message, level):
         if self._raw_doc is None:
@@ -219,6 +257,7 @@ class EntryPoint(object):
          *    optional by adding square brackets around its name
          *
          * @return Documents a return value
+         * @response 404 {error: string} Documents an additional HTTP response
          */
 
         Notes:
@@ -258,7 +297,7 @@ class EntryPoint(object):
                     if param_type == 'Object':
                         # hope for the best
                         param_type = 'object'
-                    elif param_type not in ['string', 'number', 'boolean', 'integer', 'array', 'file']:
+                    elif param_type not in ['string', 'number', 'boolean', 'integer', 'array', 'file', 'object']:
                         self.warn('unknown type {}\n allowed values: string, number, boolean, integer, array, file'.format(param_type))
                     try:
                         name, desc = desc.split(maxsplit=1)
@@ -294,11 +333,57 @@ class EntryPoint(object):
                 return
 
             # 'return' tag is json
+            if tag == 'response':
+                try:
+                    code, response_data = data.split(maxsplit=1)
+                except ValueError:
+                    self.warn('response needs an HTTP status and description')
+                    return
+
+                if code != 'default' and not re.fullmatch(r'\d{3}', code):
+                    self.warn('invalid HTTP response status {}'.format(code))
+                    return
+
+                response_data = response_data.strip()
+                response_schema = None
+                if response_data.startswith(('{', '[')):
+                    opening = response_data[0]
+                    closing = '}' if opening == '{' else ']'
+                    depth = 0
+                    schema_end = None
+                    for index, char in enumerate(response_data):
+                        if char == opening:
+                            depth += 1
+                        elif char == closing:
+                            depth -= 1
+                            if depth == 0:
+                                schema_end = index + 1
+                                break
+                    if schema_end is None:
+                        self.warn('unterminated response schema for HTTP {}'.format(code))
+                        return
+                    schema_data = response_data[:schema_end]
+                    response_data = response_data[schema_end:].strip()
+                    try:
+                        response_schema = load_return_type_jsdoc_json(schema_data)
+                    except json.decoder.JSONDecodeError:
+                        self.warn('invalid response schema for HTTP {}'.format(code))
+                        return
+
+                if not response_data:
+                    self.warn('response needs a description for HTTP {}'.format(code))
+                    return
+                self._doc.setdefault('responses', {})[code] = {
+                    'description': response_data,
+                    'schema': response_schema,
+                }
+                return
+
             if tag == 'return_type':
                 try:
                     data = load_return_type_jsdoc_json(data)
                 except json.decoder.JSONDecodeError:
-                    pass
+                    pass  # not JSON: keep the text as it is
 
             # we should not have 2 identical tags but @param or @tag
             if tag in self._doc:
@@ -317,7 +402,7 @@ class EntryPoint(object):
             if line.lstrip().startswith('@'):
                 tag, data = line.lstrip().split(maxsplit=1)
 
-                if tag in ['@operation', '@summary', '@description', '@param', '@return_type', '@tag']:
+                if tag in ['@operation', '@summary', '@description', '@param', '@return_type', '@response', '@tag']:
                     # store the current data
                     store_tag(current_tag, current_data)
 
@@ -348,10 +433,23 @@ class EntryPoint(object):
         ptype, poptional, pdesc = self.doc_param(name)
         if pdesc is not None:
             print('{}description: |'.format(' ' * indent))
-            print('{}{}'.format(' ' * (indent + 2), pdesc))
+            # A @param description that continues on the next JSDoc lines
+            # arrives here with embedded newlines. Every line of a YAML block
+            # scalar must be indented at least as far as its first line, so
+            # each one is indented - not only the first, which put the
+            # continuation lines at column 1 and made the whole spec unparseable
+            # ("bad indentation of a mapping entry", the release bump job).
+            for line in str(pdesc).split('\n'):
+                print('{}{}'.format(' ' * (indent + 2), line.strip()))
         else:
             print('{}description: the {} value'.format(' ' * indent, name))
-        if ptype is not None:
+        if ptype == 'object':
+            # OpenAPI 2.0 has no `object` for a query/form/path parameter; the
+            # REST API takes such a value as JSON in a string. Say so in the
+            # spec rather than emit a type Swagger tooling rejects.
+            print('{}type: string'.format(' ' * indent))
+            print('{}format: json'.format(' ' * indent))
+        elif ptype is not None:
             print('{}type: {}'.format(' ' * indent, ptype))
         else:
             print('{}type: string'.format(' ' * indent))
@@ -377,6 +475,10 @@ class EntryPoint(object):
         if 'return_type' in self._doc:
             return self._doc['return_type']
         return None
+
+    @property
+    def responses(self):
+        return self._doc.get('responses', {})
 
     @property
     def tags(self):
@@ -407,6 +509,15 @@ class EntryPoint(object):
             if obj == self.schema.name:
                 rtype = '$ref: "#/definitions/{}"'.format(obj)
             print('{}{}'.format(' ' * indent, rtype))
+
+    def print_openapi_response(self, code, description, schema=None):
+        print("        '{}':".format(code))
+        print('          description: |-')
+        for line in description.split('\n'):
+            print('            {}'.format(line))
+        if schema is not None:
+            print('          schema:')
+            self.print_openapi_return(schema, 12)
 
     def print_openapi(self):
         parameters = [token[1:-2] if token.endswith('Id') else token[1:]
@@ -455,19 +566,43 @@ class EntryPoint(object):
         - application/json
       security:
           - UserSecurity: []
-      responses:
-        '200':
-          description: |-
-            200 response''')
-        if self.returns is not None:
-            print('          schema:')
-            self.print_openapi_return(self.returns, 12)
+      responses:''')
+        response_200 = self.responses.get('200')
+        if response_200 is None:
+            self.print_openapi_response('200', '200 response', self.returns)
+        else:
+            self.print_openapi_response(
+                '200', response_200['description'], response_200['schema'])
+        for code, response in self.responses.items():
+            if code == '200':
+                continue
+            self.print_openapi_response(
+                code, response['description'], response['schema'])
 
 
 class SchemaProperty(object):
     def __init__(self, statement, schema, context):
         self.schema = schema
         self.statement = statement
+        self._doc = None
+        self._raw_doc = None
+        if statement.type == 'SpreadElement':
+            # `...helper('notificationDelivery')` in a schema object: the fields
+            # are made when the module runs, which a static reader cannot do.
+            # Document them as one optional object named by the helper's first
+            # string argument - the prefix every generated field shares - and
+            # leave a spread without one out (name None; Schemas drops it).
+            # A spread has no `key`; reading it stopped the release (.tools/log/wekan8).
+            self.name = None
+            arg = statement.argument
+            if (arg is not None and arg.type == 'CallExpression' and arg.arguments and
+                    arg.arguments[0].type == 'Literal' and isinstance(arg.arguments[0].value, str)):
+                self.name = arg.arguments[0].value
+            self.type = 'object'
+            self.elements = []
+            self.blackbox = True
+            self.required = False
+            return
         self.name = statement.key.name or statement.key.value
         self.type = 'object'
         self.elements = []
@@ -509,6 +644,34 @@ class SchemaProperty(object):
                                     return None
                                 except TypeError:
                                     return None
+
+                                # Meteor modules also import schema constants via
+                                # const { NAME } = require('/imports/lib/module').
+                                # Resolve only static module paths and declarations;
+                                # never execute imported JavaScript.
+                                if (elem.type == 'VariableDeclarator' and
+                                    elem.id.type == 'ObjectPattern' and
+                                    elem.init and elem.init.type == 'CallExpression' and
+                                    elem.init.callee.name == 'require' and
+                                    len(elem.init.arguments) == 1 and
+                                    elem.init.arguments[0].type == 'Literal'):
+                                    for prop in elem.id.properties:
+                                        if prop.value.name != match:
+                                            continue
+                                        module = elem.init.arguments[0].value
+                                        if not isinstance(module, str) or not module.startswith(('/', '.')):
+                                            return None
+                                        if module.startswith('/'):
+                                            script_dir = os.path.dirname(os.path.realpath(__file__))
+                                            module_path = os.path.join(script_dir, '..', module.lstrip('/'))
+                                        else:
+                                            module_path = os.path.join(os.path.dirname(context.path), module)
+                                        module_path = os.path.abspath(module_path)
+                                        if not module_path.endswith('.js'):
+                                            module_path += '.js'
+                                        if module_path not in imports:
+                                            imports[module_path] = parse_file(module_path)
+                                        return find_variable(imports[module_path].program.body, prop.key.name)
 
                                 if (elem.type == 'VariableDeclarator' and
                                    elem.id.name == match):
@@ -596,7 +759,8 @@ class SchemaProperty(object):
         self._doc = cleanup_jsdocs(jsdoc)
 
     def process_jsdocs(self, jsdocs):
-        start = self.statement.key.loc.start.line
+        key = getattr(self.statement, 'key', None)
+        start = (key or self.statement).loc.start.line
         for index, doc in enumerate(jsdocs):
             if start + 1 == doc.loc.start.line:
                 self.doc = doc
@@ -639,8 +803,15 @@ class SchemaProperty(object):
 
         # deal with subschemas
         if '.' in name:
-            subschema = name.split('.')[0]
-            subschema = subschema.capitalize()
+            # The sub-schema that owns this property is every path segment
+            # except the last (the property name). Joining all leading segments
+            # — not just the first — keeps deeply nested objects such as
+            # 'storageConfig.filesystem.enabled' and 'storageConfig.gridfs.enabled'
+            # in distinct sub-schemas (StorageconfigFilesystem / StorageconfigGridfs)
+            # instead of collapsing their leaf keys into one mapping, which would
+            # emit duplicate 'enabled'/'read'/'write' keys and break strict YAML
+            # parsers (e.g. @redocly/cli). The '$' branches below reassign this.
+            subschema = ''.join([s.capitalize() for s in name.split('.')[:-1]])
 
             if name.endswith('$'):
                 # An explicit array-element marker such as `'labels.$': {type:
@@ -649,6 +820,15 @@ class SchemaProperty(object):
                 # redundant — skip it to avoid emitting the sub-schema twice.
                 prefix = self.name + '.'
                 if any(f.name.startswith(prefix) for f in (self.schema.fields or [])):
+                    return current_schema
+                # A primitive element marker such as `'wipLimitGroups.$.listIds.$':
+                # {type: String}` is already described by its parent array's
+                # `items:` (array_elements). Emitting a sub-schema for it printed
+                # `BoardsWiplimitgroups$Listids:` with `type: object` and no
+                # `properties:` line, and the NEXT sibling field then landed under
+                # it as a bare mapping - "mapping values are not allowed here",
+                # which broke public/api/wekan.yml for every parser.
+                if self.type != 'object':
                     return current_schema
 
                 # reference in reference
@@ -741,7 +921,14 @@ class Schemas(object):
                 self.name = data.expression.callee.object.name
 
             content = data.expression.arguments[0].arguments[0]
-            self.fields = [SchemaProperty(p, self, context) for p in content.properties]
+            self.fields = []
+            for p in content.properties:
+                field = SchemaProperty(p, self, context)
+                if field.name is None:
+                    logger.warning('{}:{} a spread in schema {} has no name to document; skipped'.format(
+                        context.path, p.loc.start.line, self.name))
+                    continue
+                self.fields.append(field)
 
         self._doc = None
         self._raw_doc = None
@@ -802,6 +989,14 @@ class Schemas(object):
         current = None
         required_properties = []
         properties = [f for f in self.fields if '.' in f.name and not '$' in f.name]
+        # Emit each sub-schema's fields contiguously. The loop opens a new
+        # sub-schema header whenever the owning schema changes, so interleaved
+        # nested objects (e.g. 'a.filesystem', 'a.filesystem.x', 'a.gridfs',
+        # 'a.gridfs.x') would otherwise reopen the parent schema 'a' multiple
+        # times — duplicate mapping keys that break strict YAML parsers. Group
+        # by the owning path (every segment but the last). The sort is stable,
+        # so single-level schemas keep their original field order.
+        properties.sort(key=lambda f: tuple(f.name.split('.')[:-1]))
         for prop in properties:
             current = prop.print_openapi(6, current, required_properties)
 
@@ -824,7 +1019,7 @@ class Schemas(object):
 def downlevel_js(data):
     '''Rewrite a few ES2020+ constructs that the (unmaintained, ES2017-era)
     esprima Python parser cannot handle into equivalent older forms, so the AST
-    can still be extracted. Replacements are length-neutral per line and never
+    can still be extracted. Most replacements are length-neutral and never
     add or remove newlines, so reported line numbers stay accurate for JSDoc and
     route matching.
 
@@ -832,13 +1027,30 @@ def downlevel_js(data):
       foo?.[i] -> foo [i]     (optional index)
       foo?.bar -> foo .bar    (optional member)
       a ??= b  -> a   = b     (nullish assignment)
+      a ||= b  -> a   = b     (logical OR assignment)
+      a &&= b  -> a   = b     (logical AND assignment)
       a ?? b   -> a || b      (nullish coalescing)
+      catch {  -> catch (_) { (optional catch binding, ES2019)
+      for await (x of y) -> for (x of y)   (async iteration, ES2018)
+
+    The last two are not length-neutral but still never touch a newline. They
+    matter: server/models/boards.js has had a bare `catch {` since v11.67, and
+    because a parse failure was silently skipped, EVERY route in that file -
+    the whole Boards API - was missing from the generated wekan.yml until the
+    rewrite below was added (tests/openapiParsesEveryRouteFile.test.cjs).
     '''
+    # Property escapes only affect runtime regexp matching, not schema ASTs.
+    # Esprima predates them; keep regexp syntax parseable without executing it.
+    data = re.sub(r'\\[pP]\{[^}\n]+\}', '.', data)
     data = data.replace('?.(', '  (')
     data = data.replace('?.[', '  [')
     data = data.replace('?.', ' .')
     data = data.replace('??=', '  =')
+    data = data.replace('||=', '  =')
+    data = data.replace('&&=', '  =')
     data = data.replace('??', '||')
+    data = re.sub(r'\bcatch\s*\{', 'catch (_) {', data)
+    data = re.sub(r'\bfor\s+await\s*\(', 'for (', data)
     return data
 
 
@@ -868,7 +1080,10 @@ def parse_file(path):
     try:
         # if the file failed, it's likely it doesn't contain a schema
         context = Context(path)
-    except:
+    except Exception as e:
+        # Say so: a route file that does not parse drops EVERY route it holds
+        # from the spec, silently, which is how the Boards API went missing.
+        logger.warning('%s: cannot parse, its schema and routes are skipped: %s', path, e)
         return
 
     return context
@@ -925,7 +1140,7 @@ def extract_route(call):
 def iter_route_calls(node):
     '''Recursively yield CallExpression nodes that may register a route, in
     source order. Routes appear at the top level (Meteor 3 style) or wrapped in
-    one of the server-only guards Wekan uses — `if (Meteor.isServer) { ... }`,
+    one of the server-only guards WeKan uses — `if (Meteor.isServer) { ... }`,
     `runOnServer(function () { ... })`, `Meteor.startup(...)`, try blocks — so we
     descend through those constructs and into callback function bodies.'''
     if node is None:
@@ -1032,6 +1247,11 @@ def parse_schemas(schemas_dirs):
             route = extract_route(call)
             if route is not None:
                 method_name, path_node, body_node = route
+                if static_route_path(path_node) is None:
+                    logger.warning(
+                        '%s: skipping route with a non-static path that cannot be '
+                        'documented (dynamic template literal).', path)
+                    continue
                 route_calls.append((method_name, path_node, body_node, call))
 
         if not route_calls:
@@ -1075,17 +1295,17 @@ def parse_schemas(schemas_dirs):
 def generate_openapi(schemas, entry_points, version):
     print('''swagger: '2.0'
 info:
-  title: Wekan REST API
+  title: WeKan REST API
   version: {0}
   description: |
-    The REST API allows you to control and extend Wekan with ease.
+    The REST API allows you to control and extend WeKan with ease.
 
     If you are an end-user and not a dev or a tester, [create an issue](https://github.com/wekan/wekan/issues/new) to request new APIs.
 
     > All API calls in the documentation are made using `curl`.  However, you are free to use Java / Python / PHP / Golang / Ruby / Swift / Objective-C / Rust / Scala / C# or any other programming languages.
 
     # Production Security Concerns
-    When calling a production Wekan server, ensure it is running via HTTPS and has a valid SSL Certificate. The login method requires you to post your username and password in plaintext, which is why we highly suggest only calling the REST login api over HTTPS. Also, few things to note:
+    When calling a production WeKan server, ensure it is running via HTTPS and has a valid SSL Certificate. The login method requires you to post your username and password in plaintext, which is why we highly suggest only calling the REST login api over HTTPS. Also, few things to note:
 
     * Only call via HTTPS
     * Implement a timed authorization token expiration strategy

@@ -1,0 +1,2045 @@
+import { formatDateForDisplay } from '/client/lib/dateDisplay';
+import { ReactiveCache } from '/imports/reactiveCache';
+import { Session } from 'meteor/session';
+import { Random } from 'meteor/random';
+import { Tracker } from 'meteor/tracker';
+import { FlowRouter } from 'meteor/ostrio:flow-router-extra';
+// The per-pane URLs of the Admin Panel. docs/Features/Admin-Panel/Admin-Panel-URLs.md
+import { adminPath } from '/models/lib/adminUrls';
+import { TAPi18n } from '/imports/i18n';
+import Attachments from '/models/attachments';
+import Boards from '/models/boards';
+import Cards from '/models/cards';
+import Rules from '/models/rules';
+import ImpersonatedUsers from '/models/impersonatedUsers';
+import RecoveryEvents from '/models/recoveryEvents';
+import { Mongo } from 'meteor/mongo';
+import { adjacentPage, buildFilters, buildHeader, buildRows, docsByIds, pageInfo, TABLE_PAGE_ROWS_PER_PAGE } from '/models/lib/tablePage';
+const { addressReportColumns } = require('/models/lib/addressReportColumns');
+const { officeRowsByPerson } = require('/models/lib/loginTally');
+import { ReportPages } from '/client/lib/reportPages';
+import { leftMenuData, paneTitle } from '/models/lib/leftMenu';
+import Settings from '/models/settings';
+import { errorMessage } from '/client/lib/errorMessage';
+const { cleanFileName } = require('/imports/lib/fileNameDisplay');
+const { attachmentKind } = require('/models/lib/attachmentKind');
+const { filesize } = require('filesize');
+
+// --- Shared helper functions (formerly AdminReport base class methods) ---
+
+function yesOrNo(value) {
+  if (value) {
+    return TAPi18n.__('yes');
+  } else {
+    return TAPi18n.__('no');
+  }
+}
+
+function fileSizeHelper(size) {
+  let ret = "";
+  if (typeof size === 'number') {
+    ret = filesize(size);
+  }
+  return ret;
+}
+
+function abbreviate(text) {
+  if (text?.length > 30) {
+    return `${text.substr(0, 29)}...`;
+  }
+  return text;
+}
+
+// The same audit trail is relevant where permanent deletion is enabled and where
+// its events are reviewed. Keep one sentence so the two panes cannot drift apart.
+const PERMANENT_DELETE_RECOVERY_DESCRIPTION =
+  'The permanent-delete setting must be enabled before a delete icon is shown. Recovery logs setting changes and every successful, failed, or unauthorized permanent-delete attempt, including Done status, user ID, username, trusted IPv4 or IPv6 address and available location. Board deletion records IDs and titles.';
+
+// History.md §12.3-12.4: there is no per-attachment delete, here or anywhere.
+const FILES_REPORT_DELETE_DESCRIPTION =
+  'Attachments are never deleted one at a time. Delete on a card soft-deletes the attachment and keeps the file; the card history shows who deleted it and restores it. An attachment and its file are removed only when the permanent-delete setting is enabled and its board is deleted from the archive, which Recovery records as a board deletion.';
+
+// The report publications already send only the current page (server-side
+// search + limit/skip, sorted). Display exactly what was published, applying
+// the same sort so minimongo order matches the server page. Re-applying
+// skip/limit here would paginate an already-paginated set.
+function collectionResults(collection, sort) {
+  return collection.find({}, sort ? { sort } : {});
+}
+
+// The page index the report publications send. Declared once in
+// client/lib/reportPages.js, because `new Mongo.Collection(name)` throws if the
+// name is taken - it used to be declared here, so the second page to need it
+// (/public) could not have one.
+
+// The documents of the page the SERVER named, in the order it sorted them.
+//
+// `collectionResults` above shows whatever the collection holds, which is right
+// only for a collection nothing else fills. Cards and Boards are not those: every
+// card of every board the admin has opened is in minimongo, so Broken cards drew
+// hundreds of rows while its pager - counted on the server - said "1 / 1", and the
+// Cards and Boards reports showed the same rows on every page.
+function reportPageResults(collection, reportId) {
+  const index = ReportPages.findOne(reportId);
+  const ids = (index && index.ids) || [];
+  if (!ids.length) return [];
+  return docsByIds(ids, collection.find({ _id: { $in: ids } }).fetch());
+}
+
+function collectionResultsCount(collection) {
+  return collection.find().count();
+}
+
+// --- adminProblems template ---
+
+// Rows per page for the paginated reports (files, rules, boards, cards). The one
+// rows-per-page of the whole app (docs/Features/General/Table.md), so every list pages
+// alike - a report is not a different kind of page than People or Translation.
+const REPORTS_PER_PAGE = TABLE_PAGE_ROWS_PER_PAGE;
+
+// Static description of each paginated report: which page/count reactive vars
+// it uses, which publication feeds it and which count method backs it. Lets a
+// single loadReport() drive all of them the same way.
+function reportConfig(tmpl) {
+  return {
+    'report-files': { page: tmpl.filesPage, count: tmpl.filesCount, search: tmpl.filesSearch, pub: 'attachmentsList', countMethod: 'getAttachmentsReportCount' },
+    'report-rules': { page: tmpl.rulesPage, count: tmpl.rulesCount, search: tmpl.rulesSearch, pub: 'rulesReport', countMethod: 'getRulesReportCount' },
+    'report-boards': { page: tmpl.boardsPage, count: tmpl.boardsCount, search: tmpl.boardsSearch, filter: tmpl.boardsFilter, pub: 'boardsReport', countMethod: 'getBoardsReportCount' },
+    'report-cards': { page: tmpl.cardsPage, count: tmpl.cardsCount, search: tmpl.cardsSearch, pub: 'cardsReport', countMethod: 'getCardsReportCount' },
+    'report-broken': { page: tmpl.brokenPage, count: tmpl.brokenCount, search: tmpl.brokenSearch, pub: 'brokenCardsReport', countMethod: 'getBrokenCardsReportCount' },
+    'report-impersonation': { page: tmpl.impersonationPage, count: tmpl.impersonationCount, search: tmpl.impersonationSearch, pub: 'impersonationReport', countMethod: 'getImpersonationReportCount' },
+    'report-recovery': { page: tmpl.recoveryPage, count: tmpl.recoveryCount, search: tmpl.recoverySearch, filter: tmpl.recoveryFilter, pub: 'recoveryReport', countMethod: 'getRecoveryReportCount' },
+  };
+}
+
+Template.adminProblems.onCreated(function () {
+  this.subscription = null;
+  this.error = new ReactiveVar('');
+  this.loading = new ReactiveVar(false);
+
+  // Pagination state, one current-page + total-count pair per report.
+  this.activeReport = new ReactiveVar('');
+  this.filesPage = new ReactiveVar(1);
+  this.rulesPage = new ReactiveVar(1);
+  this.boardsPage = new ReactiveVar(1);
+  this.cardsPage = new ReactiveVar(1);
+  this.brokenPage = new ReactiveVar(1);
+  this.impersonationPage = new ReactiveVar(1);
+  this.recoveryPage = new ReactiveVar(1);
+  this.filesCount = new ReactiveVar(0);
+  this.rulesCount = new ReactiveVar(0);
+  this.boardsCount = new ReactiveVar(0);
+  this.cardsCount = new ReactiveVar(0);
+  this.brokenCount = new ReactiveVar(0);
+  this.impersonationCount = new ReactiveVar(0);
+  this.recoveryCount = new ReactiveVar(0);
+  // Current search term per report (empty string = no filter).
+  this.filesSearch = new ReactiveVar('');
+  this.rulesSearch = new ReactiveVar('');
+  this.boardsSearch = new ReactiveVar('');
+  this.cardsSearch = new ReactiveVar('');
+  this.brokenSearch = new ReactiveVar('');
+  this.impersonationSearch = new ReactiveVar('');
+  this.recoverySearch = new ReactiveVar('');
+  this.recoveryFilter = new ReactiveVar('all');
+  this.boardsFilter = new ReactiveVar('all');
+
+  // Which search term each report's total count was last computed for, so
+  // paging does not recount. See loadReport().
+  this.countedFor = {};
+
+  // (Re)subscribe the given report for its current page and refresh its total
+  // count. Server-side search + limit/skip means only the matching page ever
+  // reaches minimongo.
+  //
+  // `recount` (opening a report, or searching in it) re-runs the count method;
+  // plain prev/next paging does NOT. The count is a full collection count —
+  // getCardsReportCount counts every card in the database — and the total cannot
+  // change just because you moved to the next page, so re-running it on every
+  // click only added a second server round trip to each prev/next. That is what
+  // made paging through a big Cards report feel slow.
+  this.loadReport = (reportId, { recount = false } = {}) => {
+    const cfg = reportConfig(this)[reportId];
+    if (!cfg) {
+      return;
+    }
+    // Note: we deliberately do not toggle the global `loading` spinner here.
+    // The spinner is shown once on tab switch (switchMenu); paging/searching
+    // re-subscribes silently so the search box keeps focus and the report
+    // stays mounted, just like the admin People panel.
+    if (this.subscription) {
+      this.subscription.stop();
+    }
+    const searchTerm = cfg.search.get();
+    const filter = cfg.filter ? cfg.filter.get() : null;
+    const requestKey = filter === null ? searchTerm : `${searchTerm}\u0000${filter}`;
+    // Same helper the controls row uses, so the window that is SUBSCRIBED and the
+    // "page X / N" that is DISPLAYED can never disagree. Only this page of rows is
+    // requested from the server - the publications apply the limit/skip.
+    const { limit, skip } = pageInfo(cfg.count.get(), cfg.page.get(), REPORTS_PER_PAGE);
+    const subscriptionArgs = filter === null
+      ? [cfg.pub, searchTerm, limit, skip]
+      : [cfg.pub, searchTerm, filter, limit, skip];
+    this.subscription = Meteor.subscribe(...subscriptionArgs, {
+      onReady: () => {
+        this.loading.set(false);
+      },
+      // A publication that errors (or is stopped) must never leave the report
+      // stuck on the loading spinner forever: clear the spinner and, on a real
+      // error, surface it. Without this an admin only ever saw an endless spinner
+      // whenever a report subscription failed on the server.
+      onStop: (error) => {
+        if (error) {
+          console.error(`Report subscription '${cfg.pub}' failed:`, error);
+          this.error.set(error.reason || error.message || String(error));
+        }
+        this.loading.set(false);
+      },
+    });
+    if (!recount && this.countedFor[reportId] === requestKey) {
+      return;
+    }
+    const countArgs = filter === null
+      ? [cfg.countMethod, searchTerm]
+      : [cfg.countMethod, searchTerm, filter];
+    Meteor.call(...countArgs, (error, count) => {
+      if (error) {
+        console.error(`Failed to load ${cfg.countMethod}:`, error);
+        return;
+      }
+      this.countedFor[reportId] = requestKey;
+      const total = count || 0;
+      const totalPages = Math.max(1, Math.ceil(total / REPORTS_PER_PAGE));
+      // If rows were removed while on a now-out-of-range page, clamp and reload.
+      if (cfg.page.get() > totalPages) {
+        cfg.page.set(totalPages);
+        this.loadReport(reportId);
+        return;
+      }
+      cfg.count.set(total);
+    });
+  };
+
+  // Which user the open report was subscribed as. See the autorun below.
+  this.subscribedAs = null;
+
+  // The pane the URL asks for. The route resolved it, so it is always a real
+  // pane id; a bare /admin-reports opens Summary. Reactive, so following a link
+  // to another report while this page is open switches to it - the route action
+  // runs again without re-creating the template.
+  // docs/Features/Admin-Panel/Admin-Panel-URLs.md
+  //
+  // It depends on Meteor.userId() as well, and that is not decoration. Opening
+  // a report BY ITS ADDRESS - /admin/problems/files typed, bookmarked, or just
+  // refreshed - is a full page load, and Meteor resumes the login from
+  // localStorage ASYNCHRONOUSLY. The route sets problemsOpenPane before that
+  // lands, so the subscription was made with no user; the publication's admin
+  // check then answered `this.ready()` with no rows, and nothing ever
+  // re-subscribed because this autorun did not depend on the user. The pane drew
+  // its column headers, "No results" and a "1 / 1" pager over data that was
+  // plainly there - while the count METHOD, called later from the same page,
+  // happily reported five. Reached from the menu it worked, because by then the
+  // login had landed; only the address did not.
+  //
+  // openReportPane() returns early when the pane is already open, so re-running
+  // it after the login would do nothing at all - hence the second branch, which
+  // re-subscribes the report that is already open now that there is a user to
+  // subscribe as.
+  //
+  // The ONLY two things that may re-run this autorun are the pane id and the
+  // user - read reactively, above the nonreactive body. Everything the body
+  // touches (activeReport, and the count/page/search that loadReport reads
+  // through pageInfo) is read INSIDE Tracker.nonreactive, on purpose:
+  //
+  //   1. loadReport() calls its count method and then cfg.count.set(...). If the
+  //      autorun depended on cfg.count, that set would re-run it - and a
+  //      Meteor.subscribe made inside an autorun is AUTO-CANCELLED when the
+  //      autorun re-runs. The re-run then took the `else if` (same user, same
+  //      pane), did NOT re-subscribe, and left the report with no subscription
+  //      at all: "attachments in minimongo: 0", the empty table over data that
+  //      was plainly there. From the menu it worked only because switchMenu
+  //      calls openReportPane from an EVENT, not a computation, so that
+  //      subscribe was never auto-managed. By URL it was, which is why only the
+  //      address failed.
+  //   2. The subscription's lifetime is ours to manage (loadReport stops the
+  //      previous one; onDestroyed below stops the last), not the autorun's, so
+  //      it must not be created inside this computation's reactive scope.
+  this.autorun(() => {
+    const paneId = Session.get('problemsOpenPane');
+    const userId = Meteor.userId();
+    Tracker.nonreactive(() => {
+      if (!paneId) {
+        return;
+      }
+      if (paneId !== this.activeReport.get()) {
+        openReportPane(this, paneId);
+        this.subscribedAs = userId;
+      } else if (userId !== this.subscribedAs) {
+        this.subscribedAs = userId;
+        if (reportConfig(this)[paneId]) {
+          this.loadReport(paneId, { recount: true });
+        }
+      }
+    });
+  });
+});
+
+// The report subscription is created OUTSIDE a reactive computation now (see the
+// autorun above), so the autorun no longer tears it down - this does, when the
+// panel is left.
+Template.adminProblems.onDestroyed(function () {
+  if (this.subscription) {
+    this.subscription.stop();
+  }
+});
+
+// The Problems side menu, as data (docs/Features/All-Boards/Left-Menu.md). Every entry
+// used to be six lines of markup plus its own click handler; the twelve handlers
+// are now the single .js-left-menu-item one below.
+const PROBLEMS_MENU = [
+  { id: 'report-summary', icon: 'fa-list', labelKey: 'summary' },
+  { separator: true },
+  // Two groups, each named by a heading rather than by another entry: there is
+  // nothing to click on a group title (docs/Features/All-Boards/Left-Menu.md). Both use an
+  // i18n key the app already has.
+  { heading: true, labelKey: 'settings' },
+  // Moved here from Admin Panel / Features. They are settings rather than reports -
+  // which is what this heading says - but they are what an admin reaches for when
+  // something is unsafe or noisy, which is what this page is about. Performance
+  // sits with the reports below, beside the Speed / Tests / CPU usage streams it is
+  // about.
+  { id: 'features-security', icon: 'fa-shield', labelKey: 'features-security', emoji: true },
+  { id: 'features-delete', icon: 'fa-trash', labelKey: 'delete' },
+  { id: 'features-notifications', icon: 'fa-bell', labelKey: 'features-notifications', emoji: true },
+  // Did last night's backup work? The status and history of the Admin Panel
+  // backup (backupRunsStatus.jade), with a link to its settings in Attachments /
+  // Backup. A failed or overdue backup is also listed on Summary.
+  { id: 'features-backup', icon: 'fa-archive', labelKey: 'backup' },
+  { separator: true },
+  { heading: true, labelKey: 'reports' },
+  // "Security Report", not "Security": the Features pane above is also called
+  // Security, and the two sit in the same menu.
+  { id: 'report-security', icon: 'fa-shield', labelKey: 'securityReportTitle' },
+  { id: 'report-impersonation', icon: 'fa-user-secret', labelKey: 'impersonationReportTitle' },
+  // Who signs in with a password shorter than PASSWORD_MIN_LENGTH, and the two
+  // settings that decide it (passwordLengthReport.js).
+  { id: 'report-password-length', icon: 'fa-key', labelKey: 'password-length-report-title' },
+  { id: 'features-performance', icon: 'fa-tachometer', labelKey: 'features-performance', emoji: true },
+  { id: 'report-speed', icon: 'fa-tachometer', labelKey: 'speedReportTitle' },
+  { id: 'report-tests', icon: 'fa-flask', labelKey: 'testsReportTitle' },
+  { id: 'report-cpu', icon: 'fa-tachometer', labelKey: 'cpuReportTitle' },
+  // The CPU monitor's siblings, with labels every language already translates.
+  { id: 'report-ram', icon: 'fa-microchip', labelKey: 'memory-usage' },
+  { id: 'report-disk', icon: 'fa-hdd-o', labelKey: 'sandstorm-disk-usage' },
+  { id: 'report-instrumentation', icon: 'fa-line-chart', labelKey: 'instrumentationReportTitle' },
+  { id: 'report-broken', icon: 'fa-chain-broken', labelKey: 'broken-cards' },
+  { id: 'report-files', icon: 'fa-paperclip', labelKey: 'filesReportTitle' },
+  { id: 'report-rules', icon: 'fa-magic', labelKey: 'rulesReportTitle' },
+  { id: 'report-boards', icon: 'fa-columns', labelKey: 'boardsReportTitle' },
+  { id: 'report-cards', icon: 'fa-id-card-o', labelKey: 'cardsReportTitle' },
+  { id: 'report-recovery', icon: 'fa-medkit', labelKey: 'recoveryReportTitle' },
+  // Where people log in from, grouped by address: the offices, VPNs and NATs
+  // several accounts share (models/lib/loginTally.js).
+  { id: 'report-office', icon: 'fa-building', labelKey: 'officeReportTitle' },
+  // What the REST API is being USED for - who called what, how often. Not a
+  // problem report: it sits here because this is where an admin looks at what
+  // the server is being asked to do (models/lib/apiUsage.js).
+  { id: 'report-api', icon: 'fa-plug', labelKey: 'apiReportTitle' },
+  // What the database itself said, classified: which database type, what it
+  // means and what to do (server/lib/databaseProblems.js).
+  { id: 'report-database', icon: 'fa-database', labelKey: 'databaseReportTitle' },
+  // What the FILESYSTEM said: a stored file that is no longer the file WeKan
+  // stored, and whether this server stopped cleanly
+  // (docs/Security/Remediation/WeKan.md §13).
+  { id: 'report-integrity', icon: 'fa-fingerprint', labelKey: 'integrityReportTitle' },
+  // What went wrong sending or receiving email: the mail server refused a send,
+  // an IMAP mailbox could not be read, an email for a board that no longer takes
+  // email (models/lib/mailProblems.js).
+  { id: 'report-mail', icon: 'fa-envelope', labelKey: 'mailReportTitle' },
+];
+
+Template.adminProblems.helpers({
+  showFileStatusAudit() {
+    return ['report-files', 'report-integrity', 'report-recovery'].includes(Template.instance().activeReport.get());
+  },
+  menuItems() {
+    // The pane opens on Summary, before any menu click has set activeReport.
+    return leftMenuData(PROBLEMS_MENU,
+      Template.instance().activeReport.get() || 'report-summary');
+  },
+  // The heading above the pane: the open menu entry's own label
+  // (docs/Features/All-Boards/Left-Menu.md). The report tables and the event streams
+  // stopped passing a title to the shared table page when this arrived - the menu
+  // entry and the report title were the same i18n key, and both would have printed.
+  paneTitleData() {
+    return paneTitle(PROBLEMS_MENU,
+      Template.instance().activeReport.get() || 'report-summary');
+  },
+  // The shared table page for whichever paginated report is open (null for the
+  // Summary / Broken cards panes, which are not table pages).
+  tablePageData() {
+    return reportTablePageData(Template.instance());
+  },
+  loading() {
+    return Template.instance().loading;
+  },
+  // WHICH PANE IS OPEN, asked once - `else if isPane 'report-cpu'` in the
+  // template, instead of a ReactiveVar, a reset, a setter and a helper per pane.
+  //
+  // Eleven booleans used to restate what `activeReport` already held, and each
+  // new pane needed all four edits to appear. Filesystem integrity got three of
+  // them: the menu entry set `tmpl.showIntegrity`, the template asked for
+  // `showIntegrity.get`, and the helper was never written - which in Blaze is
+  // not an error but a falsy value, so the pane drew a blank page while Summary
+  // went on counting the problems it could not show. There is one helper to
+  // forget now, and forgetting it is not subtle: every pane goes blank at once.
+  // tests/adminPaneHelpers.test.cjs pins both halves.
+  isPane(id) {
+    return Template.instance().activeReport.get() === id;
+  },
+
+  // --- Pagination helpers, passed down into each report sub-template ---
+  hasFilesPrevPage() { return Template.instance().filesPage.get() > 1; },
+  hasFilesNextPage() {
+    const tpl = Template.instance();
+    return tpl.filesPage.get() < Math.max(1, Math.ceil((tpl.filesCount.get() || 0) / REPORTS_PER_PAGE));
+  },
+
+  hasRulesPrevPage() { return Template.instance().rulesPage.get() > 1; },
+  hasRulesNextPage() {
+    const tpl = Template.instance();
+    return tpl.rulesPage.get() < Math.max(1, Math.ceil((tpl.rulesCount.get() || 0) / REPORTS_PER_PAGE));
+  },
+
+  hasBoardsPrevPage() { return Template.instance().boardsPage.get() > 1; },
+  hasBoardsNextPage() {
+    const tpl = Template.instance();
+    return tpl.boardsPage.get() < Math.max(1, Math.ceil((tpl.boardsCount.get() || 0) / REPORTS_PER_PAGE));
+  },
+
+  hasCardsPrevPage() { return Template.instance().cardsPage.get() > 1; },
+  hasCardsNextPage() {
+    const tpl = Template.instance();
+    return tpl.cardsPage.get() < Math.max(1, Math.ceil((tpl.cardsCount.get() || 0) / REPORTS_PER_PAGE));
+  },
+
+  hasImpersonationPrevPage() { return Template.instance().impersonationPage.get() > 1; },
+  hasImpersonationNextPage() {
+    const tpl = Template.instance();
+    return tpl.impersonationPage.get() < Math.max(1, Math.ceil((tpl.impersonationCount.get() || 0) / REPORTS_PER_PAGE));
+  },
+
+  hasRecoveryPrevPage() { return Template.instance().recoveryPage.get() > 1; },
+  hasRecoveryNextPage() {
+    const tpl = Template.instance();
+    return tpl.recoveryPage.get() < Math.max(1, Math.ceil((tpl.recoveryCount.get() || 0) / REPORTS_PER_PAGE));
+  },
+});
+
+Template.adminProblems.events({
+  'files-report-changed'(event, tmpl) {
+    event.stopPropagation();
+    tmpl.loadReport('report-files', { recount: true });
+  },
+
+  // One handler for the whole menu: the shared left menu gives every entry the
+  // same class and puts the pane id in data-id, so the twelve identical
+  // 'click a.js-report-<name>' handlers collapsed to this.
+  'click .js-left-menu-item'(event) {
+    const tpl = Template.instance();
+    switchMenu(event, tpl);
+    // ...and into the address bar, so the report can be linked and bookmarked.
+    const targetID = $(event.currentTarget || event.target)
+      .closest('.js-left-menu-item').data('id');
+    const path = adminPath('problems', targetID);
+    if (path && FlowRouter.current().path !== path) FlowRouter.go(path);
+  },
+
+  // --- Controls: ONE handler each, for every table page ---
+  // The shared table page (docs/Features/General/Table.md) emits the same three
+  // controls for every report, so the report is identified by activeReport
+  // rather than by a per-report js- class. Twelve prev/next handlers and six
+  // search handlers collapsed to these.
+  //
+  // Clicking a user, and clicking a location, are NOT here: they are the same
+  // on every table, so they live on the shared table page itself
+  // (client/components/settings/tablePage.js) and reach every report through
+  // the template hierarchy. Three identical copies of the edit-user handler is
+  // what that replaced.
+  'click .js-table-page-prev'(event, tmpl) { goPrevPage(event, tmpl, tmpl.activeReport.get()); },
+  'click .js-table-page-next'(event, tmpl) { goNextPage(event, tmpl, tmpl.activeReport.get()); },
+  'keydown .js-table-page-search'(event, tmpl) {
+    if (event.keyCode === 13 && !event.shiftKey) {
+      runSearch(tmpl, tmpl.activeReport.get(), '.js-table-page-search');
+    }
+  },
+  'change .js-table-page-filter'(event, tmpl) {
+    const reportId = tmpl.activeReport.get();
+    const cfg = reportConfig(tmpl)[reportId];
+    if (!cfg || !cfg.filter) return;
+    cfg.filter.set($(event.currentTarget).val() || 'all');
+    cfg.page.set(1);
+    tmpl.loadReport(reportId, { recount: true });
+  },
+});
+
+function goPrevPage(event, tmpl, reportId) {
+  event.preventDefault();
+  const cfg = reportConfig(tmpl)[reportId];
+  // Specialized Problems panes (event streams and Offices) own their pager.
+  // Blaze events bubble through containing templates, so their clicks can also
+  // reach this shared report handler. Pane changes can likewise leave a queued
+  // click with an old report id. Neither case has an entry in reportConfig.
+  if (!cfg) return;
+  movePage(cfg.page, cfg.count.get(), -1, REPORTS_PER_PAGE,
+    () => tmpl.loadReport(reportId));
+}
+
+function goNextPage(event, tmpl, reportId) {
+  event.preventDefault();
+  const cfg = reportConfig(tmpl)[reportId];
+  if (!cfg) return;
+  movePage(cfg.page, cfg.count.get(), 1, REPORTS_PER_PAGE,
+    () => tmpl.loadReport(reportId));
+}
+
+function movePage(page, total, direction, perPage, load) {
+  const current = page.get();
+  const next = adjacentPage(total, current, direction, perPage);
+  if (next === current) return;
+  page.set(next);
+  load();
+}
+
+// Read the report's search box, store the term, reset to page 1 and reload.
+function runSearch(tmpl, reportId, inputSelector) {
+  const cfg = reportConfig(tmpl)[reportId];
+  if (!cfg) return;
+  const value = (tmpl.$(inputSelector).val() || '').trim();
+  cfg.search.set(value);
+  cfg.page.set(1);
+  // A different search term means a different total: recount.
+  tmpl.loadReport(reportId, { recount: true });
+}
+
+function switchMenu(event, tmpl) {
+  // data-id is on the anchor; event.target may be the icon inside it.
+  const target = $(event.currentTarget || event.target).closest('.js-left-menu-item');
+  openReportPane(tmpl, target.data('id'));
+}
+
+// Open a pane BY ID. Split out of switchMenu so the URL can open one too - every
+// left-menu entry has an address now (/admin/problems/cpu, /admin/problems/rules).
+// docs/Features/Admin-Panel/Admin-Panel-URLs.md
+// The panes that need no subscription: they fetch through methods or have
+// nothing to fetch. Everything else falls through to loadReport().
+const SELF_LOADING_PANES = [
+  'report-summary',
+  'features-performance', 'features-security', 'features-delete', 'features-notifications',
+  // backupRunsStatus.jade loads its own data (the backupHistory method).
+  'features-backup',
+  'report-security', 'report-speed', 'report-tests', 'report-cpu', 'report-ram', 'report-disk',
+  'report-instrumentation',
+  'report-database', 'report-integrity', 'report-office', 'report-api', 'report-mail',
+  // passwordLengthReport.js loads its own rows and settings through methods.
+  'report-password-length',
+];
+
+function openReportPane(tmpl, targetID) {
+  // Re-opening the open pane must do nothing. The active row is rendered from
+  // activeReport now, so compare ids instead of reading a DOM class.
+  if (targetID && targetID !== tmpl.activeReport.get()) {
+    tmpl.loading.set(true);
+    if (tmpl.subscription) {
+      tmpl.subscription.stop();
+    }
+
+    tmpl.activeReport.set(targetID);
+
+    // PANES THAT LOAD THEMSELVES. Summary, the Features panes and every
+    // event-stream report fetch through methods rather than a subscription, or
+    // have nothing to fetch at all: setting activeReport above is the whole of
+    // opening them, so there is only the spinner to clear.
+    //
+    // This list replaces eleven `this.showX = new ReactiveVar(false)`, eleven
+    // `tmpl.showX.set(false)` resets, eleven `tmpl.showX.set(true)` branches and
+    // eleven `showX()` helpers - forty-four lines that all said the same thing
+    // activeReport already said. Adding a pane took seven edits and missing one
+    // of them rendered the pane BLANK: the menu set a variable, the template
+    // asked for a helper that did not exist, and an undefined helper is simply
+    // falsy. Both faults had happened - see the note that used to sit on the
+    // integrity helper, and the Offices pane below, which shipped without its
+    // `loading.set(false)` and would have spun for ever.
+    if (SELF_LOADING_PANES.includes(targetID)) {
+      tmpl.loading.set(false);
+    } else if ('report-broken' === targetID) {
+      // A report like the others now: same controls, same paging, same loader.
+      tmpl.brokenPage.set(1);
+      tmpl.brokenSearch.set('');
+      tmpl.loadReport('report-broken', { recount: true });
+    } else if ('report-files' === targetID) {
+      tmpl.filesPage.set(1);
+      tmpl.filesSearch.set('');
+      tmpl.loadReport('report-files', { recount: true });
+    } else if ('report-rules' === targetID) {
+      tmpl.rulesPage.set(1);
+      tmpl.rulesSearch.set('');
+      tmpl.loadReport('report-rules', { recount: true });
+    } else if ('report-boards' === targetID) {
+      tmpl.boardsPage.set(1);
+      tmpl.boardsSearch.set('');
+      tmpl.loadReport('report-boards', { recount: true });
+    } else if ('report-cards' === targetID) {
+      tmpl.cardsPage.set(1);
+      tmpl.cardsSearch.set('');
+      tmpl.loadReport('report-cards', { recount: true });
+    } else if ('report-impersonation' === targetID) {
+      tmpl.impersonationPage.set(1);
+      tmpl.impersonationSearch.set('');
+      tmpl.loadReport('report-impersonation', { recount: true });
+    } else if ('report-recovery' === targetID) {
+      tmpl.recoveryPage.set(1);
+      tmpl.recoverySearch.set('');
+      tmpl.recoveryFilter.set('all');
+      tmpl.loadReport('report-recovery', { recount: true });
+    }
+  }
+}
+
+// --- The six paginated reports: ONE implementation ---
+//
+// Files, Rules, Boards, Cards, Impersonation and Recovery used to be six copies
+// of the same page: the same title + search + prev/next markup, the same
+// currentPage/totalPages helpers, and the same click/keydown handlers, retyped
+// with a different js- prefix each time. They now differ only in the COLUMN
+// SPEC below; everything else - markup, layout, paging, search - comes from the
+// shared table page. See docs/Features/General/Table.md.
+//
+// A column is { label | labelKey, value(doc), align, nowrap, cls, userId(doc) }.
+
+function memberNames(members) {
+  return (members || [])
+    // #5122: removing a member from a board marks it `isActive: false` (the entry
+    // stays in board.members for role history / re-activation). Removed members
+    // must not be listed as current members.
+    .filter(member => member.isActive !== false)
+    .map(member => ReactiveCache.getUser(member.userId)?.username || member.userId)
+    .join(', ');
+}
+
+function userIdNames(userIds) {
+  return (userIds || [])
+    .map(userId => ReactiveCache.getUser(userId)?.username || userId)
+    .join(', ');
+}
+
+function userName(userId) {
+  if (!userId) return '';
+  return ReactiveCache.getUser(userId)?.username || userId;
+}
+
+function userInitials(userId) {
+  const user = userId && ReactiveCache.getUser(userId);
+  const display = user?.profile?.initials || user?.profile?.fullname
+    || user?.username || userId || '';
+  return String(display).trim().split(/\s+/).filter(Boolean)
+    .map(part => part[0]).join('').slice(0, 2).toUpperCase();
+}
+
+function formatDate(date) {
+  return date ? formatDateForDisplay(date, true, value => value.toLocaleString()) : '';
+}
+
+// Every table on the Problems tab, keyed by its side-menu id. `docs` returns the
+// page that is already in minimongo - the publication sent only that page.
+//
+// No titleKey here: the pane heading is rendered once for every Admin Panel pane
+// from the open menu entry (docs/Features/All-Boards/Left-Menu.md), and PROBLEMS_MENU
+// carries these reports' i18n keys already - the same keys this table used to
+// repeat.
+const REPORT_TABLES = {
+  'report-files': {
+    additionalDesc: FILES_REPORT_DELETE_DESCRIPTION,
+    emptyKey: 'no-results',
+    docs: () => {
+      // The UNDERLYING reactive minimongo collection: the 'attachmentsList'
+      // publication delivers the page via this.added, and a plain Mongo.Collection
+      // cursor reacts to those adds and yields plain docs, whereas the ostrio
+      // FilesCursor does not reliably re-run in a helper.
+      // The page is the one the publication named - opening a single card puts its
+      // attachments in minimongo, and those are not rows of this report.
+      // Never throw: a throwing helper blanks the whole pane.
+      const coll = (Attachments && Attachments.collection) || Attachments;
+      try {
+        return reportPageResults(coll, 'report-files');
+      } catch (e) {
+        // Say what went wrong. This used to return [] in silence, and an empty
+        // catch on the one helper that fills the table is indistinguishable
+        // from "there is nothing to show": the pane draws its headers, says
+        // "No results", and nothing anywhere records that it threw. A report
+        // that cannot render its rows is worth one line in the console.
+        console.error('[report-files] could not read the page of rows:', e);
+        return [];
+      }
+    },
+    columns: [
+      {
+        labelKey: 'preview',
+        value: () => '',
+        attachment: d => {
+          const kind = attachmentKind(d);
+          return {
+            id: d._id,
+            cardId: d.meta?.cardId || '',
+            name: cleanFileName(d.name),
+            link: Attachments.link.call(d),
+            extension: kind.extension || 'file',
+            isImage: kind.isImage,
+          };
+        },
+      },
+      // The name is URL-decoded, homoglyphs folded and invisible / exploit
+      // characters removed, so it is always shown as a plain, readable name.
+      { label: 'Filename', value: d => cleanFileName(d.name) },
+      { label: 'Size (kB)', align: 'end', value: d => fileSizeHelper(d.size) },
+      { label: 'MIME Type', value: d => d.type },
+      { label: 'Attachment ID', value: d => d._id },
+      { label: 'Board ID', value: d => d.meta?.boardId },
+      { label: 'Card ID', value: d => d.meta?.cardId },
+    ],
+  },
+  'report-rules': {
+    emptyKey: 'no-results',
+    // The publication's page, not every rule in minimongo: a board's own rules are
+    // there whenever its rules editor has been opened.
+    docs: () =>
+      reportPageResults(Rules, 'report-rules').map(rule => ({
+        _id: rule._id,
+        title: rule.title,
+        boardTitle: rule.board()?.title,
+        action: rule.action(),
+        trigger: rule.trigger(),
+      })),
+    columns: [
+      { label: 'Rule Title', value: d => d.title },
+      { label: 'Board Title', value: d => d.boardTitle },
+      { label: 'actionType', value: d => d.action?.actionType },
+      { label: 'activityType', value: d => d.trigger?.activityType },
+    ],
+  },
+  'report-boards': {
+    emptyKey: 'no-results',
+    docs: () => reportPageResults(Boards, 'report-boards'),
+    columns: [
+      { label: 'Title', value: d => abbreviate(d.title) },
+      { label: 'Id', value: d => abbreviate(d._id) },
+      { label: 'Permission', value: d => d.permission },
+      { label: 'Archived?', value: d => yesOrNo(d.archived) },
+      { label: 'Members', value: d => memberNames(d.members) },
+      { label: 'Organizations', value: d => (d.orgs || [])
+          .map(o => ReactiveCache.getOrg(o.orgId)?.orgDisplayName || o.orgId).join(', ') },
+      { label: 'Teams', value: d => (d.teams || [])
+          .map(t => ReactiveCache.getTeam(t.teamId)?.teamDisplayName || t.teamId).join(', ') },
+    ],
+  },
+  'report-broken': {
+    emptyKey: 'no-results',
+    // A broken card is one with no board, swimlane or list - so those cells are
+    // exactly the ones that may be empty, and that is the point of the row.
+    // The page comes from the publication's own index, not from "every card in
+    // minimongo": that is what made this report one endless page.
+    docs: () => reportPageResults(Cards, 'report-broken'),
+    columns: [
+      { label: 'Card Title', value: d => abbreviate(d.title) },
+      { label: 'Id', value: d => abbreviate(d._id) },
+      { label: 'Board', value: d => abbreviate(d.board()?.title) },
+      { label: 'Swimlane', value: d => abbreviate(d.swimlane()?.title) },
+      { label: 'List', value: d => abbreviate(d.list()?.title) },
+      { label: 'Type', value: d => d.type },
+      { labelKey: 'createdAt', nowrap: true, value: d => formatDate(d.createdAt) },
+    ],
+  },
+  'report-cards': {
+    emptyKey: 'no-results',
+    // The publication's page, in the publication's order (see cards.js).
+    docs: () => reportPageResults(Cards, 'report-cards'),
+    columns: [
+      { label: 'Card Title', value: d => abbreviate(d.title) },
+      { label: 'Board', value: d => abbreviate(d.board()?.title) },
+      { label: 'Swimlane', value: d => abbreviate(d.swimlane()?.title) },
+      { label: 'List', value: d => abbreviate(d.list()?.title) },
+      { label: 'Members', value: d => userIdNames(d.members) },
+      { label: 'Assignees', value: d => userIdNames(d.assignees) },
+    ],
+  },
+  'report-impersonation': {
+    emptyKey: 'no-results',
+    // The publication already paginates + sorts newest-first; mirror that sort.
+    docs: () => collectionResults(ImpersonatedUsers, { createdAt: -1 }).fetch(),
+    columns: [
+      { labelKey: 'date', nowrap: true, value: d => formatDate(d.createdAt) },
+      // Clicking a username opens the same "Edit user" popup as Admin Panel / People.
+      { labelKey: 'impersonation-admin', value: d => userName(d.adminId), userId: d => d.adminId,
+        initials: d => userInitials(d.adminId) },
+      { labelKey: 'impersonation-user', value: d => userName(d.userId), userId: d => d.userId,
+        initials: d => userInitials(d.userId) },
+      { labelKey: 'board', value: d => d.boardId },
+      { labelKey: 'reason', value: d => d.reason },
+    ],
+  },
+  'report-recovery': {
+    descKey: 'recovery-report-desc',
+    additionalDesc: PERMANENT_DELETE_RECOVERY_DESCRIPTION,
+    emptyKey: 'recovery-no-events',
+    docs: () => collectionResults(RecoveryEvents, { createdAt: -1 }).fetch(),
+    rowClass: d => `recovery-severity-${d.severity || 'info'}`,
+    columns: [
+      {
+        labelKey: 'done',
+        nowrap: true,
+        value: () => '',
+        icons: d => [
+          {
+            cls: d.done === false
+              ? 'fa-exclamation-triangle table-page-status-failed'
+              : 'fa-check table-page-status-done',
+            title: String(d.done !== false),
+          },
+          ...(d.deletedData === true ? [{
+            cls: 'fa-trash table-page-status-deleted',
+            title: 'Deleted data',
+          }] : []),
+        ],
+      },
+      { labelKey: 'date', nowrap: true, value: d => formatDate(d.createdAt) },
+      { labelKey: 'recovery-event', value: d => d.type },
+      { label: 'User ID', value: d => d.userId },
+      { labelKey: 'username', value: d => d.username },
+      ...addressReportColumns(),
+      { labelKey: 'recovery-detail', value: d => d.detail },
+    ],
+  },
+};
+
+// Build the shared table page context for whichever report is open. Registered
+// on the PARENT template, which already tracks activeReport - so there is one
+// helper, not six, and no child has to reach back up for its parent instance.
+function reportTablePageData(tmpl) {
+  const reportId = tmpl.activeReport.get();
+  const spec = REPORT_TABLES[reportId];
+  const cfg = reportConfig(tmpl)[reportId];
+  if (!spec || !cfg) return null;
+  const docs = spec.docs() || [];
+  const info = pageInfo(cfg.count.get(), cfg.page.get(), REPORTS_PER_PAGE);
+  return {
+    // No title: the pane heading comes from the open menu entry, once, for every
+    // Admin Panel pane (docs/Features/All-Boards/Left-Menu.md) - and this report's menu
+    // entry carries the very same i18n key, so both would have printed it.
+    descKey: spec.descKey,
+    additionalDesc: spec.additionalDesc,
+    emptyKey: spec.emptyKey,
+    searchTerm: cfg.search.get(),
+    filters: cfg.filter ? buildFilters([reportId === 'report-recovery' ? {
+      id: 'recovery-status', label: 'Show', options: [
+        { value: 'all', label: 'All' }, { value: 'done', label: 'Done' },
+        { value: 'failed', label: 'Failed' },
+        { value: 'deleted', label: 'Deleted' },
+      ],
+    } : {
+      id: 'board-permission', label: 'Permission', options: [
+        { value: 'all', label: 'All' },
+        { value: 'public', labelKey: 'public' },
+        { value: 'instance', labelKey: 'instance' },
+        { value: 'private', labelKey: 'private' },
+      ],
+    }], cfg.filter.get()) : [],
+    header: buildHeader(spec.columns),
+    rows: buildRows(docs, spec.columns, { rowClass: spec.rowClass }),
+    rowCount: docs.length,
+    page: info.page,
+    totalPages: info.totalPages,
+    hasPrev: info.hasPrev,
+    hasNext: info.hasNext,
+  };
+}
+// Broken cards has no template of its own any more: it is a column spec in
+// REPORT_TABLES like every other report, rendered by the shared table page. It
+// used to run on the global-search machinery (CardSearchPaged, a session document
+// and the nextPage/previousPage publications), which is why it was the one report
+// in this menu with a different set of controls - its own prev/next, no search
+// box, no total, no "page X / N".
+
+// --- Read-only event stream report (Security / Speed / Tests) ---
+// Reads the eventlog collection through the admin-only eventLogPage/eventLogCount
+// methods and shows a paginated, searchable, READ-ONLY table (no acknowledge —
+// that lives only on the Summary page). See docs/Security/Remediation/WeKan.md.
+const EVENTS_PER_PAGE = TABLE_PAGE_ROWS_PER_PAGE;
+
+// The stream's title is not needed here any more: the pane heading is rendered
+// once for every Admin Panel pane from the open menu entry
+// (docs/Features/All-Boards/Left-Menu.md), and PROBLEMS_MENU already carries these exact
+// i18n keys - securityReportTitle, speedReportTitle, testsReportTitle,
+// cpuReportTitle - so the words are unchanged and there is only one of them.
+
+const INSTRUMENTATION_COLUMNS = [
+  { label: 'Type', value: row => row.kind },
+  { label: 'Method or publication', value: row => row.name },
+  { label: 'Calls', align: 'end', value: row => row.calls },
+  { label: 'Completed', align: 'end', value: row => row.completed },
+  { label: 'Errors', align: 'end', value: row => row.errors },
+  { label: 'Avg ms', align: 'end', value: row => row.averageMs ?? '' },
+  { label: 'Max ms', align: 'end', value: row => row.maxMs ?? '' },
+];
+
+const { summarizeByArea, areaOf } = require('/models/lib/instrumentationAreas');
+
+// The operations the table shows: the chosen area, then the search.
+function instrumentationRows(t) {
+  const term = t.search.get().toLowerCase();
+  const area = t.area.get();
+  return (t.snapshot.get()?.operations || []).filter(row =>
+    (!area || areaOf(row.name).id === area) &&
+    `${row.kind} ${row.name}`.toLowerCase().includes(term));
+}
+
+function formatCount(value) {
+  try {
+    return new Intl.NumberFormat(TAPi18n.getLanguage()).format(value);
+  } catch (e) {
+    return String(value);
+  }
+}
+
+Template.instrumentationReport.onCreated(function () {
+  this.area = new ReactiveVar(null);
+  this.snapshot = new ReactiveVar(null);
+  this.error = new ReactiveVar('');
+  this.search = new ReactiveVar('');
+  this.page = new ReactiveVar(1);
+  this.load = () => Meteor.call('getInstrumentationReport', (error, snapshot) => {
+    if (error) this.error.set(error.reason || error.message || 'Unable to load instrumentation');
+    else {
+      this.error.set('');
+      this.snapshot.set(snapshot);
+    }
+  });
+  this.load();
+  this.timer = Meteor.setInterval(this.load, 5000);
+});
+
+Template.instrumentationReport.onDestroyed(function () {
+  Meteor.clearInterval(this.timer);
+});
+
+Template.instrumentationReport.helpers({
+  error() { return Template.instance().error.get(); },
+  areas() {
+    const t = Template.instance();
+    const active = t.area.get();
+    return summarizeByArea(t.snapshot.get()?.operations).map(row => {
+      const label = TAPi18n.__(row.labelKey);
+      const avgText = row.averageMs == null ? '' : `${formatCount(row.averageMs)} ms`;
+      return {
+        ...row,
+        label,
+        active: row.id === active,
+        // At least a sliver, so an area with a handful of calls still shows.
+        barPct: Math.max(1, Math.round(row.share * 1000) / 10),
+        errorPct: row.errors ? Math.max(4, Math.round(row.errorShare * 1000) / 10) : 0,
+        callsText: formatCount(row.calls),
+        avgText,
+        errorsText: row.errors ? formatCount(row.errors) : '',
+        title: [label, `${TAPi18n.__('api-calls')} ${formatCount(row.calls)}`,
+          avgText && `${TAPi18n.__('duration')} ${avgText}`,
+          `${TAPi18n.__('errors')} ${formatCount(row.errors)}`].filter(Boolean).join(' · '),
+      };
+    });
+  },
+  tablePageData() {
+    const t = Template.instance();
+    const snapshot = t.snapshot.get();
+    const all = instrumentationRows(t);
+    const info = pageInfo(all.length, t.page.get(), TABLE_PAGE_ROWS_PER_PAGE);
+    return {
+      header: buildHeader(INSTRUMENTATION_COLUMNS),
+      rows: buildRows(all.slice(info.skip, info.skip + info.limit), INSTRUMENTATION_COLUMNS),
+      rowCount: all.length,
+      total: all.length,
+      searchTerm: t.search.get(),
+      page: info.page,
+      totalPages: info.totalPages,
+      hasPrev: info.hasPrev,
+      hasNext: info.hasNext,
+      statusTemplate: snapshot ? 'instrumentationStatus' : null,
+      statusData: snapshot ? {
+        ...snapshot.connections,
+        startedAt: formatEventAt(snapshot.startedAt),
+      } : null,
+    };
+  },
+});
+
+Template.instrumentationReport.events({
+  'click .js-instrumentation-area'(event, t) {
+    const area = event.currentTarget.dataset.area;
+    t.area.set(t.area.get() === area ? null : area);
+    t.page.set(1);
+  },
+  'input .js-table-page-search'(event, t) {
+    t.search.set(event.currentTarget.value.trim());
+    t.page.set(1);
+  },
+  'click .js-table-page-prev'(event, t) {
+    event.preventDefault();
+    event.stopPropagation();
+    t.page.set(adjacentPage(instrumentationRows(t).length, t.page.get(), -1, TABLE_PAGE_ROWS_PER_PAGE));
+  },
+  'click .js-table-page-next'(event, t) {
+    event.preventDefault();
+    event.stopPropagation();
+    t.page.set(adjacentPage(instrumentationRows(t).length, t.page.get(), 1, TABLE_PAGE_ROWS_PER_PAGE));
+  },
+});
+
+Template.eventStreamReport.onCreated(function () {
+  this.stream = this.data.stream;
+  this.page = new ReactiveVar(1);
+  this.total = new ReactiveVar(0);
+  this.rows = new ReactiveVar([]);
+  this.search = new ReactiveVar('');
+  // CPU usage and Speed pages: the live figure shown between the title and the search
+  // box. The event rows below it are a HISTORY of high-CPU periods, so without
+  // this the page could not answer "what is the CPU doing right now?" at all.
+  this.cpu = new ReactiveVar(null);
+  this.load = () => {
+    const stream = this.stream;
+    const search = this.search.get();
+    const page = this.page.get();
+    Meteor.call('eventLogCount', stream, search, (err, count) => {
+      if (!err) this.total.set(count || 0);
+    });
+    Meteor.call('eventLogPage', stream, EVENTS_PER_PAGE, (page - 1) * EVENTS_PER_PAGE, search, (err, rows) => {
+      if (!err) this.rows.set(Array.isArray(rows) ? rows : []);
+    });
+  };
+  this.load();
+
+  if (this.stream === 'cpu' || this.stream === 'performance') {
+    this.loadCpu = () => {
+      Meteor.call('problemDetailReport', 'cpu', (err, res) => {
+        if (!err && res) this.cpu.set(res.current || null);
+      });
+    };
+    this.loadCpu();
+    // The monitor samples the system every CPU_SAMPLE_MS; refreshing on the same
+    // order keeps the header live without polling the server pointlessly often.
+    this.cpuTimer = Meteor.setInterval(this.loadCpu, 5000);
+  }
+  // RAM and Disk usage: the same live line, from their own monitors.
+  if (this.stream === 'ram' || this.stream === 'disk') {
+    this.loadCpu = () => {
+      Meteor.call('problemDetailReport', this.stream, (err, res) => {
+        if (!err && res) this.cpu.set(res.current || null);
+      });
+    };
+    this.loadCpu();
+    this.cpuTimer = Meteor.setInterval(this.loadCpu, this.stream === 'disk' ? 30000 : 5000);
+  }
+});
+
+Template.eventStreamReport.onDestroyed(function () {
+  if (this.cpuTimer) Meteor.clearInterval(this.cpuTimer);
+});
+
+// The event streams (Security, Speed, Tests, CPU usage) use the SAME shared
+// table page as the six reports - same markup, same controls, same layout - so
+// their only difference is these columns and the CPU status row.
+// FROM WHERE, with each address followed by its own location. An instance
+// reached over IPv6 and one reached over IPv4 are different situations.
+//
+// The fold writes `ipv4`/`ipv6` on every row now, but rows written BEFORE it did
+// have only `ip` - so the address is classified here as the fallback, and the
+// history displays correctly instead of showing two empty columns for everything
+// older than this change.
+
+// The API stream is a USAGE report, not a problem report, so its columns are the
+// question it answers - who called what, how often, between when and when, from
+// which address - and not one of the problem columns applies. Everything else
+// about the pane is the shared event-stream report: the same template, the same
+// controls, the same paginator, the same loader.
+const API_COLUMNS = [
+  // WHO. The stored username, like every other report: it is what the account
+  // was called when the calls happened, so a later rename does not rewrite
+  // history. Empty for an unauthenticated call, which is not a gap - it is the
+  // row for "somebody with no account", and the addresses beside it are what
+  // identify them.
+  { labelKey: 'username', value: r => r.username || '', userId: r => r.userId },
+  // WHAT. The route PATTERN - `POST /api/boards/:boardId/lists` - so one row is
+  // one endpoint rather than one board (models/lib/apiUsage.js).
+  { labelKey: 'api-endpoint', nowrap: true, value: r => r.api || '' },
+  // HOW OFTEN, and BETWEEN WHEN AND WHEN. The count and the window are the
+  // report: "34 calls" means nothing without the period it covers.
+  { labelKey: 'api-calls', align: 'end', value: r => r.count || 0 },
+  { labelKey: 'api-first-called', nowrap: true, value: r => formatEventAt(r.firstAt) },
+  { labelKey: 'api-last-called', nowrap: true, value: r => formatEventAt(r.at) },
+  ...addressReportColumns(),
+];
+
+const EVENT_STREAM_COLUMNS = [
+  { labelKey: 'event-datetime', nowrap: true, value: r => formatEventAt(r.at) },
+  // The `database` stream answers "which database said this" in this column -
+  // MongoDB, or FerretDB over SQLite / PostgreSQL / MySQL / MariaDB / SAP HANA -
+  // because the same message means different things depending on which it was,
+  // and the other streams have a category here.
+  { labelKey: 'event-category', value: r => r.db || r.category },
+  { labelKey: 'event-bleed', value: r => r.bleed || r.kind },
+  { labelKey: 'event-severity', value: r => r.severity, data: r => r.severity },
+  { labelKey: 'event-action', value: r => r.action || r.type },
+  { labelKey: 'event-source', value: r => r.source },
+  // WHO tried it. The stored `username` wins over looking the account up: it is
+  // what the account was CALLED when the event happened, so a later rename does
+  // not rewrite history and a deleted account does not erase it. The lookup
+  // stays as the fallback for the older events that predate the stored field.
+  {
+    labelKey: 'username',
+    value: r => r.username || userName(r.userId),
+    userId: r => r.userId,
+  },
+  // FROM WHERE, in the same four columns every report uses. Resolved with the
+  // same spoofing-safe rule as the login throttle - X-Forwarded-For only as far
+  // as HTTP_FORWARDED_COUNT says to trust it - so neither can be written by
+  // sending a header.
+  ...addressReportColumns(),
+  // HOW MANY attempts this row stands for. A canary counts repeats inside its
+  // window rather than writing one row each, so "1" is an ordinary event and a
+  // larger number is a burst that was deliberately not written out in full
+  // (docs/Security/Remediation/WeKan.md §12).
+  {
+    labelKey: 'event-attempts',
+    nowrap: true,
+    value: r => (r.count && r.count > 1 ? String(r.count) : ''),
+  },
+  // The `database` stream's detail is WeKan's reading of the error - what it means
+  // and what to do - and it is worth little without the sentence the database
+  // itself produced, which is the one thing an admin can search for or paste into
+  // an issue. So this cell carries both, advice first, message after. The other
+  // streams have no `message`, and their cell is unchanged.
+  { labelKey: 'event-detail', value: r => [r.detail, r.message].filter(Boolean).join(' — ') },
+];
+
+// Which columns a stream's table has. One line rather than a template of its
+// own: the panes differ in their columns and in nothing else.
+function columnsFor(stream) {
+  return stream === 'api' ? API_COLUMNS : EVENT_STREAM_COLUMNS;
+}
+
+function formatEventAt(at) {
+  if (!at) return '';
+  try { return formatDateForDisplay(at, true, value => value.toISOString().replace('T', ' ').slice(0, 19)); }
+  catch (e) { return String(at); }
+}
+
+const gb = bytes => (Number(bytes) / (1024 ** 3)).toFixed(1);
+
+// The live CPU line.
+function cpuStatus(cpu) {
+  return {
+    high: cpu.high,
+    percent: cpu.percent,
+    cores: cpu.cores,
+    activity: cpu.activity,
+    // "1.42 / 1.10 / 0.98" - one line, no chart, matching the plain-table
+    // look of the rest of the Problems pages.
+    loadAverage: Array.isArray(cpu.loadAverage)
+      ? cpu.loadAverage.map(n => (Number.isFinite(n) ? n.toFixed(2) : '?')).join(' / ')
+      : '',
+    statistics: cpu.statistics ? {
+      minimum: cpu.statistics.minimum,
+      average: cpu.statistics.average,
+      maximum: cpu.statistics.maximum,
+      samples: cpu.statistics.samples,
+      lowestAt: formatEventAt(cpu.statistics.lowestAt),
+    } : null,
+  };
+}
+
+// The live RAM line: used of total, the percentage, and swap when the machine
+// has any. Numbers only, so it needs no new translation.
+function ramStatus(mem) {
+  return {
+    high: mem.high,
+    percent: mem.ramPct,
+    used: gb(mem.ramUsed),
+    total: gb(mem.ramTotal),
+    swap: mem.swapPct == null ? null : { percent: mem.swapPct, used: gb(mem.swapUsed), total: gb(mem.swapTotal) },
+  };
+}
+
+// The live disk lines: one per filesystem WeKan writes to.
+function diskStatus(current) {
+  return {
+    disks: (current.disks || []).map(d => ({
+      high: d.high, path: d.path, roles: d.roles.join(', '), percent: d.usedPct,
+      available: gb(d.available), total: gb(d.total),
+    })),
+  };
+}
+
+Template.eventStreamReport.helpers({
+  tablePageData() {
+    const t = Template.instance();
+    const rows = t.rows.get() || [];
+    const info = pageInfo(t.total.get(), t.page.get(), EVENTS_PER_PAGE);
+    const cpu = t.cpu.get();
+    return {
+      // No title: the pane heading comes from the open menu entry, once, for
+      // every Admin Panel pane (docs/Features/All-Boards/Left-Menu.md).
+      // The API stream is usage, not problems, so an empty one is not "no new
+      // problems" - it is "nothing has called the API", which on most instances
+      // means WITH_API is off.
+      emptyKey: t.stream === 'api' ? 'api-no-calls' : 'no-new-problems',
+      searchTerm: t.search.get(),
+      header: buildHeader(columnsFor(t.stream)),
+      rows: buildRows(rows, columnsFor(t.stream)),
+      rowCount: rows.length,
+      page: info.page,
+      totalPages: info.totalPages,
+      hasPrev: info.hasPrev,
+      hasNext: info.hasNext,
+      // CPU, RAM and Disk usage have a live status row: the table below it lists
+      // PAST high-usage periods, so this line is the only place the page says
+      // what is happening right now. Null on the other streams, so the shared
+      // page simply renders no status row there.
+      statusTemplate: !cpu ? null
+        : t.stream === 'ram' ? 'ramCurrentStatus'
+          : t.stream === 'disk' ? 'diskCurrentStatus' : 'cpuCurrentStatus',
+      statusData: !cpu ? null : t.stream === 'ram' ? ramStatus(cpu)
+        : t.stream === 'disk' ? diskStatus(cpu) : cpuStatus(cpu),
+    };
+  },
+});
+
+Template.eventStreamReport.events({
+  'input .js-table-page-search'(event, tmpl) {
+    tmpl.search.set(event.currentTarget.value.trim());
+    tmpl.page.set(1);
+    tmpl.load();
+  },
+  'click .js-table-page-prev'(event, tmpl) {
+    event.preventDefault();
+    event.stopPropagation();
+    movePage(tmpl.page, tmpl.total.get(), -1, EVENTS_PER_PAGE, tmpl.load);
+  },
+  'click .js-table-page-next'(event, tmpl) {
+    event.preventDefault();
+    event.stopPropagation();
+    movePage(tmpl.page, tmpl.total.get(), 1, EVENTS_PER_PAGE, tmpl.load);
+  },
+});
+
+function toggleSettingField(field) {
+  const setting = ReactiveCache.getCurrentSetting();
+  if (setting) {
+    if (field === 'enablePermanentDelete') {
+      Meteor.call('setPermanentDeleteEnabled', !setting[field], (err) => {
+        if (err) alert(errorMessage(err));
+      });
+      return;
+    }
+    Settings.update(setting._id, { $set: { [field]: !setting[field] } });
+  }
+}
+
+// Performance, Security and Notifications were Admin Panel / Features panes before
+// it was removed; Delete exposes the later soft-delete gate beside them. Blaze
+// resolves a helper, and delivers an event,
+// against the template the element is IN - never an enclosing one - so each pane needs
+// these ON it. One shared pair registered on all three: a handler whose element is not
+// in a given pane simply never fires there, so splitting them per pane would buy
+// nothing.
+const featurePaneHelpers = {
+  renderLinksAsPlainText() {
+    return (ReactiveCache.getCurrentSetting() || {}).renderLinksAsPlainText;
+  },
+  alwaysShowCodeAsText() {
+    return (ReactiveCache.getCurrentSetting() || {}).alwaysShowCodeAsText;
+  },
+  disableAllImport() {
+    return (ReactiveCache.getCurrentSetting() || {}).disableAllImport;
+  },
+  disableAllExport() {
+    return (ReactiveCache.getCurrentSetting() || {}).disableAllExport;
+  },
+  disableImportAvatars() {
+    return (ReactiveCache.getCurrentSetting() || {}).disableImportAvatars;
+  },
+  disableExportAvatars() {
+    return (ReactiveCache.getCurrentSetting() || {}).disableExportAvatars;
+  },
+  anonymizeImportUsers() {
+    return (ReactiveCache.getCurrentSetting() || {}).anonymizeImportUsers;
+  },
+  anonymizeExportUsers() {
+    return (ReactiveCache.getCurrentSetting() || {}).anonymizeExportUsers;
+  },
+  disableActivities() {
+    return (ReactiveCache.getCurrentSetting() || {}).disableActivities;
+  },
+  disableNotifications() {
+    return (ReactiveCache.getCurrentSetting() || {}).disableNotifications;
+  },
+  disableWatch() {
+    return (ReactiveCache.getCurrentSetting() || {}).disableWatch;
+  },
+  enablePermanentDelete() {
+    return (ReactiveCache.getCurrentSetting() || {}).enablePermanentDelete;
+  },
+  permanentDeleteRecoveryDescription() {
+    return PERMANENT_DELETE_RECOVERY_DESCRIPTION;
+  },
+};
+const featurePaneEvents = {
+  'click .js-toggle-render-links-as-plain-text'() {
+    toggleSettingField('renderLinksAsPlainText');
+  },
+  'click .js-toggle-always-show-code-as-text'() {
+    toggleSettingField('alwaysShowCodeAsText');
+  },
+  'click .js-toggle-disable-all-import'() {
+    toggleSettingField('disableAllImport');
+  },
+  'click .js-toggle-disable-all-export'() {
+    toggleSettingField('disableAllExport');
+  },
+  'click .js-toggle-disable-import-avatars'() {
+    toggleSettingField('disableImportAvatars');
+  },
+  'click .js-toggle-disable-export-avatars'() {
+    toggleSettingField('disableExportAvatars');
+  },
+  'click .js-toggle-anonymize-import-users'() {
+    toggleSettingField('anonymizeImportUsers');
+  },
+  'click .js-toggle-anonymize-export-users'() {
+    toggleSettingField('anonymizeExportUsers');
+  },
+  'click .js-toggle-disable-activities'() {
+    toggleSettingField('disableActivities');
+  },
+  'click .js-toggle-disable-notifications'() {
+    toggleSettingField('disableNotifications');
+  },
+  'click .js-toggle-disable-watch'() {
+    toggleSettingField('disableWatch');
+  },
+  'click .js-toggle-enable-permanent-delete'() {
+    toggleSettingField('enablePermanentDelete');
+  },
+};
+for (const tpl of [Template.featuresPerformance, Template.featuresSecurity,
+  Template.featuresDelete, Template.featuresNotifications]) {
+  tpl.helpers(featurePaneHelpers);
+  tpl.events(featurePaneEvents);
+}
+
+// ── Admin Panel / Problems / Offices ────────────────────────────────────────
+// Where people log in from, grouped by person. Every address remains its own row
+// so IPv4, IPv6, location and that person's successful-login count stay exact.
+//
+// Through the shared table page like every other report here
+// (docs/Features/General/Table.md): same layout, same controls, same paginator.
+const OFFICES_PER_PAGE = 25;
+
+const OFFICE_COLUMNS = [
+  {
+    labelKey: 'office-people',
+    users: d => [{
+      userId: d.userId,
+      text: d.fullname ? `${d.fullname} (${d.username})` : d.username,
+      initials: d.initials,
+      avatarUrl: d.avatarUrl,
+    }],
+    value: () => '',
+  },
+  ...addressReportColumns({ map: true }),
+  { labelKey: 'office-logins', align: 'end', value: d => d.logins },
+  { labelKey: 'office-first-seen', nowrap: true, value: d => formatDate(d.firstAt) },
+  { labelKey: 'office-last-seen', nowrap: true, value: d => formatDate(d.at) },
+];
+
+Template.officeReport.onCreated(function () {
+  this.rows = new ReactiveVar([]);
+  this.total = new ReactiveVar(0);
+  this.page = new ReactiveVar(1);
+  this.search = new ReactiveVar('');
+  this.load = () => {
+    Meteor.call('loginOffices', {
+      limit: OFFICES_PER_PAGE,
+      skip: (this.page.get() - 1) * OFFICES_PER_PAGE,
+      search: this.search.get() || undefined,
+    }, (err, res) => {
+      if (err) return;
+      this.rows.set(officeRowsByPerson((res && res.people) || []));
+      this.total.set((res && res.total) || 0);
+    });
+  };
+  this.load();
+});
+
+Template.officeReport.helpers({
+  tablePageData() {
+    const t = Template.instance();
+    const rows = t.rows.get() || [];
+    const info = pageInfo(t.total.get(), t.page.get(), OFFICES_PER_PAGE);
+    return {
+      // No title: the pane heading is the open menu entry's own label, once, for
+      // every Admin Panel pane (docs/Features/All-Boards/Left-Menu.md).
+      descKey: 'office-report-desc',
+      emptyKey: 'office-no-results',
+      searchTerm: t.search.get(),
+      header: buildHeader(OFFICE_COLUMNS),
+      rows: buildRows(rows, OFFICE_COLUMNS),
+      rowCount: rows.length,
+      page: info.page,
+      totalPages: info.totalPages,
+      hasPrev: info.hasPrev,
+      hasNext: info.hasNext,
+    };
+  },
+});
+
+Template.officeReport.events({
+  'click .js-table-page-prev'(event, tmpl) {
+    event.preventDefault();
+    event.stopPropagation();
+    movePage(tmpl.page, tmpl.total.get(), -1, OFFICES_PER_PAGE, tmpl.load);
+  },
+  'click .js-table-page-next'(event, tmpl) {
+    event.preventDefault();
+    event.stopPropagation();
+    movePage(tmpl.page, tmpl.total.get(), 1, OFFICES_PER_PAGE, tmpl.load);
+  },
+  'keydown .js-table-page-search'(event, tmpl) {
+    if (event.keyCode === 13 && !event.shiftKey) {
+      event.preventDefault();
+      event.stopPropagation();
+      tmpl.search.set(event.currentTarget.value || '');
+      tmpl.page.set(1);
+      tmpl.load();
+    }
+  },
+});
+
+
+Template.fileStatusAudit.onCreated(function () {
+  this.result = new ReactiveVar(null);
+  this.error = new ReactiveVar('');
+  this.disposed = false;
+  this.polling = false;
+  this.refresh = () => {
+    if (this.disposed || this.polling) return;
+    this.polling = true;
+    Meteor.call('getFileStatusAudit', (error, result) => {
+      this.polling = false;
+      if (this.disposed) return;
+      if (error) this.error.set(error.reason || error.message);
+      else this.result.set(result);
+    });
+  };
+  this.refresh();
+  this.timer = Meteor.setInterval(this.refresh, 2000);
+});
+Template.fileStatusAudit.onDestroyed(function () {
+  this.disposed = true;
+  Meteor.clearInterval(this.timer);
+});
+Template.fileStatusAudit.helpers({
+  result() { return Template.instance().result.get(); },
+  running() { return Template.instance().result.get()?.state === 'running'; },
+  error() { return Template.instance().error.get(); },
+  totals() {
+    return Object.entries(Template.instance().result.get()?.totals || {}).map(([kind, count]) => ({ kind, count }));
+  },
+  findings() { return (Template.instance().result.get()?.findings || []).map(row => JSON.stringify(row, null, 2)); },
+  statusText() {
+    const result = Template.instance().result.get();
+    return result ? `${result.state} — ${result.phase} — ${new Date(result.startedAt).toLocaleString()}` : '';
+  },
+  countText() {
+    const result = Template.instance().result.get();
+    const c = result?.counts;
+    return c ? `Records: ${c.records}; versions: ${c.versions}; disk files: ${result.filesystemScanned ? c.diskFiles : 'not scanned'}; history rows: ${c.historyRows}; bytes inspected: ${c.bytesRead}` : '';
+  },
+  coverageText() {
+    const result = Template.instance().result.get();
+    if (!result || result.state !== 'partial') return '';
+    return `Partial scan: ${(result.limitations || []).join(' ')} Unscanned files cannot be counted as missing or healthy.`;
+  },
+});
+function startFileAudit(mode, instance) {
+  instance.error.set('');
+  Meteor.call('startFileStatusAudit', mode, error => {
+    if (instance.disposed) return;
+    if (error) instance.error.set(error.reason || error.message);
+    instance.refresh();
+  });
+}
+Template.fileStatusAudit.events({
+  'click .js-file-audit-download'(event, instance) {
+    event.preventDefault();
+    const report = instance.result.get();
+    if (!report) return;
+    const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' }));
+    const link = document.createElement('a');
+    link.href = url; link.download = 'wekan-file-status.json'; link.click();
+    Meteor.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  },
+  'click .js-file-audit-all'(event, instance) { event.preventDefault(); startFileAudit('all', instance); },
+  'click .js-file-audit-types'(event, instance) { event.preventDefault(); startFileAudit('types', instance); },
+  'click .js-file-audit-inventory'(event, instance) { event.preventDefault(); startFileAudit('inventory', instance); },
+  'click .js-file-audit-cancel'(event, instance) {
+    event.preventDefault();
+    Meteor.call('cancelFileStatusAudit', error => {
+      if (!instance.disposed && error) instance.error.set(error.reason || error.message);
+    });
+  },
+});
+
+
+// A method-backed diagnostic view of the retained Sync records. No duplicate
+// recovery events and no collection publication; refresh reads current status.
+Template.syncRecoveryReports.onCreated(function () {
+  this.result = new ReactiveVar({ rows: [], total: 0, page: 1 });
+  this.error = new ReactiveVar('');
+  this.search = new ReactiveVar('');
+  this.status = new ReactiveVar('unfinished');
+  this.request = 0;
+  this.load = (page = 1) => {
+    const request = ++this.request;
+    this.result.set({ rows: [], total: 0, page });
+    Meteor.call('syncRecoveryReport', { search: this.search.get(), status: this.status.get(), page }, (error, result) => {
+      if (this.view.isDestroyed || request !== this.request) return;
+      this.error.set(error ? TAPi18n.__('sync-recovery-unavailable') : '');
+      if (!error) this.result.set(result);
+    });
+  };
+  this.load();
+});
+Template.syncRecoveryReports.helpers({
+  error() { return Template.instance().error.get(); },
+  tablePageData() {
+    const t = Template.instance();
+    const result = t.result.get();
+    const info = pageInfo(result.total, result.page, TABLE_PAGE_ROWS_PER_PAGE);
+    const statuses = ['all', 'unfinished', 'failed', 'completed-with-warnings', 'completed', 'review-only', 'skipped'];
+    return {
+      header: buildHeader([{ labelKey: 'date' }, { labelKey: 'list' }, { labelKey: 'status' }, { labelKey: 'details' }]),
+      rowTemplate: 'syncRecoveryReportRow', emptyKey: 'sync-report-empty',
+      docs: result.rows.map(row => ({ ...row, started: formatDate(row.startedAt),
+        hasCounts: row.created !== undefined, statusLabel: `sync-report-${row.status}`,
+        sourceRows: (row.coverage?.source?.rows || []).map(field => ({ ...field, reasonLabel: `sync-source-${field.reason}` })),
+        normalizedRows: (row.coverage?.rows || []).map(field => ({ ...field, reasonLabel: `sync-source-${field.reason}` })),
+      })),
+      rowCount: result.rows.length, total: result.total, searchTerm: t.search.get(),
+      page: info.page, totalPages: info.totalPages, hasPrev: info.hasPrev, hasNext: info.hasNext,
+      actions: [{ id: 'refresh-sync', labelKey: 'refresh' }],
+      filters: [{ id: 'sync-status', labelKey: 'status', options: statuses.map(status => ({ value: status,
+        labelKey: status === 'all' ? 'sync-recovery-all' : `sync-report-${status}`, selected: status === t.status.get() })) }],
+    };
+  },
+});
+Template.syncRecoveryReports.events({
+  'keydown .js-table-page-search'(event, t) {
+    event.stopPropagation();
+    if (event.key === 'Enter') { event.preventDefault(); t.search.set(event.currentTarget.value.trim().slice(0, 100)); t.load(); }
+  },
+  'change .js-table-page-filter'(event, t) {
+    event.stopPropagation(); t.status.set(event.currentTarget.value); t.load();
+  },
+  'click .js-table-page-action'(event, t) {
+    event.preventDefault(); event.stopPropagation(); t.load();
+  },
+  'click .js-table-page-prev, click .js-table-page-next'(event, t) {
+    event.preventDefault(); event.stopPropagation();
+    const result = t.result.get();
+    const next = adjacentPage(result.total, result.page, event.currentTarget.classList.contains('js-table-page-next') ? 1 : -1, TABLE_PAGE_ROWS_PER_PAGE);
+    if (next !== result.page) t.load(next);
+  },
+});
+
+// Recipient summaries use the existing table page controls. No message content
+// or mailbox addresses are published into Minimongo.
+Template.emailRecoveryReports.onCreated(function () {
+  this.result = new ReactiveVar({ rows: [], total: 0, page: 1 });
+  this.error = new ReactiveVar('');
+  this.actionError = new ReactiveVar('');
+  this.search = new ReactiveVar('');
+  this.busy = new ReactiveVar(false);
+  this.request = 0;
+  this.commands = new Map();
+  this.load = (page = 1) => {
+    const request = ++this.request;
+    this.result.set({ rows: [], total: 0, page });
+    Meteor.call('emailRecoveryReport', { search: this.search.get(), page }, (error, result) => {
+      if (this.view.isDestroyed || request !== this.request) return;
+      this.error.set(error ? TAPi18n.__('email-recovery-unavailable') : '');
+      if (!error) this.result.set(result);
+    });
+  };
+  this.load();
+});
+Template.emailRecoveryReports.helpers({
+  error() { const t = Template.instance(); return t.actionError.get() || t.error.get(); },
+  busy() { return Template.instance().busy.get(); },
+  tablePageData() {
+    const t = Template.instance(), result = t.result.get();
+    const info = pageInfo(result.total, result.page, TABLE_PAGE_ROWS_PER_PAGE);
+    return {
+      header: buildHeader([{ labelKey: 'username' }, { labelKey: 'status' }, { labelKey: 'email-recovery-queued' },
+        { labelKey: 'date' }, { labelKey: 'actions' }]),
+      rowTemplate: 'emailRecoveryReportRow', emptyKey: 'email-recovery-empty',
+      docs: result.rows.map(row => ({ ...row, busy: t.busy.get(),
+        statusLabel: row.paused ? 'email-recovery-paused' : row.failed ? 'email-recovery-attention' : 'email-recovery-pending',
+        failureRows: (row.failures || []).map(failure => ({ ...failure, labelKey: `email-failure-${failure.reason}` })),
+        oldestText: row.oldest ? formatDate(row.oldest) : '—',
+        nextText: !row.paused && row.nextAttemptAt ? formatDate(row.nextAttemptAt) : '—',
+        changedText: row.changedAt ? formatDate(row.changedAt) : '',
+      })),
+      rowCount: result.rows.length, total: result.total, searchTerm: t.search.get(),
+      page: info.page, totalPages: info.totalPages, hasPrev: info.hasPrev, hasNext: info.hasNext,
+      actions: [{ id: 'refresh-email', labelKey: 'refresh' }],
+    };
+  },
+});
+Template.emailRecoveryReports.events({
+  'keydown .js-table-page-search'(event, t) {
+    event.stopPropagation();
+    if (event.key === 'Enter') { event.preventDefault(); t.search.set(event.currentTarget.value.trim().slice(0, 100)); t.load(); }
+  },
+  'click .js-table-page-action'(event, t) {
+    event.preventDefault(); event.stopPropagation(); t.load();
+  },
+  'click .js-table-page-prev, click .js-table-page-next'(event, t) {
+    event.preventDefault(); event.stopPropagation();
+    const result = t.result.get();
+    const next = adjacentPage(result.total, result.page, event.currentTarget.classList.contains('js-table-page-next') ? 1 : -1, TABLE_PAGE_ROWS_PER_PAGE);
+    if (next !== result.page) t.load(next);
+  },
+  'click .js-email-queue-action'(event, t) {
+    event.preventDefault(); event.stopPropagation();
+    if (t.busy.get()) return;
+    const action = event.currentTarget.dataset.action, userId = this.userId;
+    if (action === 'cancel' && !window.confirm(TAPi18n.__('email-recovery-confirm-cancel'))) return;
+    const key = `${userId}:${action}`;
+    // Retain an uncertain request's identity when the operator retries. A late
+    // retry cannot cancel newer messages or undo a newer operator action.
+    if (!t.commands.has(key)) t.commands.set(key, Random.id(32));
+    t.busy.set(true); t.actionError.set('');
+    Meteor.call('controlEmailRecovery', { userId, action, requestId: t.commands.get(key) }, (error, result) => {
+      if (t.view.isDestroyed) return;
+      t.busy.set(false);
+      if (error) t.actionError.set(TAPi18n.__(error.error === 'email-recovery-busy' ? 'email-recovery-busy' : 'email-recovery-failed'));
+      else {
+        t.commands.delete(key);
+        if (result.status === 'superseded') t.actionError.set(TAPi18n.__('email-recovery-superseded'));
+      }
+      t.load(t.result.get().page);
+    });
+  },
+});
+
+
+Template.activityNotificationRecoveryReports.onCreated(function () {
+  this.result = new ReactiveVar({ rows: [], total: 0, page: 1 });
+  this.search = new ReactiveVar(''); this.error = new ReactiveVar('');
+  this.actionError = new ReactiveVar(''); this.busy = new ReactiveVar(false);
+  this.request = 0;
+  this.load = (page = 1) => {
+    const request = ++this.request;
+    this.result.set({ rows: [], total: 0, page });
+    Meteor.call('activityNotificationRecoveryReport', { search: this.search.get(), page }, (error, result) => {
+      if (this.view.isDestroyed || request !== this.request) return;
+      this.error.set(error ? TAPi18n.__('activity-recovery-unavailable') : '');
+      if (!error) this.result.set(result);
+    });
+  };
+  this.load();
+});
+Template.activityNotificationRecoveryReports.helpers({
+  error() { const t = Template.instance(); return t.actionError.get() || t.error.get(); },
+  busy() { return Template.instance().busy.get(); },
+  tablePageData() {
+    const t = Template.instance(), result = t.result.get();
+    const info = pageInfo(result.total, result.page, TABLE_PAGE_ROWS_PER_PAGE);
+    return { header: buildHeader([{ labelKey: 'activity' }, { labelKey: 'board' }, { labelKey: 'status' },
+      { labelKey: 'date' }, { labelKey: 'actions' }]),
+    rowTemplate: 'activityNotificationRecoveryRow', emptyKey: 'activity-recovery-empty',
+    docs: result.rows.map(row => ({ ...row, showPaused: row.paused && row.status !== 'cancelled', statusLabel: `activity-recovery-status-${row.status}`,
+      createdText: row.createdAt ? formatDate(row.createdAt) : '—', retryDisabled: t.busy.get() || !row.canRetry,
+      controlDisabled: t.busy.get() || !row.canControl, controlLabel: row.paused ? 'activity-recovery-resume' : 'activity-recovery-pause' })),
+    rowCount: result.rows.length, total: result.total, searchTerm: t.search.get(),
+    page: info.page, totalPages: info.totalPages, hasPrev: info.hasPrev, hasNext: info.hasNext,
+    actions: [{ id: 'refresh-activity-notifications', labelKey: 'refresh' },
+      // #6768: the whole list at once.
+      { id: 'retry-all-activity-notifications', labelKey: 'activity-recovery-retry-all' },
+      { id: 'cancel-old-activity-notifications', labelKey: 'activity-recovery-cancel-older' }] };
+  },
+});
+Template.activityNotificationRecoveryReports.events({
+  'keydown .js-table-page-search'(event, t) {
+    event.stopPropagation();
+    if (event.key === 'Enter') { event.preventDefault(); t.search.set(event.currentTarget.value.trim().slice(0, 100)); t.load(); }
+  },
+  'click .js-table-page-action'(event, t) {
+    event.preventDefault(); event.stopPropagation(); t.actionError.set('');
+    const action = event.currentTarget.dataset.action;
+    const done = (error, result) => {
+      if (t.view.isDestroyed) return;
+      t.busy.set(false);
+      if (error) t.actionError.set(TAPi18n.__('activity-recovery-control-failed'));
+      else if (result) t.actionError.set(TAPi18n.__('activity-recovery-bulk-result', result.cancelled || 0, result.completed || 0, result.remaining || 0));
+      t.load();
+    };
+    if (action === 'retry-all-activity-notifications') {
+      t.busy.set(true);
+      Meteor.call('retryAllActivityNotifications', done);
+      return;
+    }
+    if (action === 'cancel-old-activity-notifications') {
+      const answer = window.prompt(TAPi18n.__('activity-recovery-cancel-older-prompt'), '7');
+      const days = Number(answer);
+      if (answer === null || !Number.isFinite(days) || days < 0) return;
+      t.busy.set(true);
+      Meteor.call('cancelActivityNotificationsOlderThan', { days }, done);
+      return;
+    }
+    t.load();
+  },
+  'click .js-table-page-prev, click .js-table-page-next'(event, t) {
+    event.preventDefault(); event.stopPropagation();
+    const result = t.result.get();
+    const next = adjacentPage(result.total, result.page, event.currentTarget.classList.contains('js-table-page-next') ? 1 : -1, TABLE_PAGE_ROWS_PER_PAGE);
+    if (next !== result.page) t.load(next);
+  },
+  'click .js-cancel-activity-notification'(event, t) {
+    event.preventDefault(); event.stopPropagation();
+    if (t.busy.get() || !this.canControl || !window.confirm(TAPi18n.__('activity-recovery-cancel-confirm'))) return;
+    t.busy.set(true); t.actionError.set('');
+    Meteor.call('cancelActivityNotificationRecovery', { intentId: this.intentId,
+      expectedRevision: this.controlRevision, requestId: Random.id(32) }, error => {
+      if (t.view.isDestroyed) return;
+      t.busy.set(false);
+      const known = ['activity-recovery-busy', 'activity-recovery-control-conflict'];
+      if (error) t.actionError.set(TAPi18n.__(known.includes(error.error) ? error.error : 'activity-recovery-control-failed'));
+      t.load(t.result.get().page);
+    });
+  },
+  'click .js-control-activity-notification'(event, t) {
+    event.preventDefault(); event.stopPropagation();
+    if (t.busy.get() || !this.canControl) return;
+    t.busy.set(true); t.actionError.set('');
+    // Use the displayed revision. Never silently rebase an uncertain request
+    // onto a newer administrator decision.
+    Meteor.call('controlActivityNotificationRecovery', { intentId: this.intentId, paused: !this.paused,
+      expectedRevision: this.controlRevision, requestId: Random.id(32) }, error => {
+      if (t.view.isDestroyed) return;
+      t.busy.set(false);
+      const known = ['activity-recovery-busy', 'activity-recovery-control-conflict'];
+      if (error) t.actionError.set(TAPi18n.__(known.includes(error.error) ? error.error : 'activity-recovery-control-failed'));
+      t.load(t.result.get().page);
+    });
+  },
+  'click .js-retry-activity-notification'(event, t) {
+    event.preventDefault(); event.stopPropagation();
+    if (t.busy.get() || !this.canRetry) return;
+    t.busy.set(true); t.actionError.set('');
+    Meteor.call('retryActivityNotification', { intentId: this.intentId }, error => {
+      if (t.view.isDestroyed) return;
+      t.busy.set(false);
+      const known = ['activity-recovery-busy', 'activity-recovery-denied', 'activity-recovery-source-unavailable', 'activity-recovery-disabled', 'activity-recovery-paused', 'activity-recovery-status-cancelled'];
+      if (error) t.actionError.set(TAPi18n.__(known.includes(error.error) ? error.error : 'activity-recovery-failed'));
+      t.load(t.result.get().page);
+    });
+  },
+});
+
+
+const RESOLUTION_ERRORS = ['too-early', 'already-resolved', 'resend-in-flight', 'nothing-to-resend',
+  'resend-uncertain', 'busy', 'command-changed', 'attempt-invalid'].map(reason => `rule-email-resolution-${reason}`);
+const resolutionError = error => (RESOLUTION_ERRORS.includes(error?.error) ? error.error : 'rule-email-resolution-failed');
+Template.syncRuleEmailRecoveryReports.onCreated(function () {
+  this.result = new ReactiveVar({ rows: [], total: 0, page: 0, pageSize: 10 });
+  this.search = new ReactiveVar(''); this.status = new ReactiveVar('all');
+  this.error = new ReactiveVar(''); this.request = 0;
+  // #2713: the administrator's review of one unconfirmed attempt.
+  this.detail = new ReactiveVar(null); this.actionError = new ReactiveVar(''); this.busy = new ReactiveVar(false);
+  this.openDetail = commandId => {
+    this.actionError.set('');
+    Meteor.call('syncRuleEmailRecoveryDetail', commandId, (error, detail) => {
+      if (this.view.isDestroyed) return;
+      if (error) { this.detail.set(null); this.error.set(TAPi18n.__(resolutionError(error))); return; }
+      this.detail.set(detail);
+    });
+  };
+  this.decide = (method, args, confirmKey) => {
+    const detail = this.detail.get();
+    if (!detail || this.busy.get() || !window.confirm(TAPi18n.__(confirmKey))) return;
+    this.busy.set(true); this.actionError.set('');
+    Meteor.call(method, ...args(detail.commandId), error => {
+      if (this.view.isDestroyed) return;
+      this.busy.set(false);
+      if (error) this.actionError.set(TAPi18n.__(resolutionError(error)));
+      this.openDetail(detail.commandId);
+      this.load(this.result.get().page);
+    });
+  };
+  this.load = (page = 0) => {
+    const request = ++this.request;
+    this.error.set('');
+    this.result.set({ rows: [], total: 0, page, pageSize: 10 });
+    Meteor.call('syncRuleEmailRecoveryReport', { search: this.search.get(), status: this.status.get(), page }, (error, result) => {
+      if (this.view.isDestroyed || request !== this.request) return;
+      this.error.set(error ? TAPi18n.__('rule-email-recovery-unavailable') : '');
+      if (!error) this.result.set(result);
+    });
+  };
+  this.load();
+});
+Template.syncRuleEmailRecoveryReports.helpers({
+  error() { return Template.instance().error.get(); },
+  detail() {
+    const t = Template.instance(), detail = t.detail.get();
+    if (!detail) return null;
+    return { ...detail,
+      recipients: detail.recipients.map(row => ({ ...row, statusKey: `rule-email-recovery-recipient-${row.status}` })),
+      waiting: detail.status === 'unconfirmed', resolvableText: formatDate(detail.resolvableAt),
+      actionError: t.actionError.get(), actionsDisabled: t.busy.get() || !detail.resolvable };
+  },
+  tablePageData() {
+    const t = Template.instance(), result = t.result.get();
+    // The report API is zero-based; the shared table controls are one-based.
+    const info = pageInfo(result.total, result.page + 1, result.pageSize);
+    return { header: buildHeader([{ labelKey: 'rule-email-recovery-identifiers' }, { labelKey: 'status' },
+      { labelKey: 'rule-email-recovery-started' }, { labelKey: 'rule-email-recovery-finished' }, { labelKey: 'actions' }]),
+      rowTemplate: 'syncRuleEmailRecoveryRow', emptyKey: 'rule-email-recovery-empty',
+      docs: result.rows.map(row => ({ ...row, statusLabel: `rule-email-recovery-${row.status}`,
+        canReview: row.status === 'unconfirmed' && !!row.commandId,
+        startedText: row.startedAt ? formatDate(row.startedAt) : '—', finishedText: row.finishedAt ? formatDate(row.finishedAt) : '—' })),
+      rowCount: result.rows.length, total: result.total, searchTerm: t.search.get(),
+      page: info.page, totalPages: info.totalPages, hasPrev: info.hasPrev, hasNext: info.hasNext,
+      actions: [{ id: 'refresh-rule-email', labelKey: 'refresh' }] };
+  },
+});
+Template.syncRuleEmailRecoveryReports.events({
+  'keydown .js-table-page-search'(event, t) {
+    event.stopPropagation();
+    if (event.key === 'Enter') { event.preventDefault(); t.search.set(event.currentTarget.value.trim().slice(0, 128)); t.load(); }
+  },
+  'click .js-rule-email-review'(event, t) {
+    event.preventDefault(); event.stopPropagation();
+    t.openDetail(event.currentTarget.closest('tr').dataset.command);
+  },
+  'click .js-rule-email-resend'(event, t) {
+    event.preventDefault(); event.stopPropagation();
+    t.decide('syncRuleEmailRecoveryResend', commandId => [commandId], 'rule-email-recovery-resend-confirm');
+  },
+  'click .js-rule-email-mark-sent'(event, t) {
+    event.preventDefault(); event.stopPropagation();
+    t.decide('syncRuleEmailRecoveryResolve', commandId => [{ commandId, decision: 'mark-sent' }], 'rule-email-recovery-mark-sent-confirm');
+  },
+  'click .js-rule-email-drop'(event, t) {
+    event.preventDefault(); event.stopPropagation();
+    t.decide('syncRuleEmailRecoveryResolve', commandId => [{ commandId, decision: 'drop' }], 'rule-email-recovery-drop-confirm');
+  },
+  'change .js-rule-email-status'(event, t) {
+    event.stopPropagation(); t.status.set(event.currentTarget.value); t.load();
+  },
+  'click .js-table-page-action'(event, t) {
+    event.preventDefault(); event.stopPropagation(); t.load(t.result.get().page);
+  },
+  'click .js-table-page-prev, click .js-table-page-next'(event, t) {
+    event.preventDefault(); event.stopPropagation();
+    const result = t.result.get();
+    const page = adjacentPage(result.total, result.page + 1,
+      event.currentTarget.classList.contains('js-table-page-next') ? 1 : -1, result.pageSize) - 1;
+    if (page !== result.page) t.load(page);
+  },
+});
+
+
+// Legacy rule emails, maintainer decision of 2026-09-30: an administrator
+// re-binds (recaptures from the current source) or discards each one.
+const LEGACY_ERRORS = ['access-denied', 'source-changed', 'source-unavailable', 'plan-unavailable',
+  'attempt-exists', 'not-legacy'].map(reason => `rule-email-legacy-${reason}`);
+Template.syncRuleEmailLegacyCommands.onCreated(function () {
+  this.result = new ReactiveVar({ rows: [], total: 0, page: 0, pageSize: 10 });
+  this.error = new ReactiveVar(''); this.busy = new ReactiveVar(false); this.request = 0;
+  this.load = (page = 0) => {
+    const request = ++this.request;
+    Meteor.call('syncRuleEmailLegacyList', page, (error, result) => {
+      if (this.view.isDestroyed || request !== this.request) return;
+      if (error) { this.error.set(TAPi18n.__('rule-email-legacy-unavailable')); return; }
+      this.result.set(result);
+    });
+  };
+  this.act = (method, commandId, confirmKey) => {
+    if (this.busy.get() || !window.confirm(TAPi18n.__(confirmKey))) return;
+    this.busy.set(true); this.error.set('');
+    Meteor.call(method, commandId, error => {
+      if (this.view.isDestroyed) return;
+      this.busy.set(false);
+      if (error) this.error.set(TAPi18n.__(LEGACY_ERRORS.includes(error.error) ? error.error : 'rule-email-legacy-failed'));
+      this.load(this.result.get().page);
+    });
+  };
+  this.load();
+});
+Template.syncRuleEmailLegacyCommands.helpers({
+  error() { return Template.instance().error.get(); },
+  busy() { return Template.instance().busy.get(); },
+  rows() {
+    const t = Template.instance();
+    return t.result.get().rows.map(row => ({ ...row, reasonKey: `rule-email-legacy-reason-${row.reason}`,
+      rebindDisabled: t.busy.get() || !row.rebindable }));
+  },
+  hasPages() { const r = Template.instance().result.get(); return r.total > r.pageSize; },
+  noPrev() { return Template.instance().result.get().page === 0; },
+  noNext() { const r = Template.instance().result.get(); return (r.page + 1) * r.pageSize >= r.total; },
+  pageLabel() { const r = Template.instance().result.get(); return `${r.page + 1} / ${Math.max(1, Math.ceil(r.total / r.pageSize))}`; },
+});
+Template.syncRuleEmailLegacyCommands.events({
+  'click .js-rule-email-legacy-rebind'(event, t) {
+    event.preventDefault(); event.stopPropagation();
+    t.act('syncRuleEmailLegacyRebind', event.currentTarget.closest('tr').dataset.command, 'rule-email-legacy-rebind-confirm');
+  },
+  'click .js-rule-email-legacy-discard'(event, t) {
+    event.preventDefault(); event.stopPropagation();
+    t.act('syncRuleEmailLegacyDiscard', event.currentTarget.closest('tr').dataset.command, 'rule-email-legacy-discard-confirm');
+  },
+  'click .js-rule-email-legacy-prev, click .js-rule-email-legacy-next'(event, t) {
+    event.preventDefault(); event.stopPropagation();
+    const r = t.result.get();
+    t.load(r.page + (event.currentTarget.classList.contains('js-rule-email-legacy-next') ? 1 : -1));
+  },
+});
+
+// List Sync operations that can no longer be replayed (server/lib/listSyncStuck.js):
+// an administrator discards one so the list's Sync can run again.
+// The server refuses with list-sync-stuck-<reason>; each known reason has its
+// own stuck-sync-operation-<reason> text.
+const LIST_SYNC_STUCK_REFUSALS = ['missing', 'not-stuck', 'replayable', 'busy'];
+const listSyncStuckErrorKey = code => {
+  const reason = typeof code === 'string' && code.startsWith('list-sync-stuck-') ? code.slice('list-sync-stuck-'.length) : '';
+  return `stuck-sync-operation-${LIST_SYNC_STUCK_REFUSALS.includes(reason) ? reason : 'failed'}`;
+};
+Template.listSyncStuckOperations.onCreated(function () {
+  this.result = new ReactiveVar({ rows: [], truncated: false });
+  this.error = new ReactiveVar(''); this.busy = new ReactiveVar(false); this.request = 0;
+  this.load = () => {
+    const request = ++this.request;
+    Meteor.call('listSyncStuckOperations', (error, result) => {
+      if (this.view.isDestroyed || request !== this.request) return;
+      if (error) { this.error.set(TAPi18n.__('stuck-sync-operation-unavailable')); return; }
+      this.result.set(result);
+    });
+  };
+  this.discard = (listId, operationId) => {
+    if (this.busy.get() || !window.confirm(TAPi18n.__('stuck-sync-operation-discard-confirm'))) return;
+    this.busy.set(true); this.error.set('');
+    Meteor.call('listSyncStuckDiscard', { listId, operationId }, error => {
+      if (this.view.isDestroyed) return;
+      this.busy.set(false);
+      if (error) this.error.set(TAPi18n.__(listSyncStuckErrorKey(error.error)));
+      this.load();
+    });
+  };
+  this.load();
+});
+Template.listSyncStuckOperations.helpers({
+  error() { return Template.instance().error.get(); },
+  busy() { return Template.instance().busy.get(); },
+  truncated() { return Template.instance().result.get().truncated; },
+  rows() {
+    const t = Template.instance();
+    return t.result.get().rows.map(row => ({ ...row, reasonKey: `stuck-sync-operation-reason-${row.reason || 'unknown'}`,
+      stuckAtText: row.stuckAt ? formatDate(row.stuckAt) : '', replayableNow: row.replayable === true,
+      // Only an operation known NOT to be replayable now can be discarded;
+      // the server checks again under the list lease.
+      discardDisabled: t.busy.get() || row.replayable !== false }));
+  },
+});
+Template.listSyncStuckOperations.events({
+  'click .js-list-sync-stuck-discard'(event, t) {
+    event.preventDefault(); event.stopPropagation();
+    const row = event.currentTarget.closest('tr');
+    t.discard(row.dataset.list, row.dataset.operation);
+  },
+  'click .js-list-sync-stuck-refresh'(event, t) {
+    event.preventDefault(); event.stopPropagation();
+    t.error.set(''); t.load();
+  },
+});
+
+// Board imports that stopped before finishing (server/lib/importRuns.js): an
+// administrator keeps the partial board as it is, or discards it. The server
+// refuses with import-run-<reason>; each known reason has its own
+// interrupted-import-<reason> text.
+const IMPORT_RUN_REFUSALS = ['missing', 'not-interrupted', 'foreign-board', 'scrum-busy'];
+const importRunErrorKey = code => {
+  const reason = typeof code === 'string' && code.startsWith('import-run-') ? code.slice('import-run-'.length) : '';
+  return `interrupted-import-${IMPORT_RUN_REFUSALS.includes(reason) ? reason : 'failed'}`;
+};
+Template.interruptedImports.onCreated(function () {
+  this.result = new ReactiveVar({ rows: [], truncated: false });
+  this.error = new ReactiveVar(''); this.busy = new ReactiveVar(false); this.request = 0;
+  this.load = () => {
+    const request = ++this.request;
+    Meteor.call('importRunsInterrupted', (error, result) => {
+      if (this.view.isDestroyed || request !== this.request) return;
+      if (error) { this.error.set(TAPi18n.__('interrupted-import-unavailable')); return; }
+      this.result.set(result);
+    });
+  };
+  this.act = (method, runId, confirmKey) => {
+    if (this.busy.get() || !window.confirm(TAPi18n.__(confirmKey))) return;
+    this.busy.set(true); this.error.set('');
+    Meteor.call(method, { runId }, error => {
+      if (this.view.isDestroyed) return;
+      this.busy.set(false);
+      if (error) this.error.set(TAPi18n.__(importRunErrorKey(error.error)));
+      this.load();
+    });
+  };
+  this.load();
+});
+Template.interruptedImports.helpers({
+  error() { return Template.instance().error.get(); },
+  busy() { return Template.instance().busy.get(); },
+  truncated() { return Template.instance().result.get().truncated; },
+  rows() {
+    const t = Template.instance();
+    return t.result.get().rows.map(row => ({ ...row,
+      boardLabel: row.boardTitle ? `${row.boardTitle} (${row.boardId})` : row.boardId,
+      startedAtText: row.startedAt ? formatDate(row.startedAt) : '',
+      // A discard that stopped halfway is finished by discarding again.
+      stateKey: row.state === 'discarding' ? 'interrupted-import-state-discarding'
+        : row.interruptedFrom === 'failed' ? 'interrupted-import-state-failed' : 'interrupted-import-state-stopped',
+      // Only a board this run created is discarded; the server checks again.
+      discardDisabled: t.busy.get() || row.foreignBoard,
+      keepDisabled: t.busy.get() || row.state !== 'interrupted' }));
+  },
+});
+Template.interruptedImports.events({
+  'click .js-interrupted-import-discard'(event, t) {
+    event.preventDefault(); event.stopPropagation();
+    t.act('importRunDiscard', event.currentTarget.closest('tr').dataset.run, 'interrupted-import-discard-confirm');
+  },
+  'click .js-interrupted-import-keep'(event, t) {
+    event.preventDefault(); event.stopPropagation();
+    t.act('importRunKeep', event.currentTarget.closest('tr').dataset.run, 'interrupted-import-keep-confirm');
+  },
+  'click .js-interrupted-import-refresh'(event, t) {
+    event.preventDefault(); event.stopPropagation();
+    t.error.set(''); t.load();
+  },
+});

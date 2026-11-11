@@ -1,7 +1,7 @@
 .board-wrapper {
   position: absolute;
-  left: 0;
-  right: 0;
+  inset-inline-start: 0;
+  inset-inline-end: 0;
   top: 0;
   bottom: 0;
   overflow-x: hidden;
@@ -30,14 +30,36 @@
 }
 .board-wrapper .board-canvas {
   position: absolute;
-  left: 0;
-  right: 0;
+  inset-inline-start: 0;
+  inset-inline-end: 0;
   top: 0;
   bottom: 0;
   transition: margin 0.1s;
   overflow-y: auto;
   width: 100%;
   min-width: 100%;
+}
+
+/* #1566: a board's announcement sits above its canvas. The canvas fills the
+   wrapper from its top, so it lay over the banner and its swimlane header
+   took the close button's clicks: the announcement could not be dismissed.
+   While a banner shows, the wrapper is a column - the banner, then the
+   canvas taking the rest - and without one nothing changes. */
+.board-wrapper:has(> .board-announcement) {
+  display: flex;
+  flex-direction: column;
+}
+.board-wrapper > .board-announcement {
+  flex: 0 0 auto;
+  position: relative;
+  z-index: 1;
+}
+.board-wrapper:has(> .board-announcement) > .board-canvas {
+  position: relative;
+  top: auto;
+  bottom: auto;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 /* Ensure horizontal scrollbar is visible for high zoom levels */
@@ -107,17 +129,17 @@
       overflow-y: scroll !important;
     }
 
-    /* Mobile - make all text 2x bigger inside #content by default (icons stay same size) */
+    /* Mobile - keep #content text at normal size (reverted #6426 oversizing) */
     @media screen and (max-width: 800px),
            screen and (max-device-width: 800px),
            screen and (-webkit-min-device-pixel-ratio: 2) and (max-width: 800px),
            screen and (max-width: 800px) and (orientation: portrait),
            screen and (max-width: 800px) and (orientation: landscape) {
       #content {
-        font-size: 2em !important; /* 2x bigger base font size for content area */
+        font-size: 1em !important; /* Normal size (reverted #6426 oversizing) */
       }
 
-      /* Make all text elements 2x bigger */
+      /* Keep all text elements at normal size */
       #content h1, #content h2, #content h3, #content h4, #content h5, #content h6,
       #content p, #content span, #content div, #content a, #content button,
       #content .minicard, #content .list-header-name, #content .board-header-btn,
@@ -186,7 +208,7 @@
 
     /* Fallback for iPhone devices using JavaScript detection */
     .iphone-device #content {
-      font-size: 2em !important; /* 2x bigger base font size for content area */
+      font-size: 1em !important; /* Normal size (reverted #6426 oversizing) */
     }
 
     .iphone-device #content h1, .iphone-device #content h2, .iphone-device #content h3, .iphone-device #content h4, .iphone-device #content h5, .iphone-device #content h6,
@@ -231,9 +253,9 @@
       font-size: 1em !important; /* Keep original icon size */
     }
 
-/* Mobile iPhone: scale card details text and icons to 2x */
+/* Mobile iPhone: keep card details text/icons at normal size (reverted #6426 oversizing) */
 body.mobile-mode.iphone-device .card-details {
-  font-size: 2em !important;
+  font-size: 1em !important;
 }
 body.mobile-mode.iphone-device .card-details .fa,
 body.mobile-mode.iphone-device .card-details .icon,
@@ -276,12 +298,12 @@ body.mobile-mode.iphone-device .card-details .card-details-item-title {
 }
 .board-wrapper .board-canvas .board-overlay {
   position: fixed;
-  left: 0;
-  right: 0;
+  inset-inline-start: 0;
+  inset-inline-end: 0;
   top: 0;
   bottom: 0;
   top: -100px;
-  right: -400px;
+  inset-inline-end: -400px;
   background: #000;
   opacity: 0.33;
   animation: fadeIn 0.2s;
@@ -316,27 +338,39 @@ body.desktop-mode .board-wrapper .board-canvas .board-overlay {
   display: none !important;
   pointer-events: none !important;
 }
-.board-wrapper .board-canvas.is-dragging-active .open-minicard-composer,
+/* #2877 "Wekan swimlane jumps when moving card": while a card is dragged the
+   "+ Add Card" composer link is hidden, but hiding it with `display: none`
+   collapsed the bottom row of EVERY list at drag start (and restored it on
+   drop). With auto-height swimlanes the whole swimlane shrank/grew by the
+   composer's height, so all swimlanes below visibly jumped up and back down.
+   `visibility: hidden` hides the link just the same but keeps its box in the
+   layout, so nothing moves when a drag starts or ends. */
+.board-wrapper .board-canvas.is-dragging-active .open-minicard-composer {
+  visibility: hidden;
+}
+/* Checked cards of a multi-selection ARE the payload being dragged, so
+   removing them from the flow (showing the list as it will look after the
+   drop) is intentional — keep display: none here. */
 .board-wrapper .board-canvas.is-dragging-active .minicard-wrapper.is-checked {
   display: none;
 }
 /* Mobile view styles - applied when isMiniScreen is true (iPhone, etc.) */
 .board-wrapper.mobile-view {
-  width: 100vw !important;
-  max-width: 100vw !important;
-  min-width: 100vw !important;
-  left: 0 !important;
-  right: 0 !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  min-width: 100% !important;
+  inset-inline-start: 0 !important;
+  inset-inline-end: 0 !important;
   overflow-x: hidden !important;
   overflow-y: auto !important;
 }
 
 .board-wrapper.mobile-view .board-canvas {
-  width: 100vw !important;
-  max-width: 100vw !important;
-  min-width: 100vw !important;
-  left: 0 !important;
-  right: 0 !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  min-width: 100% !important;
+  inset-inline-start: 0 !important;
+  inset-inline-end: 0 !important;
   overflow-x: hidden !important;
   overflow-y: auto !important;
 }
@@ -349,34 +383,41 @@ body.desktop-mode .board-wrapper .board-canvas .board-overlay {
   padding: 0;
   overflow-x: hidden !important;
   overflow-y: auto;
-  width: 100vw !important;
-  max-width: 100vw !important;
-  min-width: 100vw !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  min-width: 100% !important;
 }
 
+/* MOBILE MODE, not a narrow window. A swimlane laid out as a BLOCK with
+   `overflow-x: hidden` is the phone board: every list becomes a full-width row,
+   one under the other, and the "add list" form lands under the last list rather
+   than beside it. A phone whose user chose DESKTOP mode asked for the desktop
+   board - lists side by side, scrolled sideways - and was getting the phone one.
+   `.board-wrapper.mobile-view` above says the same thing for the mini-screen
+   class; this says it for the mode the user picked. */
 @media screen and (max-width: 800px),
        screen and (max-device-width: 932px) and (-webkit-min-device-pixel-ratio: 3) {
-  .board-wrapper {
-    width: 100vw !important;
-    max-width: 100vw !important;
-    min-width: 100vw !important;
-    left: 0 !important;
-    right: 0 !important;
+  body.mobile-mode .board-wrapper {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 100% !important;
+    inset-inline-start: 0 !important;
+    inset-inline-end: 0 !important;
     overflow-x: hidden !important;
     overflow-y: auto !important;
   }
 
-  .board-wrapper .board-canvas {
-    width: 100vw !important;
-    max-width: 100vw !important;
-    min-width: 100vw !important;
-    left: 0 !important;
-    right: 0 !important;
+  body.mobile-mode .board-wrapper .board-canvas {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 100% !important;
+    inset-inline-start: 0 !important;
+    inset-inline-end: 0 !important;
     overflow-x: hidden !important;
     overflow-y: auto !important;
   }
 
-  .board-wrapper .board-canvas .swimlane {
+  body.mobile-mode .board-wrapper .board-canvas .swimlane {
     border-bottom: 1px solid #ccc;
     display: block !important;
     flex-direction: column;
@@ -384,9 +425,23 @@ body.desktop-mode .board-wrapper .board-canvas .board-overlay {
     padding: 0;
     overflow-x: hidden !important;
     overflow-y: auto;
-    width: 100vw !important;
-    max-width: 100vw !important;
-    min-width: 100vw !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 100% !important;
+  }
+
+  /* Desktop mode on a narrow window: the board scrolls SIDEWAYS, like a desktop
+     board. Without this the canvas would keep the `overflow-x: hidden` it has
+     from elsewhere and the lists past the right edge would be unreachable. */
+  body:not(.mobile-mode) .board-wrapper,
+  body:not(.mobile-mode) .board-wrapper .board-canvas {
+    overflow-x: auto !important;
+  }
+
+  body:not(.mobile-mode) .board-wrapper .board-canvas .swimlane {
+    display: flex !important;
+    flex-direction: row !important;
+    overflow-x: auto !important;
   }
 }
 .calendar-event-green {
@@ -545,7 +600,7 @@ body.desktop-mode .board-wrapper .board-canvas .board-overlay {
   justify-content: center;
   align-items: center;
   margin: 0;
-  font-size: 18px;
+  font-size: calc(18px * var(--wekan-ui-font-scale, 1));
 }
 .modal-footer {
   display: flex;
@@ -560,8 +615,8 @@ body.desktop-mode .board-wrapper .board-canvas .board-overlay {
   align-items: center;
   position: absolute;
   top: 5px;
-  right: 5px;
-  font-size: 25px;
+  inset-inline-end: 5px;
+  font-size: calc(25px * var(--wekan-ui-font-scale, 1));
   cursor: pointer;
 }
 

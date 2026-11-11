@@ -1,4 +1,6 @@
 import { ReactiveCache } from '/imports/reactiveCache';
+import { Session } from 'meteor/session';
+import { leftMenuData, paneTitle } from '/models/lib/leftMenu';
 import { TAPi18n } from '/imports/i18n';
 import { ALLOWED_WAIT_SPINNERS } from '/config/const';
 import LockoutSettings from '/models/lockoutSettings';
@@ -6,26 +8,18 @@ import AccessibilitySettings from '/models/accessibilitySettings';
 import AccountSettings from '/models/accountSettings';
 import Announcements from '/models/announcements';
 import Settings from '/models/settings';
+// Multitenancy option D: the per-tenant Global Admin rules, shared with the server
+// (docs/Design/Multitenancy/Multitenancy.md).
+import * as tenantAdmin from '/models/lib/tenantAdmin';
+import { FlowRouter } from 'meteor/ostrio:flow-router-extra';
+// The per-pane URLs of the Admin Panel. docs/Features/Admin-Panel/Admin-Panel-URLs.md
+import { adminPath } from '/models/lib/adminUrls';
 import TableVisibilityModeSettings from '/models/tableVisibilityModeSettings';
-// import {
-//   cronMigrationProgress,
-//   cronMigrationStatus,
-//   cronMigrationCurrentStep,
-//   cronMigrationSteps,
-//   cronIsMigrating,
-//   cronJobs,
-//   cronMigrationCurrentStepNum,
-//   cronMigrationTotalSteps,
-//   cronMigrationCurrentAction,
-//   cronMigrationJobProgress,
-//   cronMigrationJobStepNum,
-//   cronMigrationJobTotalSteps,
-//   cronMigrationEtaSeconds,
-//   cronMigrationElapsedSeconds,
-//   cronMigrationCurrentNumber,
-//   cronMigrationCurrentName,
-// } from '/imports/cronMigrationClient';
 import { format } from '/imports/lib/dateUtils';
+import { errorMessage } from '/client/lib/errorMessage';
+const { ALL_MAIL_SERVICES, mailServiceStorageKey } = require('/models/lib/mailServices');
+const instanceFeatures = require('/models/lib/instanceFeatures');
+const { cardFieldRows } = require('/models/lib/cardFieldVisibility');
 
 // Helper functions shared across the template
 function checkField(selector) {
@@ -118,177 +112,66 @@ function cleanAndValidateJSON(content) {
   }
 }
 
-const LIMIT_UNIT_FACTORS = {
-  bytes: 1,
-  mb: 1024 * 1024,
-  gb: 1024 * 1024 * 1024,
-};
-
-const DEFAULT_LIMIT_SETTINGS = {
-  attachmentsUploadMaxBytes: 0,
-  attachmentsDownloadMaxBytes: 0,
-  apiUploadMaxBytes: 50 * 1024 * 1024,
-  apiDownloadMaxBytes: 20 * 1024 * 1024,
-};
-
-function toNonNegativeInteger(value, fallback = 0) {
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed) || parsed < 0) {
-    return fallback;
-  }
-  return parsed;
-}
-
-function normalizeLimitSettings(settingsDoc) {
-  const fromDoc = settingsDoc?.limitSettings || {};
-  const legacyUpload = settingsDoc?.uploadSettings?.maxFileSize;
-
-  const attachmentsUploadMaxBytes = Number.isFinite(fromDoc.attachmentsUploadMaxBytes)
-    ? toNonNegativeInteger(fromDoc.attachmentsUploadMaxBytes, DEFAULT_LIMIT_SETTINGS.attachmentsUploadMaxBytes)
-    : (Number.isFinite(legacyUpload)
-      ? toNonNegativeInteger(legacyUpload, DEFAULT_LIMIT_SETTINGS.attachmentsUploadMaxBytes)
-      : DEFAULT_LIMIT_SETTINGS.attachmentsUploadMaxBytes);
-
-  return {
-    attachmentsUploadMaxBytes,
-    attachmentsDownloadMaxBytes: Number.isFinite(fromDoc.attachmentsDownloadMaxBytes)
-      ? toNonNegativeInteger(fromDoc.attachmentsDownloadMaxBytes, DEFAULT_LIMIT_SETTINGS.attachmentsDownloadMaxBytes)
-      : DEFAULT_LIMIT_SETTINGS.attachmentsDownloadMaxBytes,
-    apiUploadMaxBytes: Number.isFinite(fromDoc.apiUploadMaxBytes)
-      ? toNonNegativeInteger(fromDoc.apiUploadMaxBytes, DEFAULT_LIMIT_SETTINGS.apiUploadMaxBytes)
-      : DEFAULT_LIMIT_SETTINGS.apiUploadMaxBytes,
-    apiDownloadMaxBytes: Number.isFinite(fromDoc.apiDownloadMaxBytes)
-      ? toNonNegativeInteger(fromDoc.apiDownloadMaxBytes, DEFAULT_LIMIT_SETTINGS.apiDownloadMaxBytes)
-      : DEFAULT_LIMIT_SETTINGS.apiDownloadMaxBytes,
-  };
-}
-
-function pickUnitForBytes(bytes) {
-  const safeBytes = toNonNegativeInteger(bytes, 0);
-  if (safeBytes > 0 && safeBytes % LIMIT_UNIT_FACTORS.gb === 0) {
-    return 'gb';
-  }
-  if (safeBytes > 0 && safeBytes % LIMIT_UNIT_FACTORS.mb === 0) {
-    return 'mb';
-  }
-  return 'bytes';
-}
-
-function toDisplayValue(bytes, unit) {
-  const safeBytes = toNonNegativeInteger(bytes, 0);
-  const factor = LIMIT_UNIT_FACTORS[unit] || LIMIT_UNIT_FACTORS.bytes;
-  return safeBytes / factor;
-}
-
-function toBytes(value, unit) {
-  const numericValue = Number.parseFloat(value);
-  if (!Number.isFinite(numericValue) || numericValue < 0) {
-    return null;
-  }
-  const factor = LIMIT_UNIT_FACTORS[unit] || LIMIT_UNIT_FACTORS.bytes;
-  return Math.round(numericValue * factor);
-}
-
-function refreshAttachmentStorageSettings(tpl, showLoading = false) {
-  if (!tpl) {
-    return;
-  }
-
-  if (showLoading) {
-    tpl.loading.set(true);
-  }
-
-  Meteor.call('getAttachmentStorageSettings', (error, settings) => {
-    if (showLoading) {
-      tpl.loading.set(false);
-    }
-
-    if (error || !settings) {
-      if (process.env.DEBUG === 'true') {
-        console.warn('Failed to load attachment storage settings:', error);
-      }
-      return;
-    }
-
-    const normalizedLimits = normalizeLimitSettings(settings);
-    tpl.attachmentStorageSettings.set({
-      ...settings,
-      limitSettings: normalizedLimits,
-    });
-
-    tpl.attachmentLimitUnits.set({
-      attachmentsUploadMaxBytes: pickUnitForBytes(normalizedLimits.attachmentsUploadMaxBytes),
-      attachmentsDownloadMaxBytes: pickUnitForBytes(normalizedLimits.attachmentsDownloadMaxBytes),
-      apiUploadMaxBytes: pickUnitForBytes(normalizedLimits.apiUploadMaxBytes),
-      apiDownloadMaxBytes: pickUnitForBytes(normalizedLimits.apiDownloadMaxBytes),
-    });
-
-    tpl.attachmentLimitEnabled.set({
-      attachmentsUploadMaxBytes: normalizedLimits.attachmentsUploadMaxBytes > 0,
-      attachmentsDownloadMaxBytes: normalizedLimits.attachmentsDownloadMaxBytes > 0,
-      apiUploadMaxBytes: normalizedLimits.apiUploadMaxBytes > 0,
-      apiDownloadMaxBytes: normalizedLimits.apiDownloadMaxBytes > 0,
-    });
-  });
-}
-
-function getLimitUnitOptions(selectedUnit) {
-  return [
-    { value: 'gb', labelKey: 'attachment-limit-unit-gb', selected: selectedUnit === 'gb' },
-    { value: 'mb', labelKey: 'attachment-limit-unit-mb', selected: selectedUnit === 'mb' },
-    { value: 'bytes', labelKey: 'attachment-limit-unit-bytes', selected: selectedUnit === 'bytes' },
-  ];
-}
-
 Template.setting.onCreated(function () {
   this.error = new ReactiveVar('');
   this.loading = new ReactiveVar(false);
   this.forgotPasswordSetting = new ReactiveVar(false);
-  this.generalSetting = new ReactiveVar(true);
-  this.emailSetting = new ReactiveVar(false);
-  this.accountSetting = new ReactiveVar(false);
+  // Version is the FIRST pane, and the one that opens with the page: Admin Panel
+  // opens on Settings, so what an admin sees first is now the version, database
+  // and system information they are usually here to read or to paste into an
+  // issue - not a settings form they did not ask for.
+  this.versionSetting = new ReactiveVar(true);
   this.tableVisibilityModeSetting = new ReactiveVar(false);
+  // Multitenancy option D: an Organization's own admin has no Version pane, so the
+  // page opens on the one pane they do have - Visibility.
+  //
+  // This is decided in an autorun, NOT here: at onCreated the user document has
+  // often not arrived yet, and `getCurrentUser()` is null. Reading it here made
+  // "is this the site admin?" false for EVERYONE for a moment, so the page opened
+  // on Visibility even for the site admin - which is what the Version-page test
+  // caught. The default is what it always was, and it is corrected once - and only
+  // once - when the user is actually known.
+  this.openPaneDecided = false;
+  this.autorun(() => {
+    const user = ReactiveCache.getCurrentUser();
+    if (!user || this.openPaneDecided) return;
+    this.openPaneDecided = true;
+    if (!tenantAdmin.isSiteAdmin(user)) {
+      this.versionSetting.set(false);
+      this.tableVisibilityModeSetting.set(true);
+    }
+  });
+  this.translationSetting = new ReactiveVar(false);
   this.announcementSetting = new ReactiveVar(false);
   this.accessibilitySetting = new ReactiveVar(false);
   this.layoutSetting = new ReactiveVar(false);
   this.webhookSetting = new ReactiveVar(false);
-  this.attachmentSettings = new ReactiveVar(false);
-  this.attachmentStorageSettings = new ReactiveVar(null);
-  this.attachmentLimitUnits = new ReactiveVar({
-    attachmentsUploadMaxBytes: 'mb',
-    attachmentsDownloadMaxBytes: 'mb',
-    apiUploadMaxBytes: 'mb',
-    apiDownloadMaxBytes: 'mb',
+  this.sharedLabelsSetting = new ReactiveVar(false);
+  // The pane the URL asks for. `/settings/global-webhooks` opens Global
+  // Webhooks; the bare `/settings` opens the default, which the route resolved
+  // for us, so this is always a real pane id. Reactive, so following a link to
+  // another pane while this page is already open switches to it - the route
+  // action runs again without re-creating the template.
+  //
+  // It replaces the one-shot `settingsOpenPane` the old page URLs used to hand
+  // over: those - /information, /translation - redirect to a slug now, and the
+  // pane is in the address rather than in a Session value consumed once.
+  this.autorun(() => {
+    const paneId = Session.get('settingsOpenPane');
+    if (!paneId) return;
+    if (openSettingsPane(this, paneId)) {
+      // A URL is an explicit choice, so it wins over the "which pane does this
+      // user open on" default that the site-admin autorun above applies.
+      this.openPaneDecided = true;
+    }
   });
-  this.attachmentLimitEnabled = new ReactiveVar({
-    attachmentsUploadMaxBytes: false,
-    attachmentsDownloadMaxBytes: false,
-    apiUploadMaxBytes: false,
-    apiDownloadMaxBytes: false,
-  });
-  // this.cronSettings = new ReactiveVar(false);
-  // this.migrationErrorsList = new ReactiveVar([]);
-
   Meteor.subscribe('setting');
-  Meteor.subscribe('mailServer');
   Meteor.subscribe('accountSettings');
   Meteor.subscribe('tableVisibilityModeSettings');
   Meteor.subscribe('announcements');
   Meteor.subscribe('accessibilitySettings');
   Meteor.subscribe('globalwebhooks');
   Meteor.subscribe('lockoutSettings');
-  Meteor.subscribe('attachmentStorageSettings');
-
-  // Poll for migration errors
-  // this.errorPollInterval = Meteor.setInterval(() => {
-  //   if (this.cronSettings.get()) {
-  //     Meteor.call('cron.getAllMigrationErrors', 50, (error, result) => {
-  //       if (!error && result) {
-  //         this.migrationErrorsList.set(result);
-  //       }
-  //     });
-  //   }
-  // }, 5000); // Poll every 5 seconds
 });
 
 Template.setting.onDestroyed(function () {
@@ -297,64 +180,105 @@ Template.setting.onDestroyed(function () {
   // }
 });
 
-Template.setting.onRendered(function () {
-  this.previousAttachmentLimitEnabled = null;
+// Open exactly one pane. The URL and the menu click both come through here, so
+// "which ReactiveVar is this pane" is answered once instead of in two places
+// that can disagree. docs/Features/Admin-Panel/Admin-Panel-URLs.md
+const SETTINGS_PANE_VARS = {
+  'version-setting': 'versionSetting',
+  'tableVisibilityMode-setting': 'tableVisibilityModeSetting',
+  'announcement-setting': 'announcementSetting',
+  'accessibility-setting': 'accessibilitySetting',
+  'translation-setting': 'translationSetting',
+  'layout-setting': 'layoutSetting',
+  'webhook-setting': 'webhookSetting',
+  'shared-labels-setting': 'sharedLabelsSetting',
+  // NOT registration-setting / email-setting: the Login and E-mail panes moved
+  // to Admin Panel / People, and naming them here would put them back in the
+  // one place that decides what this page can open.
+};
 
-  this.autorun(() => {
-    const enabledMap = this.attachmentLimitEnabled?.get() || {};
-    const previousMap = this.previousAttachmentLimitEnabled || {};
-    const fields = [
-      'attachmentsUploadMaxBytes',
-      'attachmentsDownloadMaxBytes',
-      'apiUploadMaxBytes',
-      'apiDownloadMaxBytes',
-    ];
+function openSettingsPane(tpl, paneId) {
+  for (const varName of Object.values(SETTINGS_PANE_VARS)) {
+    if (tpl[varName]) tpl[varName].set(false);
+  }
+  const varName = SETTINGS_PANE_VARS[paneId];
+  if (varName && tpl[varName]) tpl[varName].set(true);
+  return !!varName;
+}
 
-    fields.forEach((fieldName) => {
-      const row = this.$(`.attachment-limit-row[data-field="${fieldName}"]`);
-      if (!row.length) {
-        return;
-      }
+// The Settings side menu, as data (docs/Features/All-Boards/Left-Menu.md). Each entry
+// used to be six lines of markup; the pane it opens is its `id`.
+// `emoji: true` reproduces the empty span.emoji-icon this page always rendered
+// before the icon, so the conversion changes no pixel.
+function settingsMenu(user) {
+  const items = [
+    // First, and open by default - see Template.setting.onCreated.
+    { id: 'version-setting', icon: 'fa-info-circle', labelKey: 'info', emoji: true },
+    // Labelled just 'Visibility' now. The pane id and the tableVisibilityMode
+    // key are unchanged, so the 141 translations of the pane's own contents are
+    // untouched; only the menu label points at the new key.
+    { id: 'tableVisibilityMode-setting', icon: 'fa-eye', labelKey: 'visibility', emoji: true },
+    { id: 'announcement-setting', icon: 'fa-bullhorn', labelKey: 'admin-announcement', emoji: true },
+    { id: 'accessibility-setting', icon: 'fa-universal-access', labelKey: 'accessibility', emoji: true },
+    // PWA is an acronym, not a translated string - a literal label, like the
+    // Sandstorm entry in Admin Panel / Attachments.
+    { id: 'translation-setting', icon: 'fa-globe', labelKey: 'translation', emoji: true },
+    { id: 'layout-setting', icon: 'fa-mobile', label: 'PWA', emoji: true },
+    { id: 'webhook-setting', icon: 'fa-globe', labelKey: 'global-webhook', emoji: true },
+    // #2761, #4698: shared label catalogs.
+    { id: 'shared-labels-setting', icon: 'fa-tags', labelKey: 'shared-labels', emoji: true },
+  ];
+  // Multitenancy option D (docs/Design/Multitenancy/Multitenancy.md, D.7/D.9): an
+  // Organization's own admin has ONE pane here - Visibility, for its "Change color"
+  // section, which is that Organization's site theme. Every other pane, and every
+  // other section of Visibility, is instance-wide and site-admin only.
+  if (user !== undefined && !tenantAdmin.isSiteAdmin(user)) {
+    return tenantAdmin.tenantAdminSettingsMenu(items, user);
+  }
+  return items;
+}
 
-      const isEnabled = enabledMap[fieldName] === true;
-      const wasEnabled = previousMap[fieldName];
-
-      if (typeof wasEnabled === 'undefined') {
-        if (isEnabled) {
-          row.show();
-        } else {
-          row.hide();
-        }
-        return;
-      }
-
-      if (isEnabled === wasEnabled) {
-        return;
-      }
-
-      if (isEnabled) {
-        row.stop(true, true).hide().slideDown();
-      } else {
-        row.stop(true, true).slideUp();
-      }
-    });
-
-    this.previousAttachmentLimitEnabled = { ...enabledMap };
-  });
-});
+// Which pane is open. This page keeps one ReactiveVar per pane rather than an
+// active id, so derive the id from them - no behaviour change, and the menu can
+// still highlight exactly one row.
+function activeSettingId(inst) {
+  const panes = [
+    ['versionSetting', 'version-setting'],
+    ['tableVisibilityModeSetting', 'tableVisibilityMode-setting'],
+    ['announcementSetting', 'announcement-setting'],
+    ['accessibilitySetting', 'accessibility-setting'],
+    ['translationSetting', 'translation-setting'],
+    ['layoutSetting', 'layout-setting'],
+    ['webhookSetting', 'webhook-setting'],
+    ['sharedLabelsSetting', 'shared-labels-setting'],
+  ];
+  for (const [varName, id] of panes) {
+    if (inst[varName] && inst[varName].get()) return id;
+  }
+  return '';
+}
 
 Template.setting.helpers({
-  isGeneralSetting() {
+  menuItems() {
     const inst = Template.instance();
-    return inst.generalSetting && inst.generalSetting.get();
+    return leftMenuData(settingsMenu(ReactiveCache.getCurrentUser()),
+      activeSettingId(inst), 'js-setting-menu');
   },
-  isEmailSetting() {
+  // The heading above the pane: the open menu entry's own label
+  // (docs/Features/All-Boards/Left-Menu.md), so every pane on this page has a title, and
+  // the same one the menu row that opened it carries.
+  paneTitleData() {
     const inst = Template.instance();
-    return inst.emailSetting && inst.emailSetting.get();
+    return paneTitle(settingsMenu(ReactiveCache.getCurrentUser()),
+      activeSettingId(inst));
   },
-  isAccountSetting() {
+  isVersionSetting() {
     const inst = Template.instance();
-    return inst.accountSetting && inst.accountSetting.get();
+    return inst.versionSetting && inst.versionSetting.get();
+  },
+  isTranslationSetting() {
+    const inst = Template.instance();
+    return inst.translationSetting && inst.translationSetting.get();
   },
   isTableVisibilityModeSetting() {
     const inst = Template.instance();
@@ -378,204 +302,14 @@ Template.setting.helpers({
     const inst = Template.instance();
     return inst.webhookSetting && inst.webhookSetting.get();
   },
-  isAttachmentSettings() {
+  isSharedLabelsSetting() {
     const inst = Template.instance();
-    return inst.attachmentSettings && inst.attachmentSettings.get();
+    return inst.sharedLabelsSetting && inst.sharedLabelsSetting.get();
   },
-  // isCronSettings() {
-  //   const inst = Template.instance();
-  //   return inst.cronSettings && inst.cronSettings.get();
-  // },
   isLoading() {
     const inst = Template.instance();
     return inst.loading && inst.loading.get();
   },
-
-  // Attachment settings helpers
-  filesystemPath() {
-    return process.env.WRITABLE_PATH || '/data';
-  },
-
-  attachmentsPath() {
-    const writablePath = process.env.WRITABLE_PATH || '/data';
-    return `${writablePath}/attachments`;
-  },
-
-  avatarsPath() {
-    const writablePath = process.env.WRITABLE_PATH || '/data';
-    return `${writablePath}/avatars`;
-  },
-
-  gridfsEnabled() {
-    return process.env.GRIDFS_ENABLED === 'true';
-  },
-
-  s3Enabled() {
-    return process.env.S3_ENABLED === 'true';
-  },
-
-  s3Endpoint() {
-    return process.env.S3_ENDPOINT || '';
-  },
-
-  s3Bucket() {
-    return process.env.S3_BUCKET || '';
-  },
-
-  s3Region() {
-    return process.env.S3_REGION || '';
-  },
-
-  s3SslEnabled() {
-    return process.env.S3_SSL_ENABLED === 'true';
-  },
-
-  s3Port() {
-    return process.env.S3_PORT || 443;
-  },
-
-  attachmentTransferLimitValue(fieldName) {
-    const tpl = Template.instance();
-    const settingsDoc = tpl.attachmentStorageSettings.get();
-    const units = tpl.attachmentLimitUnits.get() || {};
-    const limits = normalizeLimitSettings(settingsDoc);
-    const unit = units[fieldName] || 'bytes';
-    return toDisplayValue(limits[fieldName], unit);
-  },
-
-  attachmentTransferLimitUnitOptions(fieldName) {
-    const tpl = Template.instance();
-    const units = tpl.attachmentLimitUnits.get() || {};
-    const selectedUnit = units[fieldName] || 'bytes';
-    return getLimitUnitOptions(selectedUnit);
-  },
-
-  isAttachmentLimitEnabled(fieldName) {
-    const tpl = Template.instance();
-    const enabledMap = tpl.attachmentLimitEnabled.get() || {};
-    return enabledMap[fieldName] === true;
-  },
-
-  // Cron settings helpers
-  // migrationStatus() {
-  //   return cronMigrationStatus.get() || TAPi18n.__('idle');
-  // },
-  //
-  // migrationProgress() {
-  //   return cronMigrationProgress.get() || 0;
-  // },
-  //
-  // migrationCurrentStep() {
-  //   return cronMigrationCurrentStep.get() || '';
-  // },
-  //
-  // isMigrating() {
-  //   return cronIsMigrating.get() || false;
-  // },
-  //
-  // migrationSteps() {
-  //   return cronMigrationSteps.get() || [];
-  // },
-  //
-  // migrationStepsWithIndex() {
-  //   const steps = cronMigrationSteps.get() || [];
-  //   return steps.map((step, idx) => ({
-  //     ...step,
-  //     index: idx + 1,
-  //   }));
-  // },
-  //
-  // cronJobs() {
-  //   return cronJobs.get() || [];
-  // },
-  //
-  // isCronJobPaused(status) {
-  //   return status === 'paused';
-  // },
-  //
-  // migrationCurrentStepNum() {
-  //   return cronMigrationCurrentStepNum.get() || 0;
-  // },
-  //
-  // migrationTotalSteps() {
-  //   return cronMigrationTotalSteps.get() || 0;
-  // },
-  //
-  // migrationCurrentAction() {
-  //   return cronMigrationCurrentAction.get() || '';
-  // },
-  //
-  // migrationJobProgress() {
-  //   return cronMigrationJobProgress.get() || 0;
-  // },
-  //
-  // migrationJobStepNum() {
-  //   return cronMigrationJobStepNum.get() || 0;
-  // },
-  //
-  // migrationJobTotalSteps() {
-  //   return cronMigrationJobTotalSteps.get() || 0;
-  // },
-  //
-  // migrationEtaSeconds() {
-  //   return cronMigrationEtaSeconds.get();
-  // },
-  //
-  // migrationElapsedSeconds() {
-  //   return cronMigrationElapsedSeconds.get();
-  // },
-  //
-  // migrationNumber() {
-  //   return cronMigrationCurrentNumber.get();
-  // },
-  //
-  // migrationName() {
-  //   return cronMigrationCurrentName.get() || '';
-  // },
-  //
-  // migrationStatusLine() {
-  //   const number = cronMigrationCurrentNumber.get();
-  //   const name = cronMigrationCurrentName.get();
-  //   if (number && name) {
-  //     return `${number} - ${name}`;
-  //   }
-  //   return cronMigrationStatus.get() || TAPi18n.__('idle');
-  // },
-  //
-  // isUpdatingMigrationDropdown() {
-  //   const status = cronMigrationStatus.get() || TAPi18n.__('idle');
-  //   return (
-  //     status && status.startsWith('Updating Select Migration dropdown menu')
-  //   );
-  // },
-  //
-  // migrationErrors() {
-  //   return Template.instance().migrationErrorsList ? Template.instance().migrationErrorsList.get() : [];
-  // },
-  //
-  // hasErrors() {
-  //   const inst = Template.instance();
-  //   const errors = inst.migrationErrorsList ? inst.migrationErrorsList.get() : [];
-  //   return errors && errors.length > 0;
-  // },
-  //
-  // formatDateTime(date) {
-  //   if (!date) return '';
-  //   return format(date, 'YYYY-MM-DD HH:mm:ss');
-  // },
-  //
-  // formatDurationSeconds(seconds) {
-  //   if (seconds === null || seconds === undefined) return '';
-  //   const total = Math.max(0, Math.floor(seconds));
-  //   const hrs = Math.floor(total / 3600);
-  //   const mins = Math.floor((total % 3600) / 60);
-  //   const secs = total % 60;
-  //   const parts = [];
-  //   if (hrs > 0) parts.push(String(hrs).padStart(2, '0'));
-  //   parts.push(String(mins).padStart(2, '0'));
-  //   parts.push(String(secs).padStart(2, '0'));
-  //   return parts.join(':');
-  // },
 
   boards() {
     const ret = ReactiveCache.getBoards(
@@ -593,32 +327,6 @@ Template.setting.helpers({
 });
 
 Template.setting.events({
-  'click a.js-toggle-forgot-password'(event, tpl) {
-    tpl.loading.set(true);
-    const forgotPasswordClosed =
-      ReactiveCache.getCurrentSetting().disableForgotPassword;
-    Settings.update(ReactiveCache.getCurrentSetting()._id, {
-      $set: { disableForgotPassword: !forgotPasswordClosed },
-    });
-    tpl.loading.set(false);
-  },
-  'click a.js-toggle-registration'(event, tpl) {
-    tpl.loading.set(true);
-    const registrationClosed =
-      ReactiveCache.getCurrentSetting().disableRegistration;
-    Settings.update(ReactiveCache.getCurrentSetting()._id, {
-      $set: { disableRegistration: !registrationClosed },
-    });
-    tpl.loading.set(false);
-    if (registrationClosed) {
-      $('.invite-people').slideUp();
-    } else {
-      $('.invite-people').slideDown();
-    }
-  },
-  'click a.js-toggle-tls'() {
-    $('#mail-server-tls').toggleClass('is-checked');
-  },
   'click a.js-toggle-hide-logo'() {
     $('#hide-logo').toggleClass('is-checked');
   },
@@ -628,205 +336,22 @@ Template.setting.events({
   'click a.js-toggle-hide-board-member-list'() {
     $('#hide-board-member-list').toggleClass('is-checked');
   },
-  'click a.js-toggle-display-authentication-method'() {
-    $('#display-authentication-method').toggleClass('is-checked');
-  },
   'click a.js-setting-menu'(event, tpl) {
     const target = $(event.target);
-    if (!target.hasClass('active')) {
-      $('.side-menu li.active').removeClass('active');
-      target.parent().addClass('active');
-      const targetID = target.data('id');
-
-      // Reset all settings to false
-      tpl.forgotPasswordSetting.set(false);
-      tpl.generalSetting.set(false);
-      tpl.emailSetting.set(false);
-      tpl.accountSetting.set(false);
-      tpl.tableVisibilityModeSetting.set(false);
-      tpl.announcementSetting.set(false);
-      tpl.accessibilitySetting.set(false);
-      tpl.layoutSetting.set(false);
-      tpl.webhookSetting.set(false);
-      tpl.attachmentSettings.set(false);
-      // tpl.cronSettings.set(false);
-
-      // Set the selected setting to true
-      if (targetID === 'registration-setting') {
-        tpl.generalSetting.set(true);
-      } else if (targetID === 'email-setting') {
-        tpl.emailSetting.set(true);
-      } else if (targetID === 'account-setting') {
-        tpl.accountSetting.set(true);
-      } else if (targetID === 'tableVisibilityMode-setting') {
-        tpl.tableVisibilityModeSetting.set(true);
-      } else if (targetID === 'announcement-setting') {
-        tpl.announcementSetting.set(true);
-      } else if (targetID === 'accessibility-setting') {
-        tpl.accessibilitySetting.set(true);
-      } else if (targetID === 'layout-setting') {
-        tpl.layoutSetting.set(true);
-      } else if (targetID === 'webhook-setting') {
-        tpl.webhookSetting.set(true);
-      } else if (targetID === 'attachment-settings') {
-        tpl.attachmentSettings.set(true);
-        refreshAttachmentStorageSettings(tpl, true);
-        // Set default sub-menu state for attachment settings
-        console.log('Initializing attachment sub-menu');
-      } // else if (targetID === 'cron-settings') {
-      //   tpl.cronSettings.set(true);
-      //   console.log('Initializing cron sub-menu');
-      // }
-    }
+    if (target.hasClass('active')) return;
+    $('.side-menu li.active').removeClass('active');
+    target.parent().addClass('active');
+    const targetID = target.data('id');
+    openSettingsPane(tpl, targetID);
+    // ...and put it in the address bar, so the pane can be linked, bookmarked
+    // and reached with the back button. Replacing rather than pushing would
+    // make Back leave the Admin Panel instead of returning to the previous
+    // pane. docs/Features/Admin-Panel/Admin-Panel-URLs.md
+    const path = adminPath('settings', targetID);
+    if (path && FlowRouter.current().path !== path) FlowRouter.go(path);
   },
-  'click a.js-toggle-board-choose'(event) {
-    let target = $(event.target);
-    if (!target.hasClass('js-toggle-board-choose')) {
-      target = target.parent();
-    }
-    const checkboxId = target.attr('id');
-    $(`#${checkboxId} .materialCheckBox`).toggleClass('is-checked');
-    $(`#${checkboxId}`).toggleClass('is-checked');
-  },
-  'click button.js-email-invite'(event, tpl) {
-    const emails = $('#email-to-invite')
-      .val()
-      .toLowerCase()
-      .trim()
-      .split('\n')
-      .join(',')
-      .split(',');
-    const boardsToInvite = [];
-    $('.js-toggle-board-choose .materialCheckBox.is-checked').each(function () {
-      boardsToInvite.push($(this).data('id'));
-    });
-    const validEmails = [];
-    emails.forEach((email) => {
-      if (email && /^[a-zA-Z0-9.!#$%&'*+\/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/.test(email.trim())) {
-        validEmails.push(email.trim());
-      }
-    });
-    if (validEmails.length) {
-      tpl.loading.set(true);
-      Meteor.call('sendInvitation', validEmails, boardsToInvite, () => {
-        // if (!err) {
-        //   TODO - show more info to user
-        // }
-        tpl.loading.set(false);
-      });
-    }
-  },
-  'click button.js-save'(event, tpl) {
-    tpl.loading.set(true);
-    $('li').removeClass('has-error');
 
-    try {
-      const host = checkField('#mail-server-host');
-      const port = checkField('#mail-server-port');
-      const username = $('#mail-server-username').val().trim();
-      const password = $('#mail-server-password').val().trim();
-      const from = checkField('#mail-server-from');
-      const tls = $('#mail-server-tls.is-checked').length > 0;
-      Settings.update(ReactiveCache.getCurrentSetting()._id, {
-        $set: {
-          'mailServer.host': host,
-          'mailServer.port': port,
-          'mailServer.username': username,
-          'mailServer.password': password,
-          'mailServer.enableTLS': tls,
-          'mailServer.from': from,
-        },
-      });
-    } catch (e) {
-      return;
-    } finally {
-      tpl.loading.set(false);
-    }
-  },
-  'click button.js-send-smtp-test-email'() {
-    Meteor.call('sendSMTPTestEmail', (err, ret) => {
-      if (!err && ret) {
-        const message = `${TAPi18n.__(ret.message)}: ${ret.email}`;
-        alert(message);
-      } else {
-        const reason = err.reason || '';
-        const message = `${TAPi18n.__(err.error)}\n${reason}`;
-        alert(message);
-      }
-    });
-  },
-  'click button.js-save-layout'(event, tpl) {
-    tpl.loading.set(true);
-    $('li').removeClass('has-error');
 
-    const productName = ($('#product-name').val() || '').trim();
-    const customLoginLogoImageUrl = (
-      $('#custom-login-logo-image-url').val() || ''
-    ).trim();
-    const customLoginLogoLinkUrl = (
-      $('#custom-login-logo-link-url').val() || ''
-    ).trim();
-    const customHelpLinkUrl = ($('#custom-help-link-url').val() || '').trim();
-    const textBelowCustomLoginLogo = (
-      $('#text-below-custom-login-logo').val() || ''
-    ).trim();
-    const automaticLinkedUrlSchemes = (
-      $('#automatic-linked-url-schemes').val() || ''
-    ).trim();
-    const customTopLeftCornerLogoImageUrl = (
-      $('#custom-top-left-corner-logo-image-url').val() || ''
-    ).trim();
-    const customTopLeftCornerLogoLinkUrl = (
-      $('#custom-top-left-corner-logo-link-url').val() || ''
-    ).trim();
-    const customTopLeftCornerLogoHeight = (
-      $('#custom-top-left-corner-logo-height').val() || ''
-    ).trim();
-
-    const oidcBtnText = ($('#oidcBtnTextvalue').val() || '').trim();
-    const mailDomainName = ($('#mailDomainNamevalue').val() || '').trim();
-    const legalNotice = ($('#legalNoticevalue').val() || '').trim();
-    const hideLogoChange = $('input[name=hideLogo]:checked').val() === 'true';
-    const hideCardCounterListChange =
-      $('input[name=hideCardCounterList]:checked').val() === 'true';
-    const hideBoardMemberListChange =
-      $('input[name=hideBoardMemberList]:checked').val() === 'true';
-    const displayAuthenticationMethod =
-      $('input[name=displayAuthenticationMethod]:checked').val() === 'true';
-    const defaultAuthenticationMethod = $('#defaultAuthenticationMethod').val();
-    const spinnerName = ($('#spinnerName').val() || '').trim();
-
-    try {
-      Settings.update(ReactiveCache.getCurrentSetting()._id, {
-        $set: {
-          productName,
-          hideLogo: hideLogoChange,
-          hideCardCounterList: hideCardCounterListChange,
-          hideBoardMemberList: hideBoardMemberListChange,
-          customLoginLogoImageUrl,
-          customLoginLogoLinkUrl,
-          customHelpLinkUrl,
-          textBelowCustomLoginLogo,
-          customTopLeftCornerLogoImageUrl,
-          customTopLeftCornerLogoLinkUrl,
-          customTopLeftCornerLogoHeight,
-          displayAuthenticationMethod,
-          defaultAuthenticationMethod,
-          automaticLinkedUrlSchemes,
-          spinnerName,
-          oidcBtnText,
-          mailDomainName,
-          legalNotice,
-        },
-      });
-    } catch (e) {
-      return;
-    } finally {
-      tpl.loading.set(false);
-    }
-
-    document.title = productName;
-  },
   'click a.js-toggle-support'(event, tpl) {
     tpl.loading.set(true);
     const supportPageEnabled = !$(
@@ -850,23 +375,10 @@ Template.setting.events({
     });
     tpl.loading.set(false);
   },
-  'click button.js-support-save'(event, tpl) {
-    tpl.loading.set(true);
-    const supportTitle = ($('#support-title').val() || '').trim();
-    const supportPageText = ($('#support-page-text').val() || '').trim();
-    try {
-      Settings.update(Settings.findOne()._id, {
-        $set: {
-          supportTitle,
-          supportPageText,
-        },
-      });
-    } catch (e) {
-      return;
-    } finally {
-      tpl.loading.set(false);
-    }
-  },
+  // The Support page's title and text are saved by the URL section's Save now
+  // (Template.tableVisibilityModeSettings): every section of the Visibility pane
+  // ends with one Save, and a second button inside a section was one of the three
+  // that made the pane look like it saved in pieces.
   'click a.js-toggle-custom-head'(event, tpl) {
     tpl.loading.set(true);
     const customHeadEnabled = !$(
@@ -968,404 +480,348 @@ Template.setting.events({
       tpl.loading.set(false);
     }
   },
-
-  // Event handlers for attachment settings
-  'click button.js-test-s3-connection'(event) {
-    event.preventDefault();
-    const secretKey = $('#s3-secret-key').val();
-    if (!secretKey) {
-      alert(TAPi18n.__('s3-secret-key-required'));
-      return;
-    }
-
-    Meteor.call('testS3Connection', { secretKey }, (error, result) => {
-      if (error) {
-        alert(TAPi18n.__('s3-connection-failed') + ': ' + error.reason);
-      } else {
-        alert(TAPi18n.__('s3-connection-success'));
-      }
-    });
-  },
-
-  'click button.js-save-s3-settings'(event) {
-    event.preventDefault();
-    const secretKey = $('#s3-secret-key').val();
-    if (!secretKey) {
-      alert(TAPi18n.__('s3-secret-key-required'));
-      return;
-    }
-
-    Meteor.call('saveS3Settings', { secretKey }, (error, result) => {
-      if (error) {
-        alert(TAPi18n.__('s3-settings-save-failed') + ': ' + error.reason);
-      } else {
-        alert(TAPi18n.__('s3-settings-saved'));
-        $('#s3-secret-key').val(''); // Clear the password field
-      }
-    });
-  },
-
-  'change select.js-attachment-limit-unit'(event, tpl) {
-    const fieldName = event.currentTarget.dataset.field;
-    const selectedUnit = event.currentTarget.value;
-    if (!fieldName || !selectedUnit) {
-      return;
-    }
-
-    const current = tpl.attachmentLimitUnits.get() || {};
-    tpl.attachmentLimitUnits.set({
-      ...current,
-      [fieldName]: selectedUnit,
-    });
-  },
-
-  'click a.js-toggle-attachment-limit'(event, tpl) {
-    event.preventDefault();
-    const fieldName = event.currentTarget.dataset.field;
-    if (!fieldName) {
-      return;
-    }
-
-    const current = tpl.attachmentLimitEnabled.get() || {};
-    tpl.attachmentLimitEnabled.set({
-      ...current,
-      [fieldName]: !current[fieldName],
-    });
-  },
-
-  'click button.js-save-attachment-transfer-limits'(event, tpl) {
-    event.preventDefault();
-
-    const currentSettings = tpl.attachmentStorageSettings.get();
-    if (!currentSettings) {
-      alert(TAPi18n.__('attachment-transfer-limits-save-failed'));
-      return;
-    }
-
-    const currentUnits = tpl.attachmentLimitUnits.get() || {};
-    const enabledMap = tpl.attachmentLimitEnabled.get() || {};
-    const fieldConfig = [
-      { fieldName: 'attachmentsUploadMaxBytes', inputId: '#attachments-upload-limit-value' },
-      { fieldName: 'attachmentsDownloadMaxBytes', inputId: '#attachments-download-limit-value' },
-      { fieldName: 'apiUploadMaxBytes', inputId: '#api-upload-limit-value' },
-      { fieldName: 'apiDownloadMaxBytes', inputId: '#api-download-limit-value' },
-    ];
-
-    const nextLimitSettings = {};
-    for (const field of fieldConfig) {
-      if (!enabledMap[field.fieldName]) {
-        nextLimitSettings[field.fieldName] = 0;
-        continue;
-      }
-
-      const unit = currentUnits[field.fieldName] || 'bytes';
-      const value = $(field.inputId).val();
-      const bytesValue = toBytes(value, unit);
-      if (bytesValue === null || bytesValue <= 0) {
-        alert(TAPi18n.__('attachment-transfer-limits-invalid-value'));
-        return;
-      }
-      nextLimitSettings[field.fieldName] = bytesValue;
-    }
-
-    const nextSettings = {
-      ...currentSettings,
-      uploadSettings: {
-        ...(currentSettings.uploadSettings || {}),
-        // Keep legacy field in sync for backward compatibility.
-        maxFileSize: nextLimitSettings.attachmentsUploadMaxBytes,
-      },
-      limitSettings: {
-        ...(currentSettings.limitSettings || {}),
-        ...nextLimitSettings,
-      },
-    };
-
-    Meteor.call('updateAttachmentStorageSettings', nextSettings, (error) => {
-      if (error) {
-        alert(`${TAPi18n.__('attachment-transfer-limits-save-failed')}: ${error.reason || error.message}`);
-        return;
-      }
-
-      alert(TAPi18n.__('attachment-transfer-limits-saved'));
-      refreshAttachmentStorageSettings(tpl, false);
-    });
-  },
-
-  // Event handlers for cron settings
-  // 'click button.js-start-migration'(event, tpl) {
-  //   event.preventDefault();
-  //   tpl.loading.set(true);
-  //   cronIsMigrating.set(true);
-  //   cronMigrationStatus.set(TAPi18n.__('migration-starting'));
-  //   cronMigrationCurrentAction.set('');
-  //   cronMigrationJobProgress.set(0);
-  //   cronMigrationJobStepNum.set(0);
-  //   cronMigrationJobTotalSteps.set(0);
-  //   const selectedIndex = parseInt($('.js-migration-select').val() || '0', 10);
-  //
-  //   if (selectedIndex === 0) {
-  //     // Run all migrations
-  //     Meteor.call('cron.startAllMigrations', (error, result) => {
-  //       tpl.loading.set(false);
-  //       if (error) {
-  //         alert(TAPi18n.__('migration-start-failed') + ': ' + error.reason);
-  //       } else {
-  //         alert(TAPi18n.__('migration-started'));
-  //       }
-  //     });
-  //   } else {
-  //     // Run specific migration
-  //     Meteor.call(
-  //       'cron.startSpecificMigration',
-  //       selectedIndex - 1,
-  //       (error, result) => {
-  //         tpl.loading.set(false);
-  //         if (error) {
-  //           alert(TAPi18n.__('migration-start-failed') + ': ' + error.reason);
-  //         } else if (result && result.skipped) {
-  //           cronIsMigrating.set(false);
-  //           cronMigrationStatus.set(TAPi18n.__('migration-not-needed'));
-  //           alert(TAPi18n.__('migration-not-needed'));
-  //         } else {
-  //           alert(TAPi18n.__('migration-started'));
-  //         }
-  //       },
-  //     );
-  //   }
-  // },
-  //
-  // 'click button.js-start-all-migrations'(event, tpl) {
-  //   event.preventDefault();
-  //   tpl.loading.set(true);
-  //   Meteor.call('cron.startAllMigrations', (error) => {
-  //     tpl.loading.set(false);
-  //     if (error) {
-  //       alert(TAPi18n.__('migration-start-failed') + ': ' + error.reason);
-  //     } else {
-  //       alert(TAPi18n.__('migration-started'));
-  //     }
-  //   });
-  // },
-  //
-  // 'click button.js-pause-all-migrations'(event, tpl) {
-  //   event.preventDefault();
-  //   tpl.loading.set(true);
-  //   Meteor.call('cron.pauseAllMigrations', (error) => {
-  //     tpl.loading.set(false);
-  //     if (error) {
-  //       alert(TAPi18n.__('migration-pause-failed') + ': ' + error.reason);
-  //     } else {
-  //       alert(TAPi18n.__('migration-paused'));
-  //     }
-  //   });
-  // },
-  //
-  // 'click button.js-stop-all-migrations'(event, tpl) {
-  //   event.preventDefault();
-  //   if (confirm(TAPi18n.__('migration-stop-confirm'))) {
-  //     tpl.loading.set(true);
-  //     Meteor.call('cron.stopAllMigrations', (error) => {
-  //       tpl.loading.set(false);
-  //       if (error) {
-  //         alert(TAPi18n.__('migration-stop-failed') + ': ' + error.reason);
-  //       } else {
-  //         alert(TAPi18n.__('migration-stopped'));
-  //       }
-  //     });
-  //   }
-  // },
-  //
-  // 'click button.js-pause-migration'(event, tpl) {
-  //   event.preventDefault();
-  //   tpl.loading.set(true);
-  //   cronIsMigrating.set(false);
-  //   cronMigrationStatus.set(TAPi18n.__('migration-pausing'));
-  //   Meteor.call('cron.pauseAllMigrations', (error, result) => {
-  //     tpl.loading.set(false);
-  //     if (error) {
-  //       alert(TAPi18n.__('migration-pause-failed') + ': ' + error.reason);
-  //     } else {
-  //       alert(TAPi18n.__('migration-paused'));
-  //     }
-  //   });
-  // },
-  //
-  // 'click button.js-stop-migration'(event, tpl) {
-  //   event.preventDefault();
-  //   if (confirm(TAPi18n.__('migration-stop-confirm'))) {
-  //     tpl.loading.set(true);
-  //     cronIsMigrating.set(false);
-  //     cronMigrationStatus.set(TAPi18n.__('migration-stopping'));
-  //     cronMigrationCurrentAction.set('');
-  //     cronMigrationJobProgress.set(0);
-  //     cronMigrationJobStepNum.set(0);
-  //     cronMigrationJobTotalSteps.set(0);
-  //     Meteor.call('cron.stopAllMigrations', (error, result) => {
-  //       tpl.loading.set(false);
-  //       if (error) {
-  //         alert(TAPi18n.__('migration-stop-failed') + ': ' + error.reason);
-  //       } else {
-  //         alert(TAPi18n.__('migration-stopped'));
-  //       }
-  //     });
-  //   }
-  // },
-  //
-  // 'click button.js-start-job'(event, tpl) {
-  //   event.preventDefault();
-  //   const jobName = $(event.target).data('job-name');
-  //   tpl.loading.set(true);
-  //   Meteor.call('cron.startJob', jobName, (error) => {
-  //     tpl.loading.set(false);
-  //     if (error) {
-  //       alert(TAPi18n.__('cron-job-start-failed') + ': ' + error.reason);
-  //     } else {
-  //       alert(TAPi18n.__('cron-job-started'));
-  //     }
-  //   });
-  // },
-  //
-  // 'click button.js-pause-job'(event, tpl) {
-  //   event.preventDefault();
-  //   const jobName = $(event.target).data('job-name');
-  //   tpl.loading.set(true);
-  //   Meteor.call('cron.pauseJob', jobName, (error) => {
-  //     tpl.loading.set(false);
-  //     if (error) {
-  //       alert(TAPi18n.__('cron-job-pause-failed') + ': ' + error.reason);
-  //     } else {
-  //       alert(TAPi18n.__('cron-job-paused'));
-  //     }
-  //   });
-  // },
-  //
-  // 'click button.js-resume-job'(event, tpl) {
-  //   event.preventDefault();
-  //   const jobName = $(event.target).data('job-name');
-  //   tpl.loading.set(true);
-  //   Meteor.call('cron.resumeJob', jobName, (error) => {
-  //     tpl.loading.set(false);
-  //     if (error) {
-  //       alert(TAPi18n.__('cron-job-resume-failed') + ': ' + error.reason);
-  //     } else {
-  //       alert(TAPi18n.__('cron-job-resumed'));
-  //     }
-  //   });
-  // },
-  //
-  // 'click button.js-delete-job'(event, tpl) {
-  //   event.preventDefault();
-  //   const jobName = $(event.target).data('job-name');
-  //   if (confirm(TAPi18n.__('cron-job-delete-confirm'))) {
-  //     tpl.loading.set(true);
-  //     Meteor.call('cron.removeJob', jobName, (error) => {
-  //       tpl.loading.set(false);
-  //       if (error) {
-  //         alert(TAPi18n.__('cron-job-delete-failed') + ': ' + error.reason);
-  //       } else {
-  //         alert(TAPi18n.__('cron-job-deleted'));
-  //       }
-  //     });
-  //   }
-  // },
-  //
-  // 'click button.js-add-cron-job'(event) {
-  //   event.preventDefault();
-  //   // Placeholder for adding a new cron job (e.g., open a modal)
-  //   alert(TAPi18n.__('add-cron-job-placeholder'));
-  // },
 });
 
-Template.accountSettings.helpers({
+// These three settings moved out of the Accounts pane: allowEmailChange to
+// Email, the other two to Login. The helpers move with them - a radio bound to
+// a helper the host template does not have renders unchecked, i.e. silently
+// shows the wrong value.
+const accountAccessHelpers = {
   allowEmailChange() {
-    return (
-      AccountSettings.findOne('accounts-allowEmailChange')?.booleanValue ||
-      false
-    );
+    return AccountSettings.findOne('accounts-allowEmailChange')?.booleanValue || false;
   },
-
   allowUserNameChange() {
-    return (
-      AccountSettings.findOne('accounts-allowUserNameChange')?.booleanValue ||
-      false
-    );
+    return AccountSettings.findOne('accounts-allowUserNameChange')?.booleanValue || false;
   },
-
   allowUserDelete() {
-    return (
-      AccountSettings.findOne('accounts-allowUserDelete')?.booleanValue || false
-    );
+    return AccountSettings.findOne('accounts-allowUserDelete')?.booleanValue || false;
+  },
+};
+// Both panes show account-access settings, so both need these helpers.
+Template.general.helpers(accountAccessHelpers);
+Template.general.helpers({
+  isAuthenticationSection(section) {
+    return ReactiveCache.getCurrentUser()?.isAdmin === true &&
+      (Template.currentData()?.section || 'login') === section;
   },
 });
+Template.email.helpers(accountAccessHelpers);
+Template.setting.helpers(accountAccessHelpers);
 
-Template.accountSettings.events({
-  'click button.js-accounts-save'() {
-    const allowEmailChange =
-      $('input[name=allowEmailChange]:checked').val() === 'true';
-    const allowUserNameChange =
-      $('input[name=allowUserNameChange]:checked').val() === 'true';
-    const allowUserDelete =
-      $('input[name=allowUserDelete]:checked').val() === 'true';
-    AccountSettings.update('accounts-allowEmailChange', {
-      $set: { booleanValue: allowEmailChange },
-    });
-    AccountSettings.update('accounts-allowUserNameChange', {
-      $set: { booleanValue: allowUserNameChange },
-    });
-    AccountSettings.update('accounts-allowUserDelete', {
-      $set: { booleanValue: allowUserDelete },
-    });
-  },
-  'click button.js-all-boards-hide-activities'() {
-    Meteor.call('setAllBoardsHideActivities', (err, ret) => {
-      if (!err && ret) {
-        if (ret === true) {
-          const message = `${TAPi18n.__(
-            'now-activities-of-all-boards-are-hidden',
-          )}`;
-          alert(message);
-        }
-      } else {
-        const reason = err.reason || '';
-        const message = `${TAPi18n.__(err.error)}\n${reason}`;
-        alert(message);
-      }
-    });
-  },
+// The accountSettings TEMPLATE was removed when its three settings moved to Email
+// and Login, but this handler was left registered on it. Template.accountSettings
+// is undefined, so the module threw at load - and because it threw, the rest of
+// the client module graph never ran: passwordInput.jade was never registered and
+// the password fields vanished from /sign-in and /sign-up.
+//
+// The button lives in the Login pane, which Template.setting renders, so the
+// handler belongs there.
+Template.setting.events({
+
+});
+
+// #6736: the pilot users' usernames are not published (the flag is on each
+// user, visible only to that user), so the site admin's page asks for them.
+Template.tableVisibilityModeSettings.onCreated(function () {
+  this.featurePilotUsernames = new ReactiveVar('');
+  if (tenantAdmin.isSiteAdmin(ReactiveCache.getCurrentUser())) {
+    Meteor.callAsync('getFeaturePilotUsernames')
+      .then(names => this.featurePilotUsernames.set(names.join(', ')))
+      .catch(() => {});
+  }
 });
 
 Template.tableVisibilityModeSettings.helpers({
+  featureRows() {
+    return instanceFeatures.featureRows(ReactiveCache.getCurrentSetting());
+  },
+  optionalApiRows() {
+    const setting = ReactiveCache.getCurrentSetting();
+    const { OPTIONAL_APIS, isOptionalApiEnabled } = require('/models/lib/optionalApis');
+    return OPTIONAL_APIS.map(api => ({ ...api, enabled: isOptionalApiEnabled(setting, api.key) }));
+  },
+  // The card fields every board shows, with Board Settings / Card's own icons
+  // and labels; ticks only, no order. models/lib/cardFieldVisibility.js
+  cardFieldRows() {
+    return cardFieldRows(ReactiveCache.getCurrentSetting()).map(row => ({
+      ...row,
+      title: row.label.map(key => TAPi18n.__(key)).join(row.labelSeparator),
+    }));
+  },
+  featurePilotUsernames() {
+    return Template.instance().featurePilotUsernames.get();
+  },
+  isGlobalDateFormat(format) {
+    return (ReactiveCache.getCurrentSetting()?.globalDateFormat || 'YYYY-MM-DD') === format;
+  },
+  // Multitenancy option D: every group of this pane except "Change color" writes
+  // the INSTANCE settings, so only the site admin is shown them.
+  isSiteAdmin() {
+    return tenantAdmin.isSiteAdmin(ReactiveCache.getCurrentUser());
+  },
   allowPrivateOnly() {
     return TableVisibilityModeSettings.findOne(
       'tableVisibilityMode-allowPrivateOnly',
     ).booleanValue;
   },
+  boardCreationAdminOnly() {
+    return TableVisibilityModeSettings.findOne(
+      'tableVisibilityMode-boardCreationAdminOnly',
+    )?.booleanValue;
+  },
+  allowInstanceEditing() {
+    return TableVisibilityModeSettings.findOne(
+      'tableVisibilityMode-allowInstanceEditing',
+    )?.booleanValue;
+  },
 });
 
+// Admin Panel / Settings / Visibility saves per SECTION: All Boards, URL, Product
+// name, Logo each end with their own Save, above the rule that closes the section.
+// Every handler writes only its own fields, so saving one group can never carry
+// half-finished edits from another - which is what one Save for the whole pane did.
+//
+// Each field is written only when its input is actually RENDERED (`$(sel).length`,
+// `!== undefined` for a radio). That guard is not decoration: a read of an absent
+// input returns '' or undefined, and writing that would blank a stored setting or
+// silently turn it off. It is the bug this pane hit every time a field moved here.
+const visibilityText = sel => ($(sel).val() || '').trim();
+
+// Collect the text/textarea fields of a section that are on screen.
+function visibilityTextFields(pairs) {
+  const $set = {};
+  for (const [sel, key] of pairs) {
+    if ($(sel).length) {
+      $set[key] = visibilityText(sel);
+    }
+  }
+  return $set;
+}
+
+function saveVisibilitySettings($set) {
+  if (Object.keys($set).length) {
+    Settings.update(ReactiveCache.getCurrentSetting()._id, { $set });
+  }
+}
+
 Template.tableVisibilityModeSettings.events({
-  'click button.js-tableVisibilityMode-save'() {
-    const allowPrivateOnly =
-      $('input[name=allowPrivateOnly]:checked').val() === 'true';
-    TableVisibilityModeSettings.update('tableVisibilityMode-allowPrivateOnly', {
-      $set: { booleanValue: allowPrivateOnly },
+  async 'change input.js-site-logo-upload'(event, tpl) {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    if (!file) return;
+    const status = tpl.find('.js-site-logo-upload-status');
+    const kind = input.dataset.kind;
+    input.value = '';
+    if (file.size > 2 * 1024 * 1024 || !['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(file.type)) {
+      if (status) status.textContent = 'Upload a PNG, JPEG, GIF or WebP image smaller than 2 MB';
+      return;
+    }
+    if (status) status.textContent = TAPi18n.__('upload') + '…';
+    try {
+      const base64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onerror = () => reject(reader.error);
+        reader.onload = () => resolve(String(reader.result).split(',')[1]);
+        reader.readAsDataURL(file);
+      });
+      const url = await Meteor.callAsync('uploadSiteLogo', kind, base64);
+      const field = tpl.find(kind === 'login' ? '#custom-login-logo-image-url' : '#custom-top-left-corner-logo-image-url');
+      if (field) field.value = url;
+      if (status) status.textContent = TAPi18n.__('save');
+    } catch (error) {
+      if (status) status.textContent = error.reason || error.message || 'Upload failed';
+    }
+  },
+  // ── All Boards ────────────────────────────────────────────────────────────
+  // Boards visibility, board activities, the two All Boards lists and the spinner.
+  //
+  // 'hide board activities' used to be a button that bulk updated
+  // showActivities:false on EVERY board document - which could not be undone (the
+  // per-board values were overwritten and gone) and did nothing for boards created
+  // later. It is one global setting, read once by the activity feed, so turning it
+  // off restores every board's own value.
+  // Tick a box without saving: the group's own Save writes them together, the way
+  // the Yes/No pairs these replace behaved.
+  'click a.js-toggle-all-boards-hide, click a.js-toggle-hide-logo, click a.js-toggle-date-format, click a.js-toggle-feature'(event) {
+    event.preventDefault();
+    $(event.currentTarget).find('.materialCheckBox').toggleClass('is-checked');
+  },
+
+  // ── Features (#6736) ──────────────────────────────────────────────────────
+  // Every feature row's tick, the two policies and the pilot users, in one
+  // server method that validates them against the catalog.
+  // #2460
+  async 'click .js-toggle-sqrl'(event, instance) {
+    event.preventDefault();
+    try {
+      await Meteor.callAsync('saveSqrlEnabled', !instance.$('#sqrl-enabled').hasClass('is-checked'));
+    } catch (error) {
+      console.error(error);
+    }
+  },
+  // #4198
+  async 'click .js-toggle-activity-pub'(event, instance) {
+    event.preventDefault();
+    try {
+      await Meteor.callAsync('saveActivityPubEnabled', !instance.$('#activity-pub-enabled').hasClass('is-checked'));
+    } catch (error) {
+      console.error(error);
+    }
+  },
+  // #2217: saved at once, like a tick that changes nothing by itself.
+  async 'click .js-toggle-rules-read-only'(event, instance) {
+    event.preventDefault();
+    const box = instance.$('#rules-read-only-for-members');
+    try {
+      await Meteor.callAsync('saveRulesReadOnlyForMembers', !box.hasClass('is-checked'));
+    } catch (error) {
+      console.error(error);
+    }
+  },
+  async 'click button.js-optional-apis-save'(event, instance) {
+    event.preventDefault();
+    const states = {};
+    instance.$('.js-optional-api-row').each((i, row) => {
+      states[row.dataset.api] = $(row).find('.js-optional-api-enabled').hasClass('is-checked');
+    });
+    const status = instance.$('.js-optional-apis-status');
+    try {
+      await Meteor.callAsync('saveOptionalApis', states);
+      status.text(TAPi18n.__('feature-saved'));
+    } catch (error) {
+      status.text(error.reason || error.message);
+    }
+  },
+  async 'click button.js-visibility-features-save'(event, instance) {
+    event.preventDefault();
+    const states = {};
+    instance.$('.js-feature-row').each((i, row) => {
+      states[row.dataset.feature] = $(row).find('.js-feature-enabled').hasClass('is-checked');
+    });
+    const cardFields = {};
+    instance.$('.js-card-field-row').each((i, row) => {
+      cardFields[row.dataset.cardField] = $(row).find('.js-card-field-enabled').hasClass('is-checked');
+    });
+    const status = instance.$('.js-visibility-features-status');
+    try {
+      const result = await Meteor.callAsync('saveInstanceFeatures', {
+        states,
+        approvalRequired: instance.$('#feature-approval-required').hasClass('is-checked'),
+        previewAdmins: instance.$('#feature-preview-admins').hasClass('is-checked'),
+        pilotUsernames: instance.$('#feature-pilot-users').val() || '',
+        cardFields,
+      });
+      const names = await Meteor.callAsync('getFeaturePilotUsernames');
+      instance.featurePilotUsernames.set(names.join(', '));
+      status.text(result.unknownUsernames.length
+        ? `${TAPi18n.__('feature-pilot-users-unknown')} ${result.unknownUsernames.join(', ')}`
+        : TAPi18n.__('feature-saved'));
+    } catch (error) {
+      status.text(error.reason || error.message);
+    }
+  },
+
+  'click button.js-visibility-date-save'(event, instance) {
+    saveVisibilitySettings({
+      hideDateFormat: instance.$('#global-date-format-enabled').hasClass('is-checked'),
+      globalDateFormat: instance.$('#global-date-format').val(),
     });
   },
-  'click button.js-all-boards-hide-activities'() {
-    Meteor.call('setAllBoardsHideActivities', (err, ret) => {
-      if (!err && ret) {
-        if (ret === true) {
-          const message = `${TAPi18n.__(
-            'now-activities-of-all-boards-are-hidden',
-          )}`;
-          alert(message);
-        }
-      } else {
-        const reason = err.reason || '';
-        const message = `${TAPi18n.__(err.error)}\n${reason}`;
-        alert(message);
+
+  'click button.js-visibility-all-boards-save'() {
+    // Boards visibility lives in its own collection, so it is a separate write.
+    // Each setting is one checkbox now: ticked = hidden. A checkbox that is not on
+    // screen is left alone rather than written as false - the same guard the rest of
+    // this pane uses, and the reason a pane that hid a field never blanked it.
+    if ($('#accounts-allowPrivateOnly').length) {
+      TableVisibilityModeSettings.update('tableVisibilityMode-allowPrivateOnly', {
+        $set: { booleanValue: $('#accounts-allowPrivateOnly').hasClass('is-checked') },
+      });
+    }
+    if ($('#accounts-boardCreationAdminOnly').length) {
+      TableVisibilityModeSettings.update('tableVisibilityMode-boardCreationAdminOnly', {
+        $set: { booleanValue: $('#accounts-boardCreationAdminOnly').hasClass('is-checked') },
+      });
+    }
+    if ($('#accounts-allowInstanceEditing').length) {
+      TableVisibilityModeSettings.update('tableVisibilityMode-allowInstanceEditing', {
+        $set: { booleanValue: $('#accounts-allowInstanceEditing').hasClass('is-checked') },
+      });
+    }
+    const $set = {};
+    for (const [selector, key] of [
+      ['#hide-board-activities', 'hideBoardActivitiesOnAllBoards'],
+      ['#hide-card-counter-list', 'hideCardCounterList'],
+      ['#hide-board-member-list', 'hideBoardMemberList'],
+    ]) {
+      if ($(selector).length) {
+        $set[key] = $(selector).hasClass('is-checked');
       }
-    });
+    }
+    if ($('#spinnerName').length) {
+      $set.spinnerName = visibilityText('#spinnerName');
+    }
+    if ($('#custom-private-board-desc').length) {
+      $set.customPrivateBoardDesc = visibilityText('#custom-private-board-desc');
+    }
+    if ($('#custom-public-board-desc').length) {
+      $set.customPublicBoardDesc = visibilityText('#custom-public-board-desc');
+    }
+    saveVisibilitySettings($set);
+  },
+
+  // ── URL ───────────────────────────────────────────────────────────────────
+  // The Support page's title and text (its two checkboxes save on click, above),
+  // the help link, the legal notice and the URL schemes that are auto-linked.
+  'click button.js-visibility-url-save'() {
+    saveVisibilitySettings(visibilityTextFields([
+      ['#support-title', 'supportTitle'],
+      ['#support-page-text', 'supportPageText'],
+      ['#custom-help-link-url', 'customHelpLinkUrl'],
+      ['#legalNoticevalue', 'legalNotice'],
+      ['#automatic-linked-url-schemes', 'automaticLinkedUrlSchemes'],
+    ]));
+  },
+
+  // ── External issue tracker autolink (wekan/wekan#3069) ─────────────────────
+  'click button.js-visibility-external-link-pattern-save'() {
+    saveVisibilitySettings(visibilityTextFields([
+      ['#external-link-pattern-prefix', 'externalLinkPatternPrefix'],
+      ['#external-link-pattern-url', 'externalLinkPatternUrl'],
+      ['#external-link-rules', 'externalLinkRules'],
+      ['#external-link-identifier-aliases', 'externalLinkIdentifierAliases'],
+    ]));
+  },
+
+  // ── Product name ──────────────────────────────────────────────────────────
+  'click button.js-visibility-product-name-save'() {
+    if (!$('#product-name').length) {
+      return;
+    }
+    const productName = visibilityText('#product-name');
+    // The browser tab says the product name, so it changes with the setting rather
+    // than at the next full page load.
+    document.title = productName;
+    saveVisibilitySettings({ productName });
+  },
+
+  // ── Logo ──────────────────────────────────────────────────────────────────
+  'click button.js-visibility-logo-save'() {
+    const $set = visibilityTextFields([
+      ['#custom-login-logo-image-url', 'customLoginLogoImageUrl'],
+      ['#custom-login-logo-link-url', 'customLoginLogoLinkUrl'],
+      ['#text-below-custom-login-logo', 'textBelowCustomLoginLogo'],
+      ['#login-background-color', 'loginBackgroundColor'],
+      ['#custom-top-left-corner-logo-image-url', 'customTopLeftCornerLogoImageUrl'],
+      ['#custom-top-left-corner-logo-link-url', 'customTopLeftCornerLogoLinkUrl'],
+      ['#custom-top-left-corner-logo-height', 'customTopLeftCornerLogoHeight'],
+    ]);
+    // One checkbox now: ticked = hidden. Skipped when it is not on screen, so a
+    // pane that does not render it can never blank the stored value.
+    if ($('#hide-logo').length) {
+      $set.hideLogo = $('#hide-logo').hasClass('is-checked');
+    }
+    saveVisibilitySettings($set);
   },
 });
 
@@ -1399,7 +855,7 @@ Template.announcementSettings.events({
         $('.admin-announcement').slideDown();
       }
     } catch (error) {
-      alert(error?.reason || error?.message || 'Failed to update announcement setting');
+      alert(errorMessage(error));
     } finally {
       tpl.loading.set(false);
     }
@@ -1416,7 +872,7 @@ Template.announcementSettings.events({
         $set: { body: message },
       });
     } catch (error) {
-      alert(error?.reason || error?.message || 'Failed to save announcement');
+      alert(errorMessage(error));
     }
   },
 });
@@ -1467,31 +923,12 @@ Template.accessibilitySettings.events({
   },
 });
 
-Template.selectAuthenticationMethod.onCreated(function () {
-  this.authenticationMethods = new ReactiveVar([]);
-
-  Meteor.call('getAuthenticationsEnabled', (_, result) => {
-    if (result) {
-      // TODO : add a management of different languages
-      // (ex {value: ldap, text: TAPi18n.__('ldap', {}, T9n.getLanguage() || 'en')})
-      this.authenticationMethods.set([
-        { value: 'password' },
-        // Gets only the authentication methods availables
-        ...Object.entries(result)
-          .filter((e) => e[1])
-          .map((e) => ({ value: e[0] })),
-      ]);
-    }
-  });
-});
-
-Template.selectAuthenticationMethod.helpers({
-  authentications() {
-    return Template.instance().authenticationMethods.get();
-  },
-  isSelected(match) {
-    return Template.instance().data.authenticationMethod === match;
-  },
+Template.selectSpinnerName.onCreated(function () {
+  // What the PREVIEW shows. Kept separate from the `selected` attribute of the
+  // options - which still comes from the saved setting - so changing the dropdown
+  // re-renders only the preview, not the option list under the pointer.
+  this.previewName = new ReactiveVar(
+    (this.data && this.data.spinnerName) || ALLOWED_WAIT_SPINNERS[0]);
 });
 
 Template.selectSpinnerName.helpers({
@@ -1500,5 +937,547 @@ Template.selectSpinnerName.helpers({
   },
   isSelected(match) {
     return Template.instance().data.spinnerName === match;
+  },
+  // 'Cube-Grid' -> 'spinnerCubeGrid'. The same mapping client/lib/spinner.js uses
+  // for the real thing, so the preview is the spinner that will actually run.
+  previewTemplate() {
+    const name = String(Template.instance().previewName.get() || '');
+    return `spinner${name.replace(/-/g, '')}`;
+  },
+});
+
+Template.selectSpinnerName.events({
+  'change #spinnerName'(event, templateInstance) {
+    templateInstance.previewName.set(event.currentTarget.value);
+  },
+});
+
+// The Login pane's own behaviour. These handlers were registered on
+// Template.setting, which is fine only while Settings renders the pane. Admin Panel /
+// People renders it now, and Blaze delivers an event to the handlers of the template
+// the element is IN - so on Template.setting they would simply never fire. A pane
+// owning its own handlers works wherever the pane is rendered.
+// The Login pane's handlers below flip a setting and show the pane's spinner while
+// they do it. They were moved onto this template from Template.setting when Admin
+// Panel / People started rendering the pane - but the state they poke, `loading`,
+// stayed behind on Template.setting, so every one of them threw
+//   TypeError: can't access property "set", tpl.loading is undefined
+// and the click did nothing at all. A handler's state has to live on the template
+// the handler is registered on: Blaze hands it THAT template's instance.
+Template.general.onCreated(function () {
+  this.loading = new ReactiveVar(false);
+});
+
+Template.general.events({
+  'click a.js-toggle-forgot-password'(event, tpl) {
+    tpl.loading.set(true);
+    const forgotPasswordClosed =
+      ReactiveCache.getCurrentSetting().disableForgotPassword;
+    Settings.update(ReactiveCache.getCurrentSetting()._id, {
+      $set: { disableForgotPassword: !forgotPasswordClosed },
+    });
+    tpl.loading.set(false);
+  },
+  'click a.js-toggle-registration'(event, tpl) {
+    tpl.loading.set(true);
+    const registrationClosed =
+      ReactiveCache.getCurrentSetting().disableRegistration;
+    Settings.update(ReactiveCache.getCurrentSetting()._id, {
+      $set: { disableRegistration: !registrationClosed },
+    });
+    tpl.loading.set(false);
+    if (registrationClosed) {
+      $('.invite-people').slideUp();
+    } else {
+      $('.invite-people').slideDown();
+    }
+  },
+  // The three settings that were Yes/No radios saved by the button at the bottom of
+  // the pane. They are checkboxes in the "Login: Allow" group now, and a checkbox
+  // that has to be confirmed by a Save button somewhere below it is a checkbox you
+  // think you have already set - so each writes on click, like the two above.
+  'click a.js-toggle-username-change'(event, tpl) {
+    tpl.loading.set(true);
+    const allowed =
+      AccountSettings.findOne('accounts-allowUserNameChange')?.booleanValue || false;
+    AccountSettings.update('accounts-allowUserNameChange', {
+      $set: { booleanValue: !allowed },
+    });
+    tpl.loading.set(false);
+  },
+  'click a.js-toggle-user-delete'(event, tpl) {
+    tpl.loading.set(true);
+    const allowed =
+      AccountSettings.findOne('accounts-allowUserDelete')?.booleanValue || false;
+    AccountSettings.update('accounts-allowUserDelete', {
+      $set: { booleanValue: !allowed },
+    });
+    tpl.loading.set(false);
+  },
+  'click a.js-toggle-display-authentication-method'(event, tpl) {
+    tpl.loading.set(true);
+    const shown = ReactiveCache.getCurrentSetting().displayAuthenticationMethod;
+    Settings.update(ReactiveCache.getCurrentSetting()._id, {
+      $set: { displayAuthenticationMethod: !shown },
+    });
+    tpl.loading.set(false);
+  },
+  // #6116's "add board members from the same Org/Team only" is two settings now,
+  // one per kind, each shown in the pane it is about - Admin Panel / People /
+  // Organizations and / Teams. Their handlers live there, with the checkboxes.
+  'click a.js-toggle-board-choose'(event) {
+    let target = $(event.target);
+    if (!target.hasClass('js-toggle-board-choose')) {
+      target = target.parent();
+    }
+    const checkboxId = target.attr('id');
+    $(`#${checkboxId} .materialCheckBox`).toggleClass('is-checked');
+    $(`#${checkboxId}`).toggleClass('is-checked');
+  },
+  'click button.js-email-invite'(event, tpl) {
+    const emails = $('#email-to-invite')
+      .val()
+      .toLowerCase()
+      .trim()
+      .split('\n')
+      .join(',')
+      .split(',');
+    const boardsToInvite = [];
+    $('.js-toggle-board-choose .materialCheckBox.is-checked').each(function () {
+      boardsToInvite.push($(this).data('id'));
+    });
+    const validEmails = [];
+    emails.forEach((email) => {
+      if (email && /^[a-zA-Z0-9.!#$%&'*+\/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/.test(email.trim())) {
+        validEmails.push(email.trim());
+      }
+    });
+    if (validEmails.length) {
+      tpl.loading.set(true);
+      Meteor.call('sendInvitation', validEmails, boardsToInvite, (err) => {
+        tpl.loading.set(false);
+        // #5707: this call used to ignore both the error and the result, so
+        // an admin who hit a mail-send failure (e.g. SMTP not configured) saw
+        // nothing at all — the button just stopped loading with no
+        // indication anything had gone wrong. Surface success/failure the
+        // same way the member "Invite People" popup already does
+        // (client/components/users/userHeader.js).
+        const divInfos = document.getElementById('invite-people-infos');
+        if (divInfos) {
+          divInfos.innerHTML = err
+            ? `<span style='color: red'>${TAPi18n.__('invite-people-error')}</span>`
+            : `<span style='color: green'>${TAPi18n.__(
+                'invite-people-success',
+              )}</span>`;
+        }
+      });
+    }
+  },
+  // Login pane: the OIDC button text at the bottom. The allow-toggles above save on
+  // click, and the default authentication method is DEFAULT_AUTHENTICATION_METHOD
+  // in the login settings form, saved with saveAuthConfigSettings - which never
+  // writes an empty value over the stored method (server/models/settings.js
+  // applyDefaultAuthenticationMethod falls back to it).
+  'click button.js-account-access-save'() {
+    // Written only when its input is actually on screen.
+    const $settings = {};
+    if ($('#oidcBtnTextvalue').length) {
+      $settings.oidcBtnText = ($('#oidcBtnTextvalue').val() || '').trim();
+    }
+    if (Object.keys($settings).length) {
+      Settings.update(ReactiveCache.getCurrentSetting()._id, { $set: $settings });
+    }
+  },
+});
+
+// Admin Panel -> OAuth login providers + Passwordless (Login pane). The same
+// shape as the LDAP section above: non-secret fields come from the published
+// `currentSetting.oauthProviders.<key>.*`, the secret NEVER does (only the
+// boolean "a secret is set" comes back from getOauthProviderConfigSources),
+// and "which source is active" is asked of the server, which alone can see
+// the OAUTH_* env vars. The provider catalog is models/lib/oauthProviders.js;
+// the fallback below carries the same keys so this pane renders even while
+// that module is absent.
+const FALLBACK_OAUTH_PROVIDERS = [
+  { key: 'google', envPrefix: 'OAUTH_GOOGLE', idVar: 'OAUTH_GOOGLE_CLIENT_ID', secretVar: 'OAUTH_GOOGLE_SECRET', labelKey: 'oauth-provider-google' },
+  { key: 'github', envPrefix: 'OAUTH_GITHUB', idVar: 'OAUTH_GITHUB_CLIENT_ID', secretVar: 'OAUTH_GITHUB_SECRET', labelKey: 'oauth-provider-github' },
+  { key: 'facebook', envPrefix: 'OAUTH_FACEBOOK', idVar: 'OAUTH_FACEBOOK_APP_ID', secretVar: 'OAUTH_FACEBOOK_SECRET', labelKey: 'oauth-provider-facebook' },
+  { key: 'twitter', envPrefix: 'OAUTH_TWITTER', idVar: 'OAUTH_TWITTER_CONSUMER_KEY', secretVar: 'OAUTH_TWITTER_SECRET', labelKey: 'oauth-provider-twitter' },
+  { key: 'meteor-developer', envPrefix: 'OAUTH_METEOR_DEVELOPER', idVar: 'OAUTH_METEOR_DEVELOPER_CLIENT_ID', secretVar: 'OAUTH_METEOR_DEVELOPER_SECRET', labelKey: 'oauth-provider-meteor-developer' },
+  { key: 'weibo', envPrefix: 'OAUTH_WEIBO', idVar: 'OAUTH_WEIBO_CLIENT_ID', secretVar: 'OAUTH_WEIBO_SECRET', labelKey: 'oauth-provider-weibo' },
+  { key: 'meetup', envPrefix: 'OAUTH_MEETUP', idVar: 'OAUTH_MEETUP_CLIENT_ID', secretVar: 'OAUTH_MEETUP_SECRET', labelKey: 'oauth-provider-meetup' },
+];
+function oauthProviderCatalog() {
+  try {
+    const { OAUTH_PROVIDERS } = require('/models/lib/oauthProviders');
+    if (Array.isArray(OAUTH_PROVIDERS) && OAUTH_PROVIDERS.length) return OAUTH_PROVIDERS;
+  } catch (e) {
+    // catalog module absent: use the fallback
+  }
+  return FALLBACK_OAUTH_PROVIDERS;
+}
+const OAUTH_SHARED_ENV_VARS = {
+  loginStyle: 'OAUTH_PROVIDERS_LOGIN_STYLE',
+  mergeExistingUsers: 'OAUTH_PROVIDERS_MERGE_EXISTING_USERS',
+  allowedEmailDomains: 'OAUTH_PROVIDERS_ALLOWED_EMAIL_DOMAINS',
+  passwordless: 'PASSWORDLESS_ENABLED',
+};
+// Badge text, as ldapSourceLabelFor: 'Admin Panel', the env var name, or
+// 'Unset' - reusing the already-translated 'admin-panel' / 'unset-color'.
+function sourceBadge(entry, envVar) {
+  if (!entry) return '';
+  if (entry.source === 'admin') return TAPi18n.__('admin-panel');
+  if (entry.source === 'env') return envVar;
+  return TAPi18n.__('unset-color');
+}
+
+Template.general.onCreated(function () {
+  this.oauthSources = new ReactiveVar({ providers: {} });
+  const tpl = this;
+  const refreshOauthSources = () => {
+    Meteor.call('getOauthProviderConfigSources', (err, res) => {
+      if (!err && res) tpl.oauthSources.set(res);
+    });
+  };
+  refreshOauthSources();
+  this.refreshOauthSources = refreshOauthSources;
+});
+
+Template.general.helpers({
+  oauthProviderList() {
+    return oauthProviderCatalog().map(p => ({
+      ...p,
+      enabledVar: `${p.envPrefix}_ENABLED`,
+    }));
+  },
+  oauthProviderEnabled(key) {
+    const providers = ReactiveCache.getCurrentSetting()?.oauthProviders || {};
+    return providers[key]?.enabled === true;
+  },
+  oauthProviderFieldValue(key, field) {
+    const providers = ReactiveCache.getCurrentSetting()?.oauthProviders || {};
+    return providers[key]?.[field] || '';
+  },
+  oauthProviderSourceLabel(key, field) {
+    const sources = Template.instance().oauthSources.get();
+    const entry = sources.providers?.[key]?.[field];
+    const provider = oauthProviderCatalog().find(p => p.key === key) || {};
+    const envVar = field === 'enabled' ? `${provider.envPrefix}_ENABLED` : provider.idVar;
+    return sourceBadge(entry, envVar);
+  },
+  // "is set (Admin Panel)" / "is set (OAUTH_GOOGLE_SECRET)" / "Unset" - never
+  // the secret itself, which the client never holds.
+  oauthProviderSecretStatusText(key) {
+    const sources = Template.instance().oauthSources.get();
+    const entry = sources.providers?.[key]?.secret;
+    if (!entry || !entry.hasValue) return TAPi18n.__('unset-color');
+    const provider = oauthProviderCatalog().find(p => p.key === key) || {};
+    const from = entry.source === 'admin' ? TAPi18n.__('admin-panel') : provider.secretVar;
+    return `${TAPi18n.__('oauth-provider-secret-set')} (${from})`;
+  },
+  oauthSharedSourceLabel(field) {
+    const sources = Template.instance().oauthSources.get();
+    return sourceBadge(sources[field], OAUTH_SHARED_ENV_VARS[field]);
+  },
+  oauthLoginStyleOptions() {
+    const current = ReactiveCache.getCurrentSetting()?.oauthProvidersLoginStyle || '';
+    return [
+      { value: '', label: OAUTH_SHARED_ENV_VARS.loginStyle, selected: current === '' },
+      { value: 'redirect', label: 'redirect', selected: current === 'redirect' },
+      { value: 'popup', label: 'popup', selected: current === 'popup' },
+    ];
+  },
+});
+
+Template.general.events({
+  'click a.js-toggle-oauth-provider-enabled'(event, tpl) {
+    const key = event.currentTarget.dataset.provider;
+    const providers = ReactiveCache.getCurrentSetting()?.oauthProviders || {};
+    Settings.update(ReactiveCache.getCurrentSetting()._id, {
+      $set: { [`oauthProviders.${key}.enabled`]: !providers[key]?.enabled },
+    });
+  },
+  'click button.js-oauth-provider-save'(event, tpl) {
+    const key = event.currentTarget.dataset.provider;
+    const providers = ReactiveCache.getCurrentSetting()?.oauthProviders || {};
+    const input = {
+      enabled: providers[key]?.enabled === true,
+      id: $(`.js-oauth-provider-field[data-provider="${key}"][data-field="id"]`).val(),
+    };
+    const $secret = $(`.js-oauth-provider-secret[data-provider="${key}"]`);
+    const secret = $secret.val();
+    if (secret) input.secret = secret;
+    Meteor.call('saveOauthProviderSettings', key, input, (err) => {
+      $secret.val('');
+      if (!err) tpl.refreshOauthSources();
+    });
+  },
+  'click a.js-toggle-oauth-merge-existing-users'(event, tpl) {
+    const setting = ReactiveCache.getCurrentSetting();
+    Settings.update(setting._id, {
+      $set: { oauthProvidersMergeExistingUsers: !setting.oauthProvidersMergeExistingUsers },
+    });
+  },
+  // The two settings shared by every provider ride along with a save of the
+  // first provider in the catalog - the server applies them globally.
+  'click button.js-oauth-shared-save'(event, tpl) {
+    const setting = ReactiveCache.getCurrentSetting();
+    const key = oauthProviderCatalog()[0].key;
+    const providers = setting?.oauthProviders || {};
+    const input = {
+      enabled: providers[key]?.enabled === true,
+      id: providers[key]?.id || '',
+      globalLoginStyle: $('#oauth-providers-login-style').val() || '',
+      mergeExistingUsers: setting?.oauthProvidersMergeExistingUsers === true,
+      allowedEmailDomains: $('#oauth-providers-allowed-email-domains').val() || '',
+    };
+    Meteor.call('saveOauthProviderSettings', key, input, (err) => {
+      if (!err) tpl.refreshOauthSources();
+    });
+  },
+  'click a.js-toggle-passwordless-enabled'(event, tpl) {
+    const setting = ReactiveCache.getCurrentSetting();
+    Settings.update(setting._id, {
+      $set: { passwordlessEnabled: !setting.passwordlessEnabled },
+    });
+  },
+  'click button.js-passwordless-save'(event, tpl) {
+    const enabled = ReactiveCache.getCurrentSetting()?.passwordlessEnabled === true;
+    Meteor.call('savePasswordlessSettings', { enabled }, (err) => {
+      if (!err) tpl.refreshOauthSources();
+    });
+  },
+});
+
+// The E-mail pane's own behaviour. These handlers were registered on
+// Template.setting, which is fine only while Settings renders the pane. Admin Panel /
+// People renders it now, and Blaze delivers an event to the handlers of the template
+// the element is IN - so on Template.setting they would simply never fire. A pane
+// owning its own handlers works wherever the pane is rendered.
+// Same for the E-mail pane: its Save reports progress through `loading`.
+Template.email.onCreated(function () {
+  this.loading = new ReactiveVar(false);
+  this.subscribe('mailServer');
+  this.mailSettingsEnabled = new ReactiveVar(false);
+  this.selectedMailService = new ReactiveVar('SMTP');
+  this.autorun(() => {
+    const mailServer = ReactiveCache.getCurrentSetting()?.mailServer;
+    if (!mailServer || this.mailSettingsInitialized) return;
+    this.mailSettingsEnabled.set(mailServer.enabled === true);
+    this.selectedMailService.set(mailServer.service || 'SMTP');
+    this.mailSettingsInitialized = true;
+  });
+});
+
+Template.email.helpers({
+  ...accountAccessHelpers,
+  mailSettingsEnabled() {
+    return Template.instance().mailSettingsEnabled.get();
+  },
+  mailServices() {
+    const selected = Template.instance().selectedMailService.get();
+    return ALL_MAIL_SERVICES.map(value => ({ value, label: value, selected: value === selected }));
+  },
+  isCustomSmtp() {
+    return Template.instance().selectedMailService.get() === 'SMTP';
+  },
+  mailConfiguration() {
+    const service = Template.instance().selectedMailService.get();
+    const key = mailServiceStorageKey(service);
+    return ReactiveCache.getCurrentSetting()?.mailServer?.configurations?.[key] || {};
+  },
+  passwordDescription() {
+    const service = Template.instance().selectedMailService.get();
+    const key = mailServiceStorageKey(service);
+    return ReactiveCache.getCurrentSetting()?.mailServer?.passwordSet?.[key]
+      ? 'A password is saved. Leave blank to keep it.'
+      : 'No password is saved.';
+  },
+});
+
+Template.email.events({
+  'click a.js-toggle-admin-mail-settings'(event, tpl) {
+    event.preventDefault();
+    tpl.mailSettingsEnabled.set(!tpl.mailSettingsEnabled.get());
+  },
+  'change #mail-service'(event, tpl) {
+    tpl.selectedMailService.set(event.currentTarget.value);
+  },
+  // Tick the box without saving: Save below writes it, together with the invite
+  // domain above, the way the Yes/No pair it replaces behaved.
+  'click a.js-toggle-allow-email-change'(event) {
+    event.preventDefault();
+    $('#accounts-allowEmailChange').toggleClass('is-checked');
+  },
+  'click a.js-toggle-tls'() {
+    $('#mail-server-tls').toggleClass('is-checked');
+  },
+  'click button.mail-settings-save'(event, tpl) {
+    event.preventDefault();
+    const service = tpl.selectedMailService.get();
+    const stored = ReactiveCache.getCurrentSetting()?.mailServer?.configurations
+      ?.[mailServiceStorageKey(service)] || {};
+    const configuration = tpl.mailSettingsEnabled.get() ? {
+      username: ($('#mail-server-username').val() || '').trim(),
+      from: ($('#mail-server-from').val() || '').trim(),
+    } : stored;
+    if (tpl.mailSettingsEnabled.get() && service === 'SMTP') {
+      configuration.host = ($('#mail-server-host').val() || '').trim();
+      configuration.port = ($('#mail-server-port').val() || '').trim();
+      configuration.secure = $('#mail-server-tls').hasClass('is-checked');
+    }
+    tpl.loading.set(true);
+    Meteor.call('saveAdminMailSettings', {
+      enabled: tpl.mailSettingsEnabled.get(),
+      service,
+      configuration,
+      password: $('#mail-server-password').val() || '',
+    }, error => {
+      tpl.loading.set(false);
+      if (error) {
+        alert(error.reason || error.message);
+      } else {
+        $('#mail-server-password').val('');
+      }
+    });
+  },
+  // #2022: Email Templates save. Each field is written only when present -
+  // an empty value clears back to the default hardcoded/i18n content, it
+  // does not fail validation, since all four Settings fields are optional.
+  'click button.js-email-templates-save'(event, tpl) {
+    event.preventDefault();
+    const $set = {
+      inviteEmailSubjectTemplate: ($('#email-template-invite-subject').val() || '').trim(),
+      inviteEmailBodyTemplate: ($('#email-template-invite-body').val() || '').trim(),
+      activityEmailSubjectTemplate: ($('#email-template-activity-subject').val() || '').trim(),
+      activityEmailBodyTemplate: ($('#email-template-activity-body').val() || '').trim(),
+    };
+    Settings.update(ReactiveCache.getCurrentSetting()._id, { $set });
+  },
+  // The pane's one Save, below both settings it writes: the invite domain and the
+  // allow-email-change Yes/No.
+  //
+  // It wrote NEITHER before. The SMTP fields above are commented out of this pane's
+  // markup, `checkField()` THROWS on an input that is not there, and the throw was
+  // caught and swallowed - so the handler returned before its Settings.update and
+  // pressing Save silently did nothing at all. Each field is written only when its
+  // input is actually rendered, which is the same guard every other pane here uses.
+  'click button.js-save'(event, tpl) {
+    tpl.loading.set(true);
+    $('li').removeClass('has-error');
+
+    try {
+      const $set = {};
+      // Only when the SMTP block is rendered (it is commented out at the moment).
+      // checkField marks a blank required field and throws, which is what should
+      // abort the save - but only when the field is on screen to be blank.
+      if ($('#mail-server-host').length) {
+        $set['mailServer.host'] = checkField('#mail-server-host');
+        $set['mailServer.port'] = checkField('#mail-server-port');
+        $set['mailServer.from'] = checkField('#mail-server-from');
+        $set['mailServer.username'] = ($('#mail-server-username').val() || '').trim();
+        $set['mailServer.password'] = ($('#mail-server-password').val() || '').trim();
+        $set['mailServer.enableTLS'] = $('#mail-server-tls.is-checked').length > 0;
+      }
+      // Moved here with its input: the Layout save used to read
+      // #mailDomainNamevalue, which is not in that pane any more - so saving
+      // Layout would have written an empty domain over the stored one.
+      if ($('#mailDomainNamevalue').length) {
+        $set.mailDomainName = ($('#mailDomainNamevalue').val() || '').trim();
+      }
+      if (Object.keys($set).length) {
+        Settings.update(ReactiveCache.getCurrentSetting()._id, { $set });
+      }
+      // Allow e-mail change lives in AccountSettings, so it is a second write - and
+      // nothing wrote it at all until this pane took it over. It is one checkbox
+      // now, so the value is whether the box is ticked, and it is only written when
+      // the checkbox is actually on screen.
+      if ($('#accounts-allowEmailChange').length) {
+        AccountSettings.update('accounts-allowEmailChange', {
+          $set: { booleanValue: $('#accounts-allowEmailChange').hasClass('is-checked') },
+        });
+      }
+    } catch (e) {
+      return;
+    } finally {
+      tpl.loading.set(false);
+    }
+  },
+  'click button.js-send-smtp-test-email'() {
+    Meteor.call('sendSMTPTestEmail', (err, ret) => {
+      if (!err && ret) {
+        const message = `${TAPi18n.__(ret.message)}: ${ret.email}`;
+        alert(message);
+      } else {
+        const reason = err.reason || '';
+        const message = `${TAPi18n.__(err.error)}\n${reason}`;
+        alert(message);
+      }
+    });
+  },
+});
+
+// Admin Panel / Settings / Global Webhooks / Internal destinations
+// (server/webhookInternalHosts.js): read and saved through site-admin methods,
+// never published.
+Template.webhookSettings.onCreated(function () {
+  this.internalHosts = new ReactiveVar('');
+  // #2290: the login and registration webhook, through site-admin methods.
+  this.accountWebhook = new ReactiveVar({ url: '', token: '', onLogin: false, onRegister: false, fields: [] });
+  Meteor.call('getAccountWebhook', (error, value) => { if (!error && value) this.accountWebhook.set(value); });
+  Meteor.call('getWebhookInternalHosts', (error, hosts) => {
+    if (!error) this.internalHosts.set((hosts || []).join('\n'));
+  });
+});
+
+Template.webhookSettings.helpers({
+  internalHosts() { return Template.instance().internalHosts.get(); },
+  accountWebhook() { return Template.instance().accountWebhook.get(); },
+  accountWebhookFields() {
+    const { EXTRA_FIELDS } = require('/models/lib/accountWebhook');
+    const on = Template.instance().accountWebhook.get().fields || [];
+    return EXTRA_FIELDS.map(key => ({ key, on: on.includes(key), labelKey: `account-webhook-field-${key}` }));
+  },
+});
+
+Template.webhookSettings.events({
+  'click .js-account-webhook-tick'(event, tpl) {
+    event.preventDefault();
+    const key = event.currentTarget.dataset.key;
+    const value = { ...tpl.accountWebhook.get() };
+    value[key] = !value[key];
+    tpl.accountWebhook.set(value);
+  },
+  'click .js-account-webhook-field'(event, tpl) {
+    event.preventDefault();
+    const field = event.currentTarget.dataset.field;
+    const value = { ...tpl.accountWebhook.get() };
+    const fields = new Set(value.fields || []);
+    if (fields.has(field)) fields.delete(field); else fields.add(field);
+    value.fields = [...fields];
+    tpl.accountWebhook.set(value);
+  },
+  'click .js-save-account-webhook'(event, tpl) {
+    event.preventDefault();
+    const status = tpl.$('.js-account-webhook-status');
+    const value = { ...tpl.accountWebhook.get(),
+      url: String(tpl.$('.js-account-webhook-url').val() || ''),
+      token: String(tpl.$('.js-account-webhook-token').val() || '') };
+    Meteor.call('saveAccountWebhook', value, (error, saved) => {
+      if (error) { status.text(error.reason || error.message); return; }
+      tpl.accountWebhook.set(saved);
+      status.text(TAPi18n.__('feature-saved'));
+    });
+  },
+  'click .js-save-webhook-internal-hosts'(event, tpl) {
+    event.preventDefault();
+    const status = tpl.$('.js-webhook-internal-hosts-status');
+    Meteor.call('saveWebhookInternalHosts', String(tpl.$('.js-webhook-internal-hosts').val() || ''), (error, result) => {
+      if (error) { status.text(error.reason || error.message); return; }
+      tpl.internalHosts.set(result.hosts.join('\n'));
+      status.text(result.rejected.length
+        ? `${TAPi18n.__('webhook-internal-hosts-rejected')} ${result.rejected.join(', ')}`
+        : TAPi18n.__('feature-saved'));
+    });
   },
 });

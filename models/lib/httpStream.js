@@ -1,44 +1,95 @@
-export const httpStreamOutput = function(readStream, name, http, downloadFlag, cacheControl) {
-    readStream.on('data', data => {
+export const httpStreamOutput = function(readStream, name, http, downloadFlag, cacheControl, fileObj) {
+    const {
+      fileNameIsBrowserExecutable,
+      fileResponsePolicy,
+    } = require('./fileResponseSafety');
+    const storedType = fileObj?.versions?.original?.type || fileObj?.type;
+    // An SVG is streamed through the SVG sanitizer, whole, as an image - or as
+    // the download that was asked for (server/lib/svgResponse.js); the stream
+    // sanitizer below decides from the first bytes only, which is not enough.
+    const svgResponse = require('/server/lib/svgResponse');
+    if (svgResponse.isSvg(storedType, name)) {
+      require('./fileCacheHeaders').setPrivateFileCacheHeaders(http.response);
+      svgResponse.sendInlineSvg(http.response, readStream, {
+        download: downloadFlag === 'true',
+        fileName: name,
+        onSanitized: text => {
+          try {
+            const { classifyExploitKinds } = require('/imports/lib/fileNameDisplay');
+            require('/server/lib/filenameSanitizeLog').logContentSanitized({
+              fileObj: fileObj || { name }, source: 'fileView', kinds: classifyExploitKinds(text),
+            });
+          } catch (e) { /* best effort */ }
+        },
+      }).catch(() => { if (!http.response.headersSent) { http.response.statusCode = 500; http.response.end(); } });
+      return;
+    }
+    const policy = fileResponsePolicy(storedType, fileNameIsBrowserExecutable(name));
+    // Sanitize known exploits from EXISTING files on the fly, straight from the
+    // storage backend, without buffering whole files: the sanitizer sniffs the
+    // start of the stream and only rewrites documents that begin like dangerous
+    // markup (SVG/XML with <script>, an <!DOCTYPE/<!ENTITY XML loop, inline event
+    // handlers, ...); everything else streams through unchanged. See
+    // models/lib/serveFileSanitizer.js. When it DOES rewrite something, log it to
+    // Admin Panel / Problems with the uploader + location context (viewing path).
+    let outStream = readStream;
+    try {
+      const { createServeSanitizer } = require('./serveFileSanitizer');
+      const onSanitized = kinds => {
+        try {
+          require('/server/lib/filenameSanitizeLog').logContentSanitized({
+            fileObj: fileObj || { name }, source: 'fileView', kinds,
+          });
+        } catch (e) { /* best effort */ }
+      };
+      const sanitizer = createServeSanitizer(name, onSanitized);
+      readStream.on('error', err => sanitizer.destroy(err));
+      outStream = readStream.pipe(sanitizer);
+    } catch (e) {
+      console.error('serveFileSanitizer unavailable, streaming file as-is:', e);
+      outStream = readStream;
+    }
+
+    outStream.on('data', data => {
       http.response.write(data);
     });
 
-    readStream.on('end', () => {
+    outStream.on('end', () => {
       // don't pass parameters to end() or it will be attached to the file's binary stream
       http.response.end();
     });
 
-    readStream.on('error', (err) => {
+    outStream.on('error', (err) => {
       console.error(`Download stream error for file '${name}':`, err);
       http.response.statusCode = 404;
       http.response.end('not found');
     });
 
-    if (cacheControl) {
-      http.response.setHeader('Cache-Control', cacheControl);
-    }
+    // CacheBleed (GHSA-w3qg-pf27-g68r): whatever cacheControl the collection
+    // passes, a file behind an access check is never shared-cacheable.
+    require('./fileCacheHeaders').setPrivateFileCacheHeaders(http.response);
 
-    // Set Content-Disposition header
-    http.response.setHeader('Content-Disposition', getContentDisposition(name, http?.params?.query?.download));
-
-    // Add security headers to prevent XSS attacks
-    const isSvgFile = name && name.toLowerCase().endsWith('.svg');
-    if (isSvgFile) {
-      // For SVG files, add strict CSP to prevent script execution
-      http.response.setHeader('Content-Security-Policy', "default-src 'none'; script-src 'none'; object-src 'none';");
-      http.response.setHeader('X-Content-Type-Options', 'nosniff');
-      http.response.setHeader('X-Frame-Options', 'DENY');
+    // This path is the original Meteor-Files /cdn/storage route. Apply the same
+    // fail-closed policy as WeKan's universal and legacy routes before any
+    // storage strategy writes bytes to the response.
+    http.response.setHeader('Content-Type', policy.contentType);
+    http.response.setHeader(
+      'Content-Disposition',
+      getContentDisposition(name, policy.forceDownload ? 'true' : downloadFlag),
+    );
+    for (const [header, value] of Object.entries(policy.headers)) {
+      http.response.setHeader(header, value);
     }
   };
 
 /** will initiate download, if links are called with ?download="true" queryparam */
 const getContentDisposition = (name, downloadFlag) => {
   // Force attachment disposition for SVG files to prevent XSS attacks
-  const isSvgFile = name && name.toLowerCase().endsWith('.svg');
-  const forceAttachment = isSvgFile || downloadFlag === 'true';
+  const forceAttachment = downloadFlag === 'true';
   const dispositionType = forceAttachment ? 'attachment;' : 'inline;';
 
-  const encodedName = encodeURIComponent(name);
+  const { sanitizeDownloadFileName } = require('/imports/lib/fileNameDisplay');
+  const encodedName = encodeURIComponent(sanitizeDownloadFileName(name));
   const dispositionName = `filename="${encodedName}"; filename=*UTF-8"${encodedName}";`;
   const dispositionEncoding = 'charset=utf-8';
 

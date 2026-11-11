@@ -1,9 +1,244 @@
+import { Meteor } from 'meteor/meteor';
+import { Tracker } from 'meteor/tracker';
+import { ReactiveVar } from 'meteor/reactive-var';
+import { SavedCardFilters } from '/client/lib/savedCardFilters';
+import { captureFilterPreset, applyFilterPreset } from '/client/lib/filterPresetState';
 import { ReactiveCache } from '/imports/reactiveCache';
 import { TAPi18n } from '/imports/i18n';
 import { Filter } from '/client/lib/filter';
 import { EscapeActions } from '/client/lib/escapeActions';
 import { MultiSelection } from '/client/lib/multiSelection';
 import { Utils } from '/client/lib/utils';
+import { getSidebarInstance } from '/client/features/sidebar/service';
+import { CARD_DATE_RANGE_FIELDS, CARD_RECENCY_PRESETS } from '/models/lib/cardDateRange';
+import { DEPENDENCY_TYPES } from '/models/metadata/dependencies';
+
+// A refused date range marks its end field invalid - so it is :invalid and
+// screen readers announce the reason - and says why in the form itself. Not
+// with reportValidity(): Firefox's validation bubble opens over the Apply and
+// Clear buttons below the field and takes every click on them while the field
+// has focus, so the range could not be cleared at all.
+function rangeRefused(end, error, refused) {
+  end.setCustomValidity(refused ? TAPi18n.__('filter-date-range-invalid') : '');
+  error.set(refused);
+}
+
+Template.filterSidebar.onCreated(function () {
+  this.presetMessage = new ReactiveVar('');
+  this.presetBusy = new ReactiveVar(false);
+  // Why a date range was refused, shown in the form rather than in the
+  // browser's own validation bubble (see rangeRefused below).
+  this.movementRangeError = new ReactiveVar(false);
+  this.dateRangeError = new ReactiveVar(false);
+  this.autorun(() => {
+    const boardId = Session.get('currentBoard');
+    if (Meteor.userId() && boardId) this.subscribe('savedCardFilters', boardId);
+  });
+});
+
+Template.filterSidebar.helpers({
+  savedFilterPresets() {
+    return SavedCardFilters.find({ boardId: Session.get('currentBoard'), ownerId: Meteor.userId() }, { sort: { name: 1 } });
+  },
+  presetMessage() { return Template.instance().presetMessage.get(); },
+  presetBusy() { return Template.instance().presetBusy.get(); },
+  movementRangeError() { return Template.instance().movementRangeError.get(); },
+  dateRangeError() { return Template.instance().dateRangeError.get(); },
+  filterProviderViews() { return Filter.providers.views(); },
+  dateFilterProviderViews() { return Filter.providers.views('dates'); },
+  dueUnrestricted() { return Filter.dueAt.state() === null; },
+  movementFrom() { return Filter.movementDate.value().from; },
+  movementTo() { return Filter.movementDate.value().to; },
+  dateRangeFields() { return CARD_DATE_RANGE_FIELDS; },
+  dateRangeSelected(id) { return Filter.dateRange.value().field === id; },
+  dateRangeFrom() { return Filter.dateRange.value().from; },
+  dateRangeTo() { return Filter.dateRange.value().to; },
+  dateRangeMissing() { return Filter.dateRange.value().includeMissing; },
+  columnAgeLists() {
+    return ReactiveCache.getLists({ boardId: Session.get('currentBoard'), archived: false }, { sort: { sort: 1 } });
+  },
+  columnAgeDays() { return Filter.columnAge.value().days; },
+  columnAgeSelected(id) { return Filter.columnAge.value().listId === id; },
+  parentFilterCards() {
+    const boardId = Session.get('currentBoard');
+    if (!boardId) return [];
+    // Use only already-published current-board cards; never fetch private
+    // source boards or reveal a parent title from a foreign-board cache entry.
+    const cards = ReactiveCache.getCards({ boardId, archived: false });
+    const parentIds = new Set(cards.map(card => card.parentId).filter(Boolean));
+    Filter.parentId.list().forEach(id => parentIds.add(id));
+    return cards.filter(card => parentIds.has(card._id))
+      .sort((a, b) => String(a.title || '').localeCompare(String(b.title || '')));
+  },
+  // #3392: relation types offered in the dependency ("Red Strings") filter.
+  dependencyTypes() {
+    return DEPENDENCY_TYPES.map(t => ({
+      id: t.id,
+      label: `dependency-type-${t.id}`,
+    }));
+  },
+});
+
+Template.filterSidebar.events({
+  async 'submit .js-save-filter-preset'(event, tpl) {
+    event.preventDefault();
+    if (tpl.presetBusy.get()) return;
+    tpl.presetBusy.set(true); tpl.presetMessage.set('');
+    try {
+      await Meteor.callAsync('filterPresets.save', Session.get('currentBoard'),
+        tpl.find('.js-filter-preset-name').value, captureFilterPreset(Filter));
+      tpl.presetMessage.set('filter-preset-saved');
+    } catch (error) { tpl.presetMessage.set('filter-preset-error'); }
+    finally { tpl.presetBusy.set(false); }
+  },
+  'click .js-apply-filter-preset'(event, tpl) {
+    event.preventDefault();
+    const preset = SavedCardFilters.findOne({ _id: tpl.find('.js-filter-preset-select').value,
+      ownerId: Meteor.userId(), boardId: Session.get('currentBoard') });
+    try {
+      if (!preset) throw new Error('Missing preset');
+      applyFilterPreset(Filter, preset.state);
+      for (const selector of ['.js-card-date-to', '.js-card-movement-to']) tpl.find(selector)?.setCustomValidity('');
+      tpl.find('.js-filter-preset-name').value = preset.name;
+      tpl.presetMessage.set('filter-preset-applied');
+    } catch (error) { tpl.presetMessage.set('filter-preset-error'); }
+  },
+  async 'click .js-remove-filter-preset'(event, tpl) {
+    event.preventDefault();
+    if (tpl.presetBusy.get()) return;
+    tpl.presetBusy.set(true); tpl.presetMessage.set('');
+    try {
+      await Meteor.callAsync('filterPresets.remove', Session.get('currentBoard'), tpl.find('.js-filter-preset-select').value);
+      tpl.presetMessage.set('filter-preset-deleted');
+    } catch (error) { tpl.presetMessage.set('filter-preset-error'); }
+    finally { tpl.presetBusy.set(false); }
+  },
+  'submit .js-card-movement-range'(event, tpl) {
+    event.preventDefault();
+    const end = tpl.find('.js-card-movement-to');
+    const valid = Filter.movementDate.set({ field: 'createdAt',
+      from: tpl.find('.js-card-movement-from').value, to: end.value, includeMissing: false });
+    rangeRefused(end, tpl.movementRangeError, !valid);
+    if (valid) Filter.resetExceptions();
+  },
+  'input .js-card-movement-range input'(event, tpl) {
+    rangeRefused(tpl.find('.js-card-movement-to'), tpl.movementRangeError, false);
+  },
+  'click .js-clear-movement-range'(event, tpl) {
+    event.preventDefault();
+    rangeRefused(tpl.find('.js-card-movement-to'), tpl.movementRangeError, false);
+    Filter.movementDate.reset(); Filter.resetExceptions();
+  },
+  'submit .js-card-date-range'(event, tpl) {
+    event.preventDefault();
+    const end = tpl.find('.js-card-date-to');
+    const valid = Filter.dateRange.set({ field: tpl.find('.js-card-date-field').value,
+      from: tpl.find('.js-card-date-from').value, to: end.value,
+      includeMissing: tpl.find('.js-card-date-missing').checked });
+    rangeRefused(end, tpl.dateRangeError, !valid);
+    if (valid) Filter.resetExceptions();
+  },
+  'input .js-card-date-range input'(event, tpl) {
+    rangeRefused(tpl.find('.js-card-date-to'), tpl.dateRangeError, false);
+  },
+  'click .js-clear-date-range'(event, tpl) {
+    event.preventDefault();
+    // Reset the native date controls as well as the reactive model. WebKit can
+    // retain an edited date segment after Blaze changes the value attribute.
+    for (const selector of ['.js-card-date-from', '.js-card-date-to']) {
+      tpl.find(selector).value = '';
+    }
+    rangeRefused(tpl.find('.js-card-date-to'), tpl.dateRangeError, false);
+    Filter.dateRange.reset(); Filter.resetExceptions();
+  },
+  'submit .js-column-age-filter'(event, tpl) {
+    event.preventDefault();
+    const listId = tpl.find('.js-column-age-list').value;
+    if (!listId) Filter.columnAge.reset();
+    else Filter.columnAge.set(listId, Number(tpl.find('.js-column-age-days').value));
+    Filter.resetExceptions();
+  },
+  'click .js-toggle-parent-filter'(event) {
+    event.preventDefault();
+    Filter.parentId.toggle(event.currentTarget.dataset.parentId);
+    Filter.resetExceptions();
+  },
+  'change .js-label-filter-mode'(event) {
+    Filter.labelIds.setMode(event.currentTarget.value);
+    Filter.resetExceptions();
+  },
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// Clicking outside the filter panel closes it.
+//
+// Reported as "the modal that appears when I use a filter sometimes doesn't
+// disappear — it should close the moment I click anything outside it". It is the
+// board sidebar showing its filter view, and nothing dismissed it but the
+// sidebar's own toggle or Escape: the document click handler in
+// client/lib/escapeActions.js runs `clickExecute(target, 'multiselection')`, and
+// `sidebarView` sits BELOW `multiselection` in the hierarchy, so a click never
+// reaches it by design.
+//
+// Done here rather than by raising that limit, because raising it would make
+// every sidebar view close on any outside click — Archive, Settings, Card
+// Settings are panels people work beside on purpose, and only the filter reads as
+// a thing you open, use and are done with. Escape is untouched: it still returns
+// the sidebar to its default view through the existing action.
+//
+// Not closed by a click on: the panel itself, a pop-over it opened (the label /
+// member / due-date pickers render outside the sidebar), or the header button
+// that opens the filter — which would otherwise toggle it shut in the same
+// gesture that opened it.
+const OUTSIDE_CLICK_KEEPS_OPEN = [
+  '.board-sidebar',
+  '.pop-over',
+  '.js-open-filter-view',
+].join(',');
+
+Template.filterSidebar.onRendered(function () {
+  const instance = this;
+  this.autorun(() => {
+    const excluded = new Set(Filter.excludedLabelIds.list());
+    const selected = new Set(Filter.labelIds.list());
+    ReactiveCache.getBoard(Session.get('currentBoard'));
+    Tracker.afterFlush(() => {
+      if (instance.view.isDestroyed) return;
+      instance.findAll('.js-toggle-label-filter').forEach(label => {
+        const id = label.dataset.filterId === '__none__' ? undefined : label.dataset.filterId;
+        const input = label.querySelector('input');
+        input.checked = selected.has(id);
+        input.indeterminate = excluded.has(id);
+      });
+    });
+  });
+
+  instance._closeOnOutsideClick = evt => {
+    if (evt.button !== 0) return;
+    const sidebar = getSidebarInstance();
+    if (!sidebar || !sidebar.isOpen || !sidebar.isOpen()) return;
+    if ($(evt.target).closest(OUTSIDE_CLICK_KEEPS_OPEN).length > 0) return;
+    // A reactive filter update can detach its clicked row before this event
+    // reaches document. The native propagation path retains the original
+    // sidebar ancestors even when closest() can no longer find them.
+    const eventPath = evt.originalEvent?.composedPath?.() || [];
+    if (eventPath.some(node => node.nodeType === 1 &&
+      node.matches(OUTSIDE_CLICK_KEEPS_OPEN))) return;
+    sidebar.hide();
+  };
+
+  // Bound after the current event has finished propagating, so the very click
+  // that opened the filter view cannot reach the handler it just created and
+  // close it again.
+  instance._bindOutsideClick = setTimeout(() => {
+    $(document).on('click.wekanFilterSidebar', instance._closeOnOutsideClick);
+  }, 0);
+});
+
+Template.filterSidebar.onDestroyed(function () {
+  clearTimeout(this._bindOutsideClick);
+  $(document).off('click.wekanFilterSidebar', this._closeOnOutsideClick);
+});
 
 // SubsManager removed for Meteor 3 migration
 
@@ -19,57 +254,69 @@ function getFilterIdFromEvent(evt, fallbackId) {
 }
 
 Template.filterSidebar.events({
+  'change .js-due-unrestricted'() { Filter.dueAt.reset(); Filter.resetExceptions(); },
   'submit .js-list-filter'(evt, tpl) {
     evt.preventDefault();
     Filter.lists.set(tpl.find('.js-list-filter input').value.trim());
   },
-  'change .js-field-card-filter'(evt, tpl) {
+  'input .js-field-card-filter'(evt, tpl) {
     evt.preventDefault();
-    Filter.title.set(tpl.find('.js-field-card-filter').value.trim());
+    Filter.text.set(tpl.find('.js-field-card-filter').value.trim());
     Filter.resetExceptions();
   },
-  'click .js-toggle-label-filter'(evt) {
-    evt.preventDefault();
-    Filter.labelIds.toggle(getFilterIdFromEvent(evt, this?._id));
+  'change .js-toggle-label-filter'(evt) {
+    const filterId = getFilterIdFromEvent(evt, this?._id);
+    if (filterId === undefined) {
+      // The "no label" pseudo-entry stays a simple two-state toggle; the
+      // #2886 three-state include/exclude/clear cycle is scoped to actual
+      // labels.
+      Filter.labelIds.toggle(filterId);
+    } else {
+      Filter.toggleLabelFilter(filterId);
+    }
     Filter.resetExceptions();
   },
-  'click .js-toggle-member-filter'(evt) {
-    evt.preventDefault();
+  'change .js-toggle-member-filter'(evt) {
     Filter.members.toggle(getFilterIdFromEvent(evt, this?._id));
     Filter.resetExceptions();
   },
-  'click .js-toggle-assignee-filter'(evt) {
-    evt.preventDefault();
+  'change .js-toggle-assignee-filter'(evt) {
     Filter.assignees.toggle(getFilterIdFromEvent(evt, this?._id));
     Filter.resetExceptions();
   },
-  'click .js-toggle-no-due-date-filter'(evt) {
-    evt.preventDefault();
+  // #3681: filter cards by whose card.userId (the creator/author field)
+  // matches, the same toggle pattern as members/assignees above.
+  'change .js-toggle-creator-filter'(evt) {
+    Filter.userId.toggle(getFilterIdFromEvent(evt, this?._id));
+    Filter.resetExceptions();
+  },
+  'change .js-toggle-no-due-date-filter'() {
     Filter.dueAt.noDate();
     Filter.resetExceptions();
   },
-  'click .js-toggle-overdue-filter'(evt) {
-    evt.preventDefault();
+  'change .js-toggle-overdue-filter'() {
     Filter.dueAt.past();
     Filter.resetExceptions();
   },
-  'click .js-toggle-due-today-filter'(evt) {
-    evt.preventDefault();
+  'change .js-toggle-due-today-filter'() {
     Filter.dueAt.today();
     Filter.resetExceptions();
   },
-  'click .js-toggle-due-tomorrow-filter'(evt) {
-    evt.preventDefault();
+  'change .js-toggle-due-tomorrow-filter'() {
     Filter.dueAt.tomorrow();
     Filter.resetExceptions();
   },
-  'click .js-toggle-due-this-week-filter'(evt) {
-    evt.preventDefault();
+  'change .js-toggle-due-previous-week-filter'() {
+    Filter.dueAt.previousWeek(); Filter.resetExceptions();
+  },
+  'change .js-toggle-due-next-month-filter'() {
+    Filter.dueAt.nextMonth(); Filter.resetExceptions();
+  },
+  'change .js-toggle-due-this-week-filter'() {
     Filter.dueAt.thisWeek();
     Filter.resetExceptions();
   },
-  'click .js-toggle-due-next-week-filter'(evt) {
-    evt.preventDefault();
+  'change .js-toggle-due-next-week-filter'() {
     Filter.dueAt.nextWeek();
     Filter.resetExceptions();
   },
@@ -95,6 +342,11 @@ Template.filterSidebar.events({
     Filter.customFields.toggle(getFilterIdFromEvent(evt, this?._id));
     Filter.resetExceptions();
   },
+  'click .js-toggle-dependency-filter'(evt) {
+    evt.preventDefault();
+    Filter.cardDependencies.toggle(getFilterIdFromEvent(evt, this?._id));
+    Filter.resetExceptions();
+  },
   'change .js-field-advanced-filter'(evt, tpl) {
     evt.preventDefault();
     Filter.advanced.set(
@@ -102,8 +354,10 @@ Template.filterSidebar.events({
     );
     Filter.resetExceptions();
   },
-  'click .js-clear-all'(evt) {
+  'click .js-clear-all'(evt, tpl) {
     evt.preventDefault();
+    tpl.find('.js-card-date-to')?.setCustomValidity('');
+    tpl.find('.js-card-movement-to')?.setCustomValidity('');
     Filter.reset();
   },
   'click .js-filter-to-selection'(evt) {
@@ -199,7 +453,7 @@ function mapSelection(kind, _id) {
 
 Template.multiselectionSidebar.helpers({
   isBoardAdmin() {
-    return ReactiveCache.getCurrentUser().isBoardAdmin();
+    return ReactiveCache.getCurrentUser()?.isBoardAdmin();
   },
   isCommentOnly() {
     return ReactiveCache.getCurrentUser().isCommentOnly();
@@ -215,119 +469,121 @@ Template.multiselectionSidebar.helpers({
 });
 
 Template.multiselectionSidebar.events({
-  'click .js-toggle-label-multiselection'(evt) {
-    const labelId = Template.currentData()._id;
+  async 'click .js-toggle-label-multiselection'(evt) {
+    evt.preventDefault();
+    evt.stopPropagation();
+    if (evt.detail > 1) return;
+    const labelId = this._id;
     const mappedSelection = mapSelection('label', labelId);
 
     if (mappedSelection.every(Boolean)) {
-      mutateSelectedCards('removeLabel', labelId);
+      await mutateSelectedCards('removeLabel', labelId);
     } else if (mappedSelection.every(bool => !bool)) {
-      mutateSelectedCards('addLabel', labelId);
+      await mutateSelectedCards('addLabel', labelId);
     } else {
       const popup = Popup.open('disambiguateMultiLabel');
       // XXX We need to have a better integration between the popup and the
       // UI components systems.
-      popup.call(Template.currentData(), evt);
+      popup.call(this, evt);
     }
   },
-  'click .js-toggle-member-multiselection'(evt) {
-    const memberId = Template.currentData()._id;
+  async 'click .js-toggle-member-multiselection'(evt) {
+    evt.preventDefault();
+    evt.stopPropagation();
+    if (evt.detail > 1) return;
+    const memberId = this._id;
     const mappedSelection = mapSelection('member', memberId);
     if (mappedSelection.every(Boolean)) {
-      mutateSelectedCards('unassignMember', memberId);
+      await mutateSelectedCards('unassignMember', memberId);
     } else if (mappedSelection.every(bool => !bool)) {
-      mutateSelectedCards('assignMember', memberId);
+      await mutateSelectedCards('assignMember', memberId);
     } else {
       const popup = Popup.open('disambiguateMultiMember');
       // XXX We need to have a better integration between the popup and the
       // UI components systems.
-      popup.call(Template.currentData(), evt);
+      popup.call(this, evt);
     }
   },
-  'click .js-move-selection': Popup.open('moveSelection'),
+  'click .js-move-selection'(event) {
+    // moveObjects reuses the translated "Move selection" phrase as its title
+    // (tests/popupTitles.test.cjs), rather than a second copy of it.
+    if (MultiSelection.hasObjects()) Popup.open('moveObjects', { titleKey: 'move-selection' }).call(this, event);
+    else Popup.open('moveSelection').call(this, event);
+  },
   'click .js-copy-selection': Popup.open('copySelection'),
   'click .js-selection-color': Popup.open('setSelectionColor'),
-  'click .js-archive-selection'() {
-    mutateSelectedCards('archive');
-    EscapeActions.executeUpTo('multiselection');
+  async 'click .js-archive-selection'() {
+    const cards = getSelectedCardsSorted();
+    const cardIds = cards.map(card => card._id);
+    if (!cardIds.length) return;
+    try {
+      await Meteor.callAsync(
+        'archiveSelectedCards',
+        Session.get('currentBoard'),
+        cardIds,
+      );
+      EscapeActions.executeUpTo('multiselection');
+    } catch (error) {
+      alert(error.reason || error.message || TAPi18n.__('server-error'));
+    }
   },
 });
 
 Template.disambiguateMultiLabelPopup.events({
-  'click .js-remove-label'() {
-    mutateSelectedCards('removeLabel', this._id);
+  async 'click .js-remove-selection-label'(evt) {
+    evt.preventDefault();
+    evt.stopPropagation();
+    await mutateSelectedCards('removeLabel', this._id);
     Popup.back();
   },
-  'click .js-add-label'() {
-    mutateSelectedCards('addLabel', this._id);
+  async 'click .js-add-selection-label'(evt) {
+    evt.preventDefault();
+    evt.stopPropagation();
+    await mutateSelectedCards('addLabel', this._id);
     Popup.back();
   },
 });
 
 Template.disambiguateMultiMemberPopup.events({
-  'click .js-unassign-member'() {
-    mutateSelectedCards('assignMember', this._id);
+  async 'click .js-unassign-member'(evt) {
+    evt.preventDefault();
+    evt.stopPropagation();
+    await mutateSelectedCards('unassignMember', this._id);
     Popup.back();
   },
-  'click .js-assign-member'() {
-    mutateSelectedCards('unassignMember', this._id);
+  async 'click .js-assign-member'(evt) {
+    evt.preventDefault();
+    evt.stopPropagation();
+    await mutateSelectedCards('assignMember', this._id);
     Popup.back();
   },
 });
 
-Template.moveSelectionPopup.onCreated(function() {
-  this.selectedBoardId = new ReactiveVar(Session.get('currentBoard'));
-  this.selectedSwimlaneId = new ReactiveVar('');
-  this.selectedListId = new ReactiveVar('');
-  this.selectedCardId = new ReactiveVar('');
-  this.position = new ReactiveVar('above');
 
-  this.getBoardData = function(boardId) {
-    const self = this;
-    Meteor.subscribe('board', boardId, false, {
-      onReady() {
-        const sameBoardId = self.selectedBoardId.get() === boardId;
-        self.selectedBoardId.set(boardId);
-
-        if (!sameBoardId) {
-          self.setFirstSwimlaneId();
-          self.setFirstListId();
-        }
-      },
-    });
-  };
-
-  this.setFirstSwimlaneId = function() {
-    try {
-      const board = ReactiveCache.getBoard(this.selectedBoardId.get());
-      const swimlaneId = board.swimlanes()[0]._id;
-      this.selectedSwimlaneId.set(swimlaneId);
-    } catch (e) {}
-  };
-
-  this.setFirstListId = function() {
-    try {
-      const boardId = this.selectedBoardId.get();
-      const swimlaneId = this.selectedSwimlaneId.get();
-      const lists = getListsForBoardSwimlane(boardId, swimlaneId);
-      const listId = lists[0] ? lists[0]._id : '';
-      this.selectedListId.set(listId);
-      this.selectedCardId.set('');
-    } catch (e) {}
-  };
-
-  this.getBoardData(Session.get('currentBoard'));
-  this.setFirstSwimlaneId();
-  this.setFirstListId();
+// The four selects of the move/copy selection dialogs, in one template. The
+// dialog - the popup's own template instance - is kept on THIS instance,
+// because inside `each boards` the data context is a board and a helper
+// reaching into the context for it would find nothing there.
+Template.selectionDestinationPicker.onCreated(function() {
+  this.autorun(() => {
+    const data = Template.currentData();
+    this.dialog = data && data.dialog;
+  });
 });
 
-Template.moveSelectionPopup.helpers({
+Template.selectionDestinationPicker.helpers({
   boards() {
+    // A user without a templates board has an undefined id here, and
+    // ReactiveCache keys - and re-reads - its selector through
+    // EJSON.stringify, which drops undefined: `{ $ne: undefined }` became
+    // `_id: {}` and matched NO board, so the list was empty. Exclude the
+    // templates board only when there is one.
+    const templatesBoardId = ReactiveCache.getCurrentUser()?.getTemplatesBoardId();
     return ReactiveCache.getBoards(
       {
         archived: false,
         'members.userId': Meteor.userId(),
-        _id: { $ne: ReactiveCache.getCurrentUser().getTemplatesBoardId() },
+        ...(templatesBoardId ? { _id: { $ne: templatesBoardId } } : {}),
       },
       {
         sort: { sort: 1 },
@@ -335,30 +591,30 @@ Template.moveSelectionPopup.helpers({
     );
   },
   swimlanes() {
-    const board = ReactiveCache.getBoard(Template.instance().selectedBoardId.get());
+    const board = ReactiveCache.getBoard(Template.instance().dialog.selectedBoardId.get());
     return board ? board.swimlanes() : [];
   },
   lists() {
-    const instance = Template.instance();
+    const instance = Template.instance().dialog;
     return getListsForBoardSwimlane(
       instance.selectedBoardId.get(),
       instance.selectedSwimlaneId.get(),
     );
   },
   cards() {
-    const instance = Template.instance();
+    const instance = Template.instance().dialog;
     const list = ReactiveCache.getList(instance.selectedListId.get());
     if (!list) return [];
     return list.cards(instance.selectedSwimlaneId.get()).sort((a, b) => a.sort - b.sort);
   },
   isDialogOptionBoardId(boardId) {
-    return Template.instance().selectedBoardId.get() === boardId;
+    return Template.instance().dialog.selectedBoardId.get() === boardId;
   },
   isDialogOptionSwimlaneId(swimlaneId) {
-    return Template.instance().selectedSwimlaneId.get() === swimlaneId;
+    return Template.instance().dialog.selectedSwimlaneId.get() === swimlaneId;
   },
   isDialogOptionListId(listId) {
-    return Template.instance().selectedListId.get() === listId;
+    return Template.instance().dialog.selectedListId.get() === listId;
   },
   isTitleDefault(title) {
     if (
@@ -381,215 +637,165 @@ Template.moveSelectionPopup.helpers({
   },
 });
 
-Template.moveSelectionPopup.events({
-  'change .js-select-boards'(event) {
-    const boardId = $(event.currentTarget).val();
-    Template.instance().getBoardData(boardId);
-  },
-  'change .js-select-swimlanes'(event) {
-    const instance = Template.instance();
-    instance.selectedSwimlaneId.set($(event.currentTarget).val());
-    instance.setFirstListId();
-  },
-  'change .js-select-lists'(event) {
-    const instance = Template.instance();
-    instance.selectedListId.set($(event.currentTarget).val());
-    instance.selectedCardId.set('');
-  },
-  'change .js-select-cards'(event) {
-    Template.instance().selectedCardId.set($(event.currentTarget).val());
-  },
-  'change input[name="position"]'(event) {
-    Template.instance().position.set($(event.currentTarget).val());
-  },
-  async 'click .js-done'() {
-    const instance = Template.instance();
-    const boardId = instance.selectedBoardId.get();
-    const swimlaneId = instance.selectedSwimlaneId.get();
-    const listId = instance.selectedListId.get();
-    const cardId = instance.selectedCardId.get();
-    const position = instance.position.get();
+/**
+ * Move selection and Copy selection: the same dialog, twice.
+ *
+ * Both ask where the selected cards should go - board, swimlane, list, above or
+ * below which card - keep the same four reactive selections while you answer,
+ * and end by walking the selection in order. 145 of the 152 lines were the same
+ * in both; what differs is the seven in the middle, which is what each does to
+ * a card once the destination is known. That is `applyToCard`.
+ *
+ * The MARKUP is one template too - `selectionDestinationPicker` in
+ * sidebarFilters.jade - and its events bubble up to whichever popup includes
+ * it, which is the one holding these selections.
+ */
+function registerSelectionDialogTemplate(templateName, applyToCard) {
+  Template[templateName].onCreated(function() {
+    this.selectedBoardId = new ReactiveVar(Session.get('currentBoard'));
+    this.selectedSwimlaneId = new ReactiveVar('');
+    this.selectedListId = new ReactiveVar('');
+    this.selectedCardId = new ReactiveVar('');
+    this.position = new ReactiveVar('above');
 
-    const selectedCards = getSelectedCardsSorted();
-    const targetCard = cardId ? ReactiveCache.getCard(cardId) : null;
-    const sortIndexes = buildInsertionSortIndexes(
-      selectedCards.length,
-      targetCard,
-      position,
-      listId,
-      swimlaneId,
-    );
+    this.getBoardData = function(boardId) {
+      const self = this;
+      Meteor.subscribe('board', boardId, false, {
+        onReady() {
+          const sameBoardId = self.selectedBoardId.get() === boardId;
+          self.selectedBoardId.set(boardId);
 
-    for (let i = 0; i < selectedCards.length; i += 1) {
-      await selectedCards[i].move(boardId, swimlaneId, listId, sortIndexes[i]);
-    }
-    EscapeActions.executeUpTo('multiselection');
-  },
-});
+          if (!sameBoardId) {
+            self.setFirstSwimlaneId();
+            self.setFirstListId();
+          }
+        },
+      });
+    };
 
-Template.copySelectionPopup.onCreated(function() {
-  this.selectedBoardId = new ReactiveVar(Session.get('currentBoard'));
-  this.selectedSwimlaneId = new ReactiveVar('');
-  this.selectedListId = new ReactiveVar('');
-  this.selectedCardId = new ReactiveVar('');
-  this.position = new ReactiveVar('above');
+    this.setFirstSwimlaneId = function() {
+      try {
+        const board = ReactiveCache.getBoard(this.selectedBoardId.get());
+        const swimlaneId = board.swimlanes()[0]._id;
+        this.selectedSwimlaneId.set(swimlaneId);
+      } catch (e) {}
+    };
 
-  this.getBoardData = function(boardId) {
-    const self = this;
-    Meteor.subscribe('board', boardId, false, {
-      onReady() {
-        const sameBoardId = self.selectedBoardId.get() === boardId;
-        self.selectedBoardId.set(boardId);
+    this.setFirstListId = function() {
+      try {
+        const boardId = this.selectedBoardId.get();
+        const swimlaneId = this.selectedSwimlaneId.get();
+        const lists = getListsForBoardSwimlane(boardId, swimlaneId);
+        const listId = lists[0] ? lists[0]._id : '';
+        this.selectedListId.set(listId);
+        this.selectedCardId.set('');
+      } catch (e) {}
+    };
 
-        if (!sameBoardId) {
-          self.setFirstSwimlaneId();
-          self.setFirstListId();
-        }
-      },
-    });
-  };
+    this.getBoardData(Session.get('currentBoard'));
+    this.setFirstSwimlaneId();
+    this.setFirstListId();
+  });
 
-  this.setFirstSwimlaneId = function() {
-    try {
-      const board = ReactiveCache.getBoard(this.selectedBoardId.get());
-      const swimlaneId = board.swimlanes()[0]._id;
-      this.selectedSwimlaneId.set(swimlaneId);
-    } catch (e) {}
-  };
+  // The picker is a template of its own, and a helper is looked up on the
+  // template it is written in - so what it needs is this instance, handed to it
+  // as `dialog`. Everything it draws is read from there.
+  Template[templateName].helpers({
+    dialog() {
+      return Template.instance();
+    },
+  });
 
-  this.setFirstListId = function() {
-    try {
-      const boardId = this.selectedBoardId.get();
-      const swimlaneId = this.selectedSwimlaneId.get();
-      const lists = getListsForBoardSwimlane(boardId, swimlaneId);
-      const listId = lists[0] ? lists[0]._id : '';
-      this.selectedListId.set(listId);
-      this.selectedCardId.set('');
-    } catch (e) {}
-  };
+  Template[templateName].events({
+    'change .js-select-boards'(event) {
+      const boardId = $(event.currentTarget).val();
+      Template.instance().getBoardData(boardId);
+    },
+    'change .js-select-swimlanes'(event) {
+      const instance = Template.instance();
+      instance.selectedSwimlaneId.set($(event.currentTarget).val());
+      instance.setFirstListId();
+    },
+    'change .js-select-lists'(event) {
+      const instance = Template.instance();
+      instance.selectedListId.set($(event.currentTarget).val());
+      instance.selectedCardId.set('');
+    },
+    'change .js-select-cards'(event) {
+      Template.instance().selectedCardId.set($(event.currentTarget).val());
+    },
+    'change input[name="position"]'(event) {
+      Template.instance().position.set($(event.currentTarget).val());
+    },
+    async 'click .js-done'() {
+      const instance = Template.instance();
+      const boardId = instance.selectedBoardId.get();
+      const swimlaneId = instance.selectedSwimlaneId.get();
+      const listId = instance.selectedListId.get();
+      const cardId = instance.selectedCardId.get();
+      const position = instance.position.get();
 
-  this.getBoardData(Session.get('currentBoard'));
-  this.setFirstSwimlaneId();
-  this.setFirstListId();
-});
-
-Template.copySelectionPopup.helpers({
-  boards() {
-    return ReactiveCache.getBoards(
-      {
-        archived: false,
-        'members.userId': Meteor.userId(),
-        _id: { $ne: ReactiveCache.getCurrentUser().getTemplatesBoardId() },
-      },
-      {
-        sort: { sort: 1 },
-      },
-    );
-  },
-  swimlanes() {
-    const board = ReactiveCache.getBoard(Template.instance().selectedBoardId.get());
-    return board ? board.swimlanes() : [];
-  },
-  lists() {
-    const instance = Template.instance();
-    return getListsForBoardSwimlane(
-      instance.selectedBoardId.get(),
-      instance.selectedSwimlaneId.get(),
-    );
-  },
-  cards() {
-    const instance = Template.instance();
-    const list = ReactiveCache.getList(instance.selectedListId.get());
-    if (!list) return [];
-    return list.cards(instance.selectedSwimlaneId.get()).sort((a, b) => a.sort - b.sort);
-  },
-  isDialogOptionBoardId(boardId) {
-    return Template.instance().selectedBoardId.get() === boardId;
-  },
-  isDialogOptionSwimlaneId(swimlaneId) {
-    return Template.instance().selectedSwimlaneId.get() === swimlaneId;
-  },
-  isDialogOptionListId(listId) {
-    return Template.instance().selectedListId.get() === listId;
-  },
-  isTitleDefault(title) {
-    if (
-      title.startsWith("key 'default") &&
-      title.endsWith('returned an object instead of string.')
-    ) {
-      const translated = `${TAPi18n.__('defaultdefault')}`;
-      if (
-        translated.startsWith("key 'default") &&
-        translated.endsWith('returned an object instead of string.')
-      ) {
-        return 'Default';
-      }
-      return translated;
-    }
-    if (title === 'Default') {
-      return `${TAPi18n.__('defaultdefault')}`;
-    }
-    return title;
-  },
-});
-
-Template.copySelectionPopup.events({
-  'change .js-select-boards'(event) {
-    const boardId = $(event.currentTarget).val();
-    Template.instance().getBoardData(boardId);
-  },
-  'change .js-select-swimlanes'(event) {
-    const instance = Template.instance();
-    instance.selectedSwimlaneId.set($(event.currentTarget).val());
-    instance.setFirstListId();
-  },
-  'change .js-select-lists'(event) {
-    const instance = Template.instance();
-    instance.selectedListId.set($(event.currentTarget).val());
-    instance.selectedCardId.set('');
-  },
-  'change .js-select-cards'(event) {
-    Template.instance().selectedCardId.set($(event.currentTarget).val());
-  },
-  'change input[name="position"]'(event) {
-    Template.instance().position.set($(event.currentTarget).val());
-  },
-  async 'click .js-done'() {
-    const instance = Template.instance();
-    const boardId = instance.selectedBoardId.get();
-    const swimlaneId = instance.selectedSwimlaneId.get();
-    const listId = instance.selectedListId.get();
-    const cardId = instance.selectedCardId.get();
-    const position = instance.position.get();
-
-    const selectedCards = getSelectedCardsSorted();
-    const targetCard = cardId ? ReactiveCache.getCard(cardId) : null;
-    const sortIndexes = buildInsertionSortIndexes(
-      selectedCards.length,
-      targetCard,
-      position,
-      listId,
-      swimlaneId,
-    );
-
-    for (let i = 0; i < selectedCards.length; i += 1) {
-      const card = selectedCards[i];
-      const newCardId = await Meteor.callAsync(
-        'copyCard',
-        card._id,
-        boardId,
-        swimlaneId,
+      const selectedCards = getSelectedCardsSorted();
+      const targetCard = cardId ? ReactiveCache.getCard(cardId) : null;
+      const sortIndexes = buildInsertionSortIndexes(
+        selectedCards.length,
+        targetCard,
+        position,
         listId,
-        true,
-        { title: card.title },
+        swimlaneId,
       );
-      if (!newCardId) continue;
 
-      const newCard = ReactiveCache.getCard(newCardId);
-      if (!newCard) continue;
+      for (let i = 0; i < selectedCards.length; i += 1) {
+        await applyToCard(selectedCards[i], {
+          boardId, swimlaneId, listId, sortIndex: sortIndexes[i],
+        });
+      }
+      EscapeActions.executeUpTo('multiselection');
+    },
+  });
+}
 
-      await newCard.move(boardId, swimlaneId, listId, sortIndexes[i]);
-    }
-    EscapeActions.executeUpTo('multiselection');
+// Move: the card itself goes to the destination.
+registerSelectionDialogTemplate('moveSelectionPopup', async (card, to) => {
+  await card.move(to.boardId, to.swimlaneId, to.listId, to.sortIndex);
+});
+
+// Copy: a new card is made there, and then put in its place. A copy that could
+// not be made is skipped rather than stopping the rest of the selection.
+registerSelectionDialogTemplate('copySelectionPopup', async (card, to) => {
+  const newCardId = await Meteor.callAsync(
+    'copyCard',
+    card._id,
+    to.boardId,
+    to.swimlaneId,
+    to.listId,
+    true,
+    { title: card.title },
+  );
+  if (!newCardId) return;
+  const newCard = ReactiveCache.getCard(newCardId);
+  if (!newCard) return;
+  await newCard.move(to.boardId, to.swimlaneId, to.listId, to.sortIndex);
+});
+
+Template.cardRecencyFilter.helpers({
+  dateRecencyFields() { return [{ id: 'createdAt', label: 'createdAt' }, { id: 'modifiedAt', label: 'modifiedAt' }]; },
+  dateRecencyPresets() { return CARD_RECENCY_PRESETS; },
+  dateRecencySelected(field, preset) { return Template.instance().data.filter.value()[field] === preset; },
+});
+Template.cardRecencyFilter.events({
+  'change .js-card-date-recency'(event, tpl) {
+    const filter = tpl.data.filter;
+    if (filter.set({ ...filter.value(), [event.currentTarget.dataset.field]: event.currentTarget.value })) Filter.resetExceptions();
+  },
+});
+
+Template.textFilterProvider.helpers({
+  providerTextValue() { return Template.instance().data.get(); },
+});
+Template.textFilterProvider.events({
+  'input .js-provider-text'(event, tpl) {
+    tpl.data.set(event.currentTarget.value);
+    Filter.resetExceptions();
   },
 });

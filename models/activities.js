@@ -2,6 +2,7 @@ import { Meteor } from 'meteor/meteor';
 import { Mongo } from 'meteor/mongo';
 import { ReactiveCache } from '/imports/reactiveCache';
 import { findWhere, where } from '/imports/lib/collectionHelpers';
+import { getFeatureFlags } from '/models/lib/featureFlags';
 
 // Activities don't need a schema because they are always set from the a trusted
 // environment - the server - and there is no risk that a user change the logic
@@ -46,6 +47,15 @@ Activities.helpers({
   comment() {
     return ReactiveCache.getCardComment(this.commentId);
   },
+  // #3606: text to show for editComment/deleteComment activities — the stored
+  // commentText, else the live comment's text, else '' (never "undefined").
+  commentDisplayText() {
+    const { commentActivityDisplayText } = require('./lib/commentActivity');
+    return commentActivityDisplayText({
+      commentText: this.commentText,
+      comment: this.comment(),
+    });
+  },
   attachment() {
     return ReactiveCache.getAttachment(this.attachmentId);
   },
@@ -73,8 +83,32 @@ Activities.before.update((userId, doc, fieldNames, modifier) => {
 });
 
 Activities.before.insert((userId, doc) => {
+  // Admin Panel / Features / Notifications (#5820): stop recording activities
+  // entirely when disabled. Returning false cancels the insert, so no activity-feed
+  // entry is stored and the notification after.insert hook never fires.
+  if (getFeatureFlags().disableActivities) {
+    return false;
+  }
+  if (Meteor.isServer) {
+    const { deferSyncActivity } = require('/server/lib/syncActivityScope');
+    if (deferSyncActivity('timestamps', doc)) return;
+  }
   doc.createdAt = new Date();
   doc.modifiedAt = doc.createdAt;
 });
+
+if (Meteor.isServer) {
+  // The card's Activities feed and the board's sidebar both ask for one scope
+  // sorted by createdAt descending, with a limit - the publication says so in
+  // its own comment about pushing the selector down to an index. There was no
+  // index to push it down to, so every poll walked the whole collection, which
+  // on a board with a year of history is the slowest thing a card does.
+  const { ensureIndex } = require('/server/lib/mongoStartup');
+  Meteor.startup(async () => {
+    await ensureIndex(Activities, { cardId: 1, createdAt: -1 });
+    await ensureIndex(Activities, { boardId: 1, createdAt: -1 });
+    await ensureIndex(Activities, { checklistId: 1 });
+  });
+}
 
 export default Activities;

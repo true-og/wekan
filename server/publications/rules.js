@@ -3,6 +3,8 @@ import Actions from '/models/actions';
 import Triggers from '/models/triggers';
 import Rules from '/models/rules';
 import { ReactiveCache } from '/imports/reactiveCache';
+import { publishReportPage } from '/models/lib/reportPageIndex';
+import { ruleActionIds, ruleTriggerIds } from '/models/lib/ruleParts';
 
 Meteor.publish('rules', async function(ruleId) {
   check(ruleId, String);
@@ -17,7 +19,7 @@ Meteor.publish('rules', async function(ruleId) {
   }
 
   const board = await ReactiveCache.getBoard(rule.boardId);
-  if (!board || !board.isVisibleBy(this.userId)) {
+  if (!board || !board.isVisibleBy({ _id: this.userId })) {
     return this.ready();
   }
 
@@ -29,6 +31,26 @@ Meteor.publish('rules', async function(ruleId) {
     true,
   );
   return ret;
+});
+
+// Board-scoped publication of a board's rules together with their triggers and
+// actions, for anyone who can see the board (not just global admins). This backs
+// the fullscreen Rules page, the workflow view, the board/card buttons and the
+// rules-list editor.
+Meteor.publish('boardRules', async function(boardId) {
+  check(boardId, String);
+  if (!this.userId) {
+    return this.ready();
+  }
+  const board = await ReactiveCache.getBoard(boardId);
+  if (!board || !board.isVisibleBy({ _id: this.userId })) {
+    return this.ready();
+  }
+  return [
+    Rules.find({ boardId }),
+    Triggers.find({ boardId }),
+    Actions.find({ boardId }),
+  ];
 });
 
 Meteor.publish('allRules', async function() {
@@ -71,28 +93,38 @@ Meteor.publish('rulesReport', async function(searchTerm = '', limit, skip = 0) {
     query.title = new RegExp(searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
   }
 
+  // Publish the page MANUALLY (fetch + this.added + this.ready). Returning a sorted+
+  // limited cursor makes Meteor set up a LIMITED live observe, which hangs on
+  // FerretDB's OpLog for this query, so the subscription never becomes ready and the
+  // report is stuck on the loading spinner forever (same as attachmentsList). This
+  // admin report re-subscribes on every page/search change, so it needs no live cursor.
   const rules = await ReactiveCache.getRules(
     query,
     { sort: { boardId: 1 }, limit, skip: skip || 0 },
-    true,
+    false,
   );
   const actionIds = [];
   const triggerIds = [];
   const boardIds = [];
-
   rules.forEach(rule => {
-    actionIds.push(rule.actionId);
-    triggerIds.push(rule.triggerId);
+    // #4294: every trigger and action of the rule.
+    actionIds.push(...ruleActionIds(rule));
+    triggerIds.push(...ruleTriggerIds(rule));
     boardIds.push(rule.boardId);
   });
 
-  const ret = [
-    rules,
-    await ReactiveCache.getActions({ _id: { $in: actionIds } }, {}, true),
-    await ReactiveCache.getTriggers({ _id: { $in: triggerIds } }, {}, true),
-    await ReactiveCache.getBoards({ _id: { $in: boardIds } }, { fields: { title: 1 } }, true),
-  ];
-  return ret;
+  const actions = await ReactiveCache.getActions({ _id: { $in: actionIds } }, {}, false);
+  const triggers = await ReactiveCache.getTriggers({ _id: { $in: triggerIds } }, {}, false);
+  const boards = await ReactiveCache.getBoards({ _id: { $in: boardIds } }, { fields: { title: 1 } }, false);
+
+  for (const doc of rules) { const { _id, ...fields } = doc; this.added('rules', _id, fields); }
+  for (const doc of actions) { const { _id, ...fields } = doc; this.added('actions', _id, fields); }
+  for (const doc of triggers) { const { _id, ...fields } = doc; this.added('triggers', _id, fields); }
+  for (const doc of boards) { const { _id, ...fields } = doc; this.added('boards', _id, fields); }
+  // WHICH rules this page is: a board's own rules are in minimongo whenever its
+  // rules editor has been opened.
+  publishReportPage(this, 'report-rules', rules);
+  this.ready();
 });
 
 Meteor.methods({

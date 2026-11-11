@@ -1,6 +1,4 @@
-const JSZip = require('jszip');
-
-window.ExportHtml = Popup => {
+export default Popup => {
   const saveAs = function(blob, filename) {
     const dl = document.createElement('a');
     dl.href = window.URL.createObjectURL(blob);
@@ -15,6 +13,88 @@ window.ExportHtml = Popup => {
   const asyncForEach = async function(array, callback) {
     for (let index = 0; index < array.length; index++) {
       await callback(array[index], index, array);
+    }
+  };
+
+  // The board is rendered with infinite scroll — each list only keeps ~10 cards
+  // in the DOM (client/components/lists/listBody.js). A naive DOM-clone export
+  // would therefore drop every card past the fold. Before cloning we lift every
+  // list's `cardlimit` so the whole board renders, then wait for Blaze to flush.
+  const expandAllCardsForExport = async () => {
+    let changed = false;
+    Array.from(document.querySelectorAll('.list-body')).forEach(el => {
+      try {
+        let view = Blaze.getView(el);
+        while (view) {
+          if (view.template && view.template.viewName === 'Template.listBody' && view.templateInstance) {
+            const inst = view.templateInstance();
+            if (inst && inst.cardlimit && inst.cardlimit.get() < 1e6) {
+              inst.cardlimit.set(1e6); // render all cards in this list
+              changed = true;
+            }
+            break;
+          }
+          view = view.parentView;
+        }
+      } catch (e) { /* best effort per list */ }
+    });
+    if (changed) {
+      // Let the reactive re-render settle before we snapshot the DOM.
+      await new Promise(resolve => Tracker.afterFlush(() => setTimeout(resolve, 800)));
+    }
+  };
+
+  const createZipEntries = () => {
+    const entries = [];
+    return { entries, file(name, value) { entries.push({ name, value }); } };
+  };
+
+  // Write one entry at a time with the same small ZIP implementation used by
+  // document conversion. Only old browsers without the File System Access API
+  // retain the completed archive in memory for a Blob download.
+  const saveZipStreaming = async (zip, filename) => {
+    const { Zip, ZipDeflate, strToU8 } = await import('fflate');
+    let writable = null;
+    if (typeof window.showSaveFilePicker === 'function') {
+      try {
+        const handle = await window.showSaveFilePicker({
+          suggestedName: filename,
+          types: [{ description: 'Zip archive', accept: { 'application/zip': ['.zip'] } }],
+        });
+        writable = await handle.createWritable();
+      } catch (e) {
+        if (e && e.name === 'AbortError') return;
+      }
+    }
+    const chunks = [];
+    let writeChain = Promise.resolve();
+    let finish;
+    let fail;
+    const completed = new Promise((resolve, reject) => { finish = resolve; fail = reject; });
+    const archive = new Zip((error, data, final) => {
+      if (error) { fail(error); return; }
+      if (writable) writeChain = writeChain.then(() => writable.write(data));
+      else chunks.push(data);
+      if (final) writeChain.then(finish, fail);
+    });
+    try {
+      for (const entry of zip.entries) {
+        const file = new ZipDeflate(entry.name, { level: 6 });
+        archive.add(file);
+        let bytes;
+        if (entry.value instanceof Blob) bytes = new Uint8Array(await entry.value.arrayBuffer());
+        else if (entry.value instanceof Uint8Array) bytes = entry.value;
+        else bytes = strToU8(String(entry.value));
+        file.push(bytes, true);
+      }
+      archive.end();
+      await completed;
+      if (writable) await writable.close();
+      else saveAs(new Blob(chunks, { type: 'application/zip' }), filename);
+    } catch (error) {
+      archive.terminate();
+      if (writable) await writable.abort(error).catch(() => {});
+      throw error;
     }
   };
 
@@ -51,8 +131,13 @@ window.ExportHtml = Popup => {
     const headerQuickAccess = clonedElement.querySelector('#header-quick-access');
     if (headerQuickAccess) headerQuickAccess.remove();
 
+    // .board-header-btns-group is the wrapper that keeps the board bar's button
+    // groups on one flex line; remove it too so the export is not left with an
+    // empty div where the buttons were.
     Array.from(
-      clonedElement.querySelectorAll('#header-main-bar .board-header-btns'),
+      clonedElement.querySelectorAll(
+        '#header-main-bar .board-header-btns, #header-main-bar .board-header-btns-group',
+      ),
     ).forEach(elem => elem.remove());
     Array.from(
       clonedElement.querySelectorAll('.js-pop-over, .pop-over'),
@@ -89,9 +174,12 @@ window.ExportHtml = Popup => {
   };
 
   const addJsonExportToZip = async (zip, boardSlug, zipDirName) => {
-    const downloadJSONLink = document.querySelector('.download-json-link');
-    const downloadJSONURL = downloadJSONLink.href;
-    const response = await fetch(downloadJSONURL);
+    // The board's own JSON export. It used to be read off a .download-json-link
+    // in the export popup, which the one shared export popup no longer has, so
+    // the archive stopped here; the URL is built the way that link built it.
+    const boardId = Session.get('currentBoard');
+    const params = new URLSearchParams({ authToken: Accounts._storedLoginToken() || '' });
+    const response = await fetch(`/api/boards/${encodeURIComponent(boardId)}/export?${params.toString()}`);
     const responseBody = await response.text();
     zip.file(`${zipDirName}/data/${boardSlug}.json`, responseBody);
   };
@@ -331,7 +419,7 @@ window.ExportHtml = Popup => {
       const fileFullPath = `${zipDirName}/webfonts/${filename}`;
       zip.file(fileFullPath, responseBody);
     });
-  }
+  };
 
   const downloadFontAwesomeFonts = async (zip, zipDirName) => {
     // List of Font Awesome webfont files to include
@@ -388,7 +476,7 @@ window.ExportHtml = Popup => {
     } catch (e) {
       console.log('Error in downloadFontAwesomeFonts:', e);
     }
-  }
+  };
 
   const downloadCardCovers = async (elements, zip, boardSlug, clonedHtmlElement, zipDirName) => {
     await asyncForEach(elements, async elem => {
@@ -478,12 +566,45 @@ body { font-family: sans-serif !important; }
               // Get all text content from the card
               const allText = this.textContent.trim();
 
-              // Show modal with card details
-              modal.innerHTML = '<button style="position:absolute;top:10px;right:10px;padding:5px 10px;background:#f0f0f0;border:1px solid #ccc;border-radius:4px;cursor:pointer;">Close</button>';
-              modal.querySelector('button').onclick = () => { modal.style.display = 'none'; document.body.style.overflow = 'auto'; };
+              // Show modal with card details. Build it with DOM nodes and assign
+              // the card title/body through textContent — NEVER innerHTML. Those
+              // values come from .textContent, which DECODES HTML entities, so a
+              // card title holding entity-encoded markup (e.g.
+              // "&lt;img src=x onerror=...&gt;") decodes to a live tag; assigning it
+              // to innerHTML would re-parse and execute it — a stored XSS that fires
+              // when a recipient clicks the card in the exported HTML
+              // (GHSA-8r5p-4q9j-f5jx). textContent inserts them as inert text.
+              while (modal.firstChild) { modal.removeChild(modal.firstChild); }
+
+              const closeBtn = document.createElement('button');
+              closeBtn.textContent = 'Close';
+              closeBtn.style.cssText = 'position:absolute;top:10px;right:10px;padding:5px 10px;background:#f0f0f0;border:1px solid #ccc;border-radius:4px;cursor:pointer;';
+              closeBtn.onclick = () => { modal.style.display = 'none'; document.body.style.overflow = 'auto'; };
+              modal.appendChild(closeBtn);
 
               const content = document.createElement('div');
-              content.innerHTML = '<h2 style="margin-bottom:10px;">' + titleText + '</h2><hr style="margin:10px 0;"><div style="white-space:pre-wrap;word-wrap:break-word;font-family:sans-serif;font-size:13px;max-height:400px;overflow-y:auto;line-height:1.4;">' + allText + '</div><p style="color:#666;font-size:12px;margin-top:20px;"><em>Card #' + this.dataset.cardIndex + ' from exported board</em></p>';
+
+              const titleEl = document.createElement('h2');
+              titleEl.style.marginBottom = '10px';
+              titleEl.textContent = titleText;
+              content.appendChild(titleEl);
+
+              const hr = document.createElement('hr');
+              hr.style.margin = '10px 0';
+              content.appendChild(hr);
+
+              const bodyEl = document.createElement('div');
+              bodyEl.style.cssText = 'white-space:pre-wrap;word-wrap:break-word;font-family:sans-serif;font-size:13px;max-height:400px;overflow-y:auto;line-height:1.4;';
+              bodyEl.textContent = allText;
+              content.appendChild(bodyEl);
+
+              const footEl = document.createElement('p');
+              footEl.style.cssText = 'color:#666;font-size:12px;margin-top:20px;';
+              const footEm = document.createElement('em');
+              footEm.textContent = 'Card #' + this.dataset.cardIndex + ' from exported board';
+              footEl.appendChild(footEm);
+              content.appendChild(footEl);
+
               modal.appendChild(content);
 
               modal.style.display = 'block';
@@ -520,11 +641,15 @@ body { font-family: sans-serif !important; }
   };
 
   return async () => {
-    const zip = new JSZip();
+    const zip = createZipEntries();
     const boardSlug = getBoardSlug();
     const boardTitle = sanitizeFilename(getBoardTitle());
     const zipFilename = boardTitle || boardSlug;
     const zipDirName = zipFilename; // Directory name inside the ZIP
+
+    // Render EVERY card first (infinite scroll otherwise leaves most cards out
+    // of the DOM), then snapshot.
+    await expandAllCardsForExport();
 
     // Clone the HTML element to process for export without modifying live DOM
     const htmlElement = window.document.querySelector('html');
@@ -549,8 +674,8 @@ body { font-family: sans-serif !important; }
 
     addBoardHTMLToZip(boardSlug, zip, clonedHtmlElement, zipDirName);
 
-    const content = await zip.generateAsync({ type: 'blob' });
-    saveAs(content, `${zipFilename}.zip`);
+    // Stream the .zip straight to disk (low memory) with a blob fallback.
+    await saveZipStreaming(zip, `${zipFilename}.zip`);
     // No page reload - impersonation session is preserved!
   };
 };

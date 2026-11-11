@@ -1,0 +1,55 @@
+template(name="timelineView")
+  .stats-view.timeline-view
+    .stats-view-content
+      h1.stats-view-title {{_ 'board-view-timeline'}}
+      p.timeline-view-hint {{_ 'board-view-timeline-hint'}}
+
+      .timeline-track
+        a.timeline-marker.js-timeline-live(class="{{#unless selectedTimestamp}}is-selected{{/unless}}")
+          | {{_ 'board-view-timeline-now'}}
+        each timelineMarkers
+          a.timeline-marker.js-timeline-marker(data-ts="{{this.time}}" class="{{#if isSelectedMarker this.time}}is-selected{{/if}}")
+            | {{this.label}}
+
+      if selectedTimestamp
+        p.timeline-view-asof
+          | {{_ 'board-view-timeline-showing'}} {{formattedSelectedTimestamp}}
+
+      .timeline-lists
+        each timelineLists
+          .timeline-list
+            .timeline-list-title
+              +viewer
+                = this.title
+            each this.cards
+              .timeline-card
+                if this.archived
+                  span.timeline-card-badge {{_ 'archived'}}
+                .timeline-card-title
+                  +viewer
+                    = this.title
+                if this.description
+                  .timeline-card-description
+                    +viewer
+                      = this.descriptionSnippet
+                if this.labelNames.length
+                  p.timeline-card-labels
+                    each this.labelNames
+                      span.timeline-card-label
+                        +viewer
+                          = this
+                if this.memberNames.length
+                  p.timeline-card-members
+                    | {{_ 'members'}}:
+                    | {{this.memberNames}}
+                if this.dueAt
+                  p.timeline-card-due
+                    | {{_ 'due-date'}}: {{this.formattedDueAt}}
+                if selectedTimestamp
+                  if canRestoreCard this.cardId
+                    button.timeline-card-restore.js-restore-card-timeline.primary(type="button")
+                      | {{_ 'board-view-timeline-restore'}}
+
+template(name="cardRestoreToTimelinePopup")
+  p {{_ 'board-view-timeline-restore-confirm'}}
+  button.js-confirm.primary.full(type="submit") {{_ 'board-view-timeline-restore'}}

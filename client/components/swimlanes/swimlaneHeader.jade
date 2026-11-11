@@ -1,5 +1,7 @@
 template(name="swimlaneHeader")
-  .swimlane-header-wrap.js-swimlane-header(class=colorClass title="{{_ 'rename'}}")
+  .swimlane-header-wrap.js-swimlane-header(class=colorClass style=colorStyle title="{{_ 'rename'}}")
+    +structuralSelectionCheckbox(kind="swimlane" id=_id label=title)
+    +scrumMetadata(kind="swimlane" record=this)
     if this.isTemplateContainer
         +swimlaneFixedHeader(this)
     else
@@ -38,23 +40,57 @@ template(name="swimlaneFixedHeader")
               a.js-open-add-swimlane-menu.swimlane-header-plus-icon(title="{{_ 'add-swimlane'}}")
                 i.fa.fa-plus
               if isTouchScreenOrShowDesktopDragHandles
-                unless isTouchScreen
-                  a.swimlane-header-handle.handle.js-swimlane-header-handle
-                    i.fa.fa-arrows
-                if isTouchScreen
-                  a.swimlane-header-miniscreen-handle.handle.js-swimlane-header-handle
-                    i.fa.fa-arrows
+                a.swimlane-header-handle.handle.nodragscroll.js-swimlane-header-handle(title="{{_ 'moveSwimlanePopup-title'}}")
+                  i.fa.fa-arrows
 
 template(name="editSwimlaneTitleForm")
   .list-composer
-    input.list-name-input.full-line(type="text" value="{{isTitleDefault title}}" autofocus)
+    textarea.list-name-input.full-line(rows="2" autofocus dir="auto") {{isTitleDefault title}}
     .edit-controls.clearfix
       button.primary.confirm(type="submit") {{_ 'save'}}
-      a.js-close-inlined-form
+      a.js-close-inlined-form(title="{{_ 'close'}}")
         i.fa.fa-times-thin
 
 template(name="swimlaneActionPopup")
   if currentUser
+    //- Copy link, FIRST and above every permission check: a swimlane has an
+      address now, and copying it is reading, not editing - somebody who may
+      only read the board may still tell a colleague which swimlane they mean.
+      The rows below are all guarded because they change the board.
+      models/lib/boardItemUrl.js, docs/Features/General/Board-Item-Links.md
+    ul.pop-over-list
+      li: a.js-copy-swimlane-link
+        i.fa.fa-link
+        span
+          | {{_ 'copy-link-to-clipboard'}}
+    span.copied-tooltip {{_ 'copied'}}
+    //- #1172: star/unstar this swimlane - same toggle pattern as the board
+      star, reading-like so it sits above the rows that change the board.
+    ul.pop-over-list
+      li: a.js-star-swimlane-item
+        i.fa(class="{{#if isSwimlaneItemStarred}}fa-star{{else}}fa-star-o{{/if}}")
+        span
+          | {{#if isSwimlaneItemStarred}}{{_ 'unstar-item'}}{{else}}{{_ 'star-item'}}{{/if}}
+    //- History of this swimlane and everything in it. Reading, like the link
+      above it, so it sits above the rows that change the board.
+    ul.pop-over-list
+      li: a.js-swimlane-history
+        i.fa.fa-history
+        span
+          | {{_ 'history'}}
+    hr
+    //- #1173: exporting a swimlane is the board export restricted to it, and
+      like copying a link it is READING - so it sits above the rows that change
+      the board and is not guarded by them.
+    ul.pop-over-list
+      li: a.js-export-swimlane
+        i.fa.fa-upload
+        span {{_ 'export'}}
+      if canImportIntoBoard
+        li: a.js-import-swimlane
+          i.fa.fa-download
+          span {{_ 'import'}}
+    hr
     unless currentUser.isCommentOnly
       unless currentUser.isReadOnly
         unless currentUser.isReadAssignedOnly
@@ -69,16 +105,19 @@ template(name="swimlaneActionPopup")
                i.fa.fa-plus
                span
                  | {{_ 'add-list'}}
-          hr
-          ul.pop-over-list
-             if currentUser.isBoardAdmin
-               li: a.js-set-swimlane-color
-                 i.fa.fa-paint-brush
-                 | {{_ 'select-color'}}
-             li: a.js-set-swimlane-height
-               i.fa.fa-arrows
-               |  {{_ 'set-swimlane-height'}}
+          //- "Set swimlane height" was here. Swimlane height can still be
+            dragged from the resize handle below it (unless Board Settings /
+            Swimlane has locked that) - a menu entry for the same thing was a
+            second place to look for it. client/components/sidebar/sidebar.jade
+            Its removal left "Select color" as the only row of this group, so
+            the group's own hr moves inside the admin check with it - a non-
+            admin who cannot select the color has nothing here to rule off.
           if currentUser.isBoardAdmin
+            hr
+            ul.pop-over-list
+              li: a.js-set-swimlane-color
+                i.fa.fa-paint-brush
+                | {{_ 'select-color'}}
             unless this.isTemplateContainer
               hr
               ul.pop-over-list
@@ -101,8 +140,15 @@ template(name="swimlaneAddPopup")
       unless currentUser.isReadOnly
         unless currentUser.isReadAssignedOnly
           form
-            input.swimlane-name-input.full-line(type="text" placeholder="{{_ 'add-swimlane'}}"
+            textarea.swimlane-name-input.full-line(rows="2" dir="auto" placeholder="{{_ 'add-swimlane'}}"
               autocomplete="off" autofocus)
+            label.swimlane-placement-option
+              input.js-swimlane-placement(type="radio" name="swimlane-placement" value="below" checked)
+              span(dir="auto") {{_ 'below-selected-swimlane'}}
+            label.swimlane-placement-option
+              input.js-swimlane-placement(type="radio" name="swimlane-placement" value="above")
+              span(dir="auto") {{_ 'above-selected-swimlane'}}
+            +multilineTitleChoice(selector=".swimlane-name-input" singular="swimlane" plural="swimlanes")
             .edit-controls.clearfix
               button.primary.confirm(type="submit") {{_ 'add'}}
               unless currentBoard.isTemplatesBoard
@@ -115,15 +161,19 @@ template(name="setSwimlaneColorPopup")
   form.edit-label.swimlane-color-popup
     // Align content to left and remove default gutter
     .flush-left
-      .palette-colors(style="margin-left:0; padding-left:0; justify-content:flex-start;")
+      .palette-colors(style="margin-inline-start:0; padding-inline-start:0; justify-content:flex-start;")
         each colors
           span.card-label.palette-color.js-palette-color(class="card-details-{{color}}")
             if(isSelected color)
               i.fa.fa-check
+    // #5514: native color wheel for picking a custom RGB / hex color
+    .flush-left.color-wheel-wrap
+      label(for="swimlaneColorWheel") {{_ 'custom-color'}}
+      input.js-swimlane-color-wheel#swimlaneColorWheel(type="color" value=currentColorHex title="{{_ 'custom-color'}}")
     // Buttons aligned left too
     .flush-left
-      button.primary.confirm.js-submit(style="margin-left:0") {{_ 'save'}}
-      button.js-remove-color.negate.wide.right(style="margin-left:8px") {{_ 'unset-color'}}
+      button.primary.confirm.js-submit(style="margin-inline-start:0") {{_ 'save'}}
+      button.js-remove-color.negate.wide.right(style="margin-inline-start:8px") {{_ 'remove-btn'}}
 
 template(name="setSwimlaneHeightPopup")
   .flush-left.swimlane-height-popup

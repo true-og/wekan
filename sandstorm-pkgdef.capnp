@@ -22,10 +22,10 @@ const pkgdef :Spk.PackageDefinition = (
     appTitle = (defaultText = "Wekan"),
     # The name of the app as it is displayed to the user.
 
-    appVersion = 942,
+    appVersion = 1306,
     # Increment this for every release.
 
-    appMarketingVersion = (defaultText = "9.42~2026-06-13"),
+    appMarketingVersion = (defaultText = "13.06~2026-11-10"),
     # Human-readable presentation of the app version.
 
     minUpgradableAppVersion = 0,
@@ -227,11 +227,15 @@ const pkgdef :Spk.PackageDefinition = (
 
 const myCommand :Spk.Manifest.Command = (
   # Here we define the command used to start up your server.
-  #argv = ["/sandstorm-http-bridge", "4000", "--", "node", "start.js"],
   #argv = ["/sandstorm-http-bridge", "4000", "--", "node", "--stack-size=65500", "start.js"],
-  argv = ["/sandstorm-http-bridge", "4000", "--", "node", "start.js"],
+  # node, not a shell script: a grain has no /bin/sh (meteor-spk's bin/ holds only
+  # mongod, niscud and node), so a "./start-memory.sh" died with execvp ENOENT.
+  argv = ["/sandstorm-http-bridge", "4000", "--", "node", "start-memory.js"],
   environ = [
     # Note that this defines the *entire* environment seen by your app.
+    # Lightweight startup markers. Enable METEOR_PROFILE only for diagnostics:
+    # its hook stack traces force expensive source-map processing at startup.
+    (key = "WEKAN_STARTUP_TIMING", value = "1"),
     #---------------------------------------------------------------------
     # https://github.com/wekan/wekan/issues/3585#issuecomment-1021522132
     # Add more Node heap:
@@ -239,12 +243,13 @@ const myCommand :Spk.Manifest.Command = (
     # Add more stack:
     #bash -c "ulimit -s 65500; exec node --stack-size=65500 main.js"
     #---------------------------------------------------------------------
-    (key = "NODE_OPTIONS", value = "--max_old_space_size=4096"),
     (key = "PATH", value = "/usr/local/bin:/usr/bin:/bin"),
-    (key = "WRITABLE_PATH", value = "/var/wekan-uploads"),
+    # Files root for the Node26/FerretDB build: attachments/, avatars/ and the
+    # FerretDB SQLite db/ live under /var/files (start.js also exports this). See
+    # docs/Platforms/FOSS/Container/Sandstorm/Meteor3/Migration.md.
+    (key = "WRITABLE_PATH", value = "/var/files"),
     (key = "RESULTS_PER_PAGE", value = ""),
     (key = "WITH_API", value = "true"),
-    (key = "RICHER_CARD_COMMENT_EDITOR", value="false"),
     (key = "CARD_OPENED_WEBHOOK_ENABLED", value="false"),
     (key = "NOTIFICATION_TRAY_AFTER_READ_DAYS_BEFORE_REMOVE", value=""),
     (key = "BIGEVENTS_PATTERN", value="NONE"),
@@ -265,9 +270,70 @@ const myCommand :Spk.Manifest.Command = (
     (key = "OAUTH2_AUTH_ENDPOINT", value=""),
     (key = "OAUTH2_USERINFO_ENDPOINT", value=""),
     (key = "OAUTH2_TOKEN_ENDPOINT", value=""),
+    (key = "OAUTH_GOOGLE_ENABLED", value="false"),
+    (key = "OAUTH_GOOGLE_CLIENT_ID", value=""),
+    (key = "OAUTH_GOOGLE_SECRET", value=""),
+    (key = "OAUTH_GOOGLE_SECRET_FILE", value=""),
+    (key = "OAUTH_GITHUB_ENABLED", value="false"),
+    (key = "OAUTH_GITHUB_CLIENT_ID", value=""),
+    (key = "OAUTH_GITHUB_SECRET", value=""),
+    (key = "OAUTH_GITHUB_SECRET_FILE", value=""),
+    (key = "OAUTH_FACEBOOK_ENABLED", value="false"),
+    (key = "OAUTH_FACEBOOK_APP_ID", value=""),
+    (key = "OAUTH_FACEBOOK_SECRET", value=""),
+    (key = "OAUTH_FACEBOOK_SECRET_FILE", value=""),
+    (key = "OAUTH_TWITTER_ENABLED", value="false"),
+    (key = "OAUTH_TWITTER_CONSUMER_KEY", value=""),
+    (key = "OAUTH_TWITTER_SECRET", value=""),
+    (key = "OAUTH_TWITTER_SECRET_FILE", value=""),
+    (key = "OAUTH_METEOR_DEVELOPER_ENABLED", value="false"),
+    (key = "OAUTH_METEOR_DEVELOPER_CLIENT_ID", value=""),
+    (key = "OAUTH_METEOR_DEVELOPER_SECRET", value=""),
+    (key = "OAUTH_METEOR_DEVELOPER_SECRET_FILE", value=""),
+    (key = "OAUTH_WEIBO_ENABLED", value="false"),
+    (key = "OAUTH_WEIBO_CLIENT_ID", value=""),
+    (key = "OAUTH_WEIBO_SECRET", value=""),
+    (key = "OAUTH_WEIBO_SECRET_FILE", value=""),
+    (key = "OAUTH_MEETUP_ENABLED", value="false"),
+    (key = "OAUTH_MEETUP_CLIENT_ID", value=""),
+    (key = "OAUTH_MEETUP_SECRET", value=""),
+    (key = "OAUTH_MEETUP_SECRET_FILE", value=""),
+    (key = "OAUTH_PROVIDERS_LOGIN_STYLE", value="redirect"),
+    (key = "OAUTH_PROVIDERS_MERGE_EXISTING_USERS", value="false"),
+    (key = "SAML_ENABLED", value="false"),
+    (key = "SAML_PROVIDER", value=""),
+    (key = "SAML_ENTRYPOINT", value=""),
+    (key = "SAML_ISSUER", value=""),
+    (key = "SAML_CERT", value=""),
+    (key = "SAML_IDPSLO_REDIRECTURL", value=""),
+    (key = "SAML_PRIVATE_KEYFILE", value=""),
+    (key = "SAML_PUBLIC_CERTFILE", value=""),
+    (key = "SAML_IDENTIFIER_FORMAT", value=""),
+    (key = "SAML_LOCAL_PROFILE_MATCH_ATTRIBUTE", value=""),
+    (key = "SAML_ATTRIBUTES", value=""),
+    (key = "SAML_MERGE_EXISTING_USERS", value="false"),
+    (key = "SAML_IDP_PROFILE", value=""),
+    (key = "SAML_WANT_RESPONSE_SIGNED", value=""),
+    (key = "SAML_WANT_ASSERTIONS_SIGNED", value=""),
+    (key = "SAML_LOGIN_FLOW", value=""),
+    (key = "PASSWORDLESS_ENABLED", value="false"),
     (key = "LDAP_ENABLE", value="false"),
     (key = "PASSWORD_LOGIN_ENABLED", value="true"),
     (key = "SANDSTORM", value="1"),
+    # A grain talks DDP over sockjs, and SAYS so rather than relying on
+    # ddp-server's default. That default IS sockjs today (Meteor.settings, then
+    # DDP_TRANSPORT, then DISABLE_SOCKJS, then sockjs), and the uws transport's
+    # `Npm.require('uWebSockets.js')` runs only inside the setup() of whichever
+    # transport was chosen - so a sockjs grain never loads that module. The .spk
+    # therefore does not SHIP it: releases/bundle-trim.mjs drops all 121 MB of
+    # it, twenty prebuilt binaries for OS/CPU/ABI combinations a grain is not,
+    # which is a large part of how the package fits Sandstorm's 1 GiB limit.
+    # Pinning the value here is what makes that safe - if this said uws, or if
+    # upstream changed its default, the grain would ask for a module that was
+    # left out and fail to boot. tests/bundleTrim.test.cjs ties the two together
+    # so they cannot drift apart. This environ is the app's ENTIRE environment,
+    # so there is nowhere else it could come from.
+    (key = "DDP_TRANSPORT", value="sockjs"),
     (key = "METEOR_SETTINGS", value = "{\"public\": {\"sandstorm\": true}}")
   ]
 );

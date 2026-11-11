@@ -39,10 +39,20 @@ class CardPage {
   }
 
   async editTitle(newTitle) {
-    await this.root.locator('.js-card-title.js-open-inlined-form').click();
+    // The title splits: `span.card-details-title-edit-zone.js-open-inlined-form`
+    // is the leading half that opens the editor, and the rest of the `h2` drags
+    // the window. Both classes used to be on the `h2` itself, so a selector that
+    // wants them on ONE element matches nothing now - it has to be a descendant.
+    await this.root
+      .locator('.js-card-title .js-open-inlined-form, .card-details-title-edit-zone')
+      .first()
+      .click();
     const input = this.root.locator('.js-card-details-title textarea, .js-card-details-title input');
     await input.fill(newTitle);
-    await input.press('Enter');
+    // #4236: plain Enter now inserts a newline in the card title (consistent
+    // with the description field); Ctrl/Cmd+Enter saves. Control+Enter sends
+    // ctrlKey on every platform, which the save handler accepts.
+    await input.press('Control+Enter');
     await this.page.waitForTimeout(500);
   }
 
@@ -76,19 +86,38 @@ class CardPage {
   // --- List/status selector ---
 
   listSelector() {
-    return this.root.locator('.js-select-card-details-lists');
+    return this.root.locator('.card-details-list-picker');
   }
 
   async changeList(listTitle) {
-    await this.listSelector().selectOption({ label: listTitle });
-    await this.page.waitForTimeout(600);
+    const picker = this.listSelector();
+    await picker.locator('summary').click();
+    await picker.locator('.js-select-card-details-list-option').filter({ hasText: listTitle }).click();
   }
 
   // --- Actions menu ---
 
   async openActionsMenu() {
-    await this.root.locator('.js-open-card-details-menu').first().click();
-    await this.page.locator('.js-pop-over').waitFor();
+    const trigger = this.root.locator('.js-open-card-details-menu').first();
+    const popover = this.page.locator('.js-pop-over');
+    // The board can transiently re-render to a "board-not-found" shell while its
+    // subscription re-settles under the heavy all-parallel run (most visible in
+    // Firefox/WebKit), detaching the open card details — and this trigger —
+    // mid-interaction. Retry the open until the popup actually shows, mirroring
+    // BoardPage.openListMenu.
+    for (let attempt = 0; attempt < 4; attempt++) {
+      await this.root
+        .waitFor({ state: 'visible', timeout: 15_000 })
+        .catch(() => {});
+      try {
+        await trigger.click({ timeout: 5_000 });
+        await popover.waitFor({ state: 'visible', timeout: 5_000 });
+        return;
+      } catch (err) {
+        // card details re-rendered mid-interaction; loop and try again
+      }
+    }
+    await popover.waitFor({ timeout: 5_000 });
   }
 
   async clickAction(selector) {
@@ -110,11 +139,16 @@ class CardPage {
   /**
    * Ensure the boards select has a valid selection.
    * Boards load reactively via Meteor DDP after the `boards` publication fires.
-   * If the options never appear (subscription slow / seeded via mongosh bypass),
+   * If the options never appear (subscription slow / seeded directly in MongoDB),
    * we inject the current board ID from the page URL and trigger the Blaze change
    * handler so the dialog's selectedBoardId and list select are updated.
    */
   async _selectBoard(pop, targetBoardTitle) {
+    // The lists select is always drawn; wait for it before asking whether the
+    // boards one is there. count() answers at once, and asked while the popup
+    // was still rendering it said 0 - so a move to another board quietly stayed
+    // on the same board (#6793's Move Card spec).
+    await pop.locator('select.js-select-lists').waitFor();
     const boardSel = pop.locator('select.js-select-boards');
     if (await boardSel.count() === 0) return; // boards select hidden (isWorker user)
 
@@ -278,10 +312,17 @@ class CardPage {
   // --- Custom fields ---
 
   async openCustomFields() {
-    // .js-custom-fields is inside cardDetailsActionsPopup, not directly in the card panel.
-    await this.openActionsMenu();
-    await this.clickAction('.js-custom-fields');
-    await this.page.locator('.js-pop-over').waitFor();
+    // The single home for custom fields is the hamburger at the end of the
+    // card's own Custom Fields heading: the picker of which fields are on this
+    // card, a pencil each, and "Add custom field". The card menu's entry and the
+    // Board Settings row were removed when it moved there, and the old
+    // `a.js-custom-fields` anchor lost its label and then the tag - so this is
+    // the only way in, and it is what the test has to click.
+    await this.root
+      .locator('.js-open-custom-fields-settings')
+      .first()
+      .click({ timeout: 10_000 });
+    await this.page.locator('.js-pop-over').waitFor({ timeout: 5_000 });
   }
 
   // --- Attachments ---
@@ -310,8 +351,45 @@ class CardPage {
 
   // --- Copy link (open in new tab) ---
 
-  copyLinkButton() {
-    return this.root.locator('.js-copy-link, a.card-copy-button').first();
+  /**
+   * The row that copies the card's link, INSIDE the card's actions menu.
+   *
+   * The card's title header used to carry this as an `<a href>` named only by a
+   * tooltip. It is a named row of the hamburger menu now, beside the swimlane's
+   * and the list's, and it copies with JavaScript rather than being a link -
+   * so there is no `href` to read. docs/Features/General/Board-Item-Links.md
+   */
+  copyLinkRow() {
+    return this.page.locator('.js-pop-over .js-copy-card-link').first();
+  }
+
+  /**
+   * Open the actions menu and copy the card's link. Returns what the page put
+   * on the clipboard, which is the ABSOLUTE url - a relative path is only a
+   * link inside this page.
+   *
+   * Record the real Clipboard API call without reading the clipboard back.
+   * Firefox now runs through a localhost bridge, so it has a secure origin
+   * and uses the same Clipboard API path as Chromium.
+   */
+  async copyLink() {
+    await this.page.evaluate(() => {
+      window.__wekanCopied = null;
+      const real = navigator.clipboard && navigator.clipboard.writeText;
+      if (real) {
+        navigator.clipboard.writeText = text => {
+          window.__wekanCopied = text;
+          return real.call(navigator.clipboard, text).catch(() => {});
+        };
+      }
+    });
+    await this.openActionsMenu();
+    const row = this.copyLinkRow();
+    await row.waitFor({ timeout: 15_000 });
+    await row.click();
+    await this.page.waitForFunction(() => window.__wekanCopied !== null, null,
+      { timeout: 15_000 });
+    return this.page.evaluate(() => window.__wekanCopied);
   }
 
   // --- Due dates ---
@@ -325,7 +403,7 @@ class CardPage {
     // Try the "+" add button first; fall back to the existing date badge.
     const addBtn = this.root.locator('a.js-due-date').first();
     const badge  = this.root.locator('a.js-edit-date.card-date').first();
-    if (await addBtn.count() > 0) {
+    if (await addBtn.isVisible()) {
       await addBtn.click({ timeout: 10_000 });
     } else {
       await badge.click({ timeout: 10_000 });
@@ -333,16 +411,37 @@ class CardPage {
     await this.page.locator('.js-pop-over').waitFor({ timeout: 8_000 });
   }
 
-  /**
-   * Set the due date. isoDate should be 'YYYY-MM-DD'.
-   * Opens the editor, fills the date field, and submits.
-   */
+  /** Select a Gregorian date through the visible popup controls. */
+  async selectDateInPopup(isoDate) {
+    const pop = this.page.locator('.js-pop-over');
+    const days = pop.locator('.js-calendar-day');
+    await days.first().waitFor({ state: 'visible' });
+    const [year, month] = (await days.first().getAttribute('data-date')).split('-').map(Number);
+    const [targetYear, targetMonth] = isoDate.split('-').map(Number);
+    const yearStep = Math.sign(targetYear - year);
+    for (let current = year; current !== targetYear; current += yearStep) {
+      await pop.locator(yearStep > 0 ? '.js-calendar-year-next' : '.js-calendar-year-previous').click();
+      await this.page.waitForFunction(expected =>
+        Number(document.querySelector('.js-pop-over .js-calendar-day')?.dataset.date.split('-')[0]) === expected,
+      current + yearStep);
+    }
+    const monthStep = Math.sign(targetMonth - month);
+    for (let current = month; current !== targetMonth; current += monthStep) {
+      await pop.locator(monthStep > 0 ? '.js-calendar-next' : '.js-calendar-previous').click();
+      await this.page.waitForFunction(expected =>
+        Number(document.querySelector('.js-pop-over .js-calendar-day')?.dataset.date.split('-')[1]) === expected,
+      current + monthStep);
+    }
+    await pop.locator(`.js-calendar-day[data-date="${isoDate}"]`).click();
+  }
+
+  /** Set the due date using the calendar, then save it. */
   async setDueDate(isoDate) {
     await this.openDueDateEditor();
+    await this.selectDateInPopup(isoDate);
     const pop = this.page.locator('.js-pop-over');
-    await pop.locator('input.js-date-field, input[type=date]').first().fill(isoDate);
     await pop.locator('button.js-submit-date').click();
-    await this.page.waitForTimeout(500);
+    await pop.waitFor({ state: 'hidden' });
   }
 
   /** Clear the due date by opening the editor and clicking Delete. */
@@ -366,8 +465,10 @@ class CardPage {
    * textarea, and submits — which calls Checklists.insert on the server.
    */
   async addChecklist(title) {
-    // inlinedForm else-block: a.add-checklist.js-open-inlined-form (bottom trigger)
-    const trigger = this.root.locator('a.add-checklist.js-open-inlined-form').last();
+    // #6796: a card with no checklist has only the title line's "+"
+    // (a.add-checklist-top); the bottom a.add-checklist appears once there is
+    // one. Either opens the same form; .last() prefers the bottom one.
+    const trigger = this.root.locator('a.add-checklist.js-open-inlined-form, a.add-checklist-top.js-open-inlined-form').last();
     await trigger.click({ timeout: 10_000 });
     // After click the form becomes visible: form.inlined-form.js-add-checklist
     const form = this.root.locator('form.js-add-checklist').last();

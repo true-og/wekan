@@ -8,6 +8,9 @@ import { ReactiveCache } from '/imports/reactiveCache';
 import Attachments from '/models/attachments';
 import AttachmentStorageSettings from '/models/attachmentStorageSettings';
 import { fileStoreStrategyFactory } from '/models/attachments.server';
+// Register the api.attachment.* Meteor methods under test (the meteor-test entry
+// does not load app server code the way server/main.js → /server/imports does).
+import '/server/attachmentApi';
 
 describe('attachmentApi authentication', function() {
   let findOneStub, hashStub;
@@ -246,6 +249,11 @@ describe('attachmentApi authentication', function() {
         },
       });
 
+      // The handler logs the refusal with console.error. Printing an error's
+      // stack is what took this test past Mocha's two seconds: as the first
+      // stack of the run, it loads the server bundle's source map. The log is
+      // not what is tested, so it is captured instead of printed.
+      const consoleError = sinon.stub(console, 'error');
       let thrown;
       try {
         await uploadHandler.apply(
@@ -254,7 +262,10 @@ describe('attachmentApi authentication', function() {
         );
       } catch (error) {
         thrown = error;
+      } finally {
+        consoleError.restore();
       }
+      expect(consoleError.calledWithMatch('API attachment upload error:')).to.equal(true);
 
       expect(thrown).to.exist;
       expect(thrown.error).to.equal('upload-error');
@@ -378,7 +389,10 @@ describe('attachmentApi authentication', function() {
       }));
       // user-1 IS a global admin.
       stub(ReactiveCache, 'getUser', async () => ({ _id: 'user-1', isAdmin: true }));
-      stub(Attachments, 'removeAsync', async () => 1);
+      // History.md §12.3: the API delete is a SOFT delete - it marks the
+      // document and never calls Attachments.removeAsync.
+      stub(Attachments, 'removeAsync', async () => { throw new Error('hard delete must not be called'); });
+      stub(Attachments.collection, 'updateAsync', async () => 1);
 
       let result;
       let thrown;

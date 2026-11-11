@@ -1,12 +1,20 @@
 /**
  * server/lib/ssrfGuard.js — SSRF + DNS-Rebinding hardened fetch
  *
- * Prevents Server-Side Request Forgery by:
+ * Prevents Server-Side Request Forgery by, for EVERY hop of a request:
  *   1. Blocking private / loopback IP ranges in the URL string.
  *   2. Resolving the hostname exactly once and validating every returned IP.
  *   3. Pinning the TCP connection to the resolved IP — no second DNS lookup
  *      can occur, eliminating the DNS-rebinding window entirely.
- *   4. Blocking all HTTP redirects (a redirect could point to internal IPs).
+ *   4. Refusing HTTP redirects by default, and validating a followed redirect
+ *      the same way as the original URL when a caller opts in to following one.
+ *
+ * "Every hop" is the point. A guard that checks only the URL the caller passed
+ * is a guard the target can step around by ANSWERING with a redirect to
+ * 127.0.0.1 instead of serving the request — the bypass reported as FollowBleed
+ * (GHSA-j9p2-jm73-p549). So a redirect is either refused (maxRedirects: 0, the
+ * default, correct for webhooks and avatar downloads) or followed only after
+ * the new URL has been through the same validation and pinning.
  *
  * Uses only Node.js built-in modules (http, https, dns, net) so there is no
  * external-package version dependency.
@@ -14,137 +22,170 @@
  * Usage:
  *   import { fetchSafe } from '/server/lib/ssrfGuard';
  *   const response = await fetchSafe(url, { method: 'POST', body: '…' });
+ *   const file     = await fetchSafe(url, { maxRedirects: 5 });
  */
 
 import dns from 'dns';
+import fs from 'fs';
 import net from 'net';
 import http from 'http';
 import https from 'https';
+import tls from 'tls';
 import { URL } from 'url';
+import { isIpBlocked } from '/models/lib/attachmentUrlValidation';
+import { createOutboundDeadline } from '/server/lib/outboundDeadline';
+import { proxyFor, proxyAuthorization, pinnedAuthority } from '/server/lib/outboundProxy';
 
 // dns/promises is only a standalone sub-path from Node 15+; use dns.promises
 // for compatibility with the Node 14 runtime bundled in Meteor 2.x.
 const dnsPromises = dns.promises;
 
 // ─── Blocked-range helpers ────────────────────────────────────────────────────
+//
+// The authoritative block-list lives in models/lib/attachmentUrlValidation.js
+// (`isIpBlocked`) and is shared by both the input-time validator and this
+// delivery-time guard so the two can never drift apart. The two functions below
+// are kept only as backward-compatible, family-specific wrappers over that
+// single source of truth — do NOT reintroduce a private range list here.
 
 /**
  * Returns true if the IPv4 address belongs to a range that must never be
- * contacted from a server-side outgoing request.
+ * contacted from a server-side outgoing request. Thin wrapper over the shared
+ * `isIpBlocked`.
  *
  * @param {string} addr  Dotted-decimal IPv4 string, e.g. "192.168.1.1"
  * @returns {boolean}
  */
 export function isBlockedIPv4(addr) {
-  const blockedPatterns = [
-    /^127\./,                       // 127.0.0.0/8  — loopback
-    /^10\./,                        // 10.0.0.0/8   — private (RFC 1918)
-    /^172\.(1[6-9]|2\d|3[01])\./,  // 172.16.0.0/12 — private (RFC 1918)
-    /^192\.168\./,                  // 192.168.0.0/16 — private (RFC 1918)
-    /^0\./,                         // 0.0.0.0/8    — current network
-    /^169\.254\./,                  // 169.254.0.0/16 — link-local / AWS metadata
-    /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./,  // 100.64.0.0/10 — shared address (RFC 6598)
-    /^192\.0\.0\./,                 // 192.0.0.0/24 — IETF protocol assignments
-    /^198\.18\./,                   // 198.18.0.0/15 — benchmarking
-    /^198\.19\./,                   // 198.18.0.0/15 — benchmarking (odd octet)
-    /^224\./,                       // 224.0.0.0/4  — multicast
-    /^240\./,                       // 240.0.0.0/4  — reserved
-    /^255\.255\.255\.255$/,         // broadcast
-  ];
-  return blockedPatterns.some(p => p.test(addr));
+  return net.isIPv4(addr) ? isIpBlocked(addr) : true;
 }
 
 /**
  * Returns true if the IPv6 address belongs to a range that must never be
- * contacted from a server-side outgoing request.
+ * contacted from a server-side outgoing request. Thin wrapper over the shared
+ * `isIpBlocked`.
  *
  * @param {string} addr  IPv6 string without surrounding brackets
  * @returns {boolean}
  */
 export function isBlockedIPv6(addr) {
-  const lower = addr.toLowerCase();
-  const blockedPatterns = [
-    /^::1$/,          // ::1/128 — loopback
-    /^::$/,           // unspecified address
-    /^fe80:/,         // fe80::/10 — link-local
-    /^fc00:/,         // fc00::/7  — unique local (fc)
-    /^fd/,            // fc00::/7  — unique local (fd)
-    /^64:ff9b:/,      // 64:ff9b::/96 — IPv4-mapped
-    /^::ffff:/,       // ::ffff:0:0/96 — IPv4-mapped loopback potential
-    /^2001:db8:/,     // 2001:db8::/32 — documentation
-    /^100::/,         // 100::/64 — discard (RFC 6666)
-  ];
-  return blockedPatterns.some(p => p.test(lower));
+  return net.isIPv6(addr) ? isIpBlocked(addr) : true;
 }
 
 // ─── DNS resolve + validate ───────────────────────────────────────────────────
 
 /**
  * Resolve the hostname exactly once, validate every returned IP against the
- * block-list, and return the first safe address.
+ * block-list, and return a single safe address to pin the connection to.
  *
  * If the caller already passed a raw IP (no DNS needed) it is validated and
  * returned directly.
  *
+ * Resolution goes through `dns.lookup({ all: true })` so BOTH address families
+ * (A + AAAA) are returned and checked — the same resolver call the input-time
+ * validator uses (models/lib/attachmentUrlValidation.js). The previous
+ * implementation resolved only A records (`dns.resolve4`), which left the
+ * delivery layer blind to AAAA: an IPv6-only internal target was merely
+ * fail-closed and legitimate IPv6 endpoints were unreachable. Validating with
+ * the shared `isIpBlocked` also keeps this block-list from drifting out of sync
+ * with the input-side one (root cause of GHSA-66m2-4wfr-c45p / DnsBleed).
+ *
  * @param {string} hostname
- * @returns {Promise<string>}  The pinned IPv4 address to dial
+ * @returns {Promise<string>}  The validated IP address to dial
  */
-async function resolveAndPin(hostname) {
-  if (net.isIPv4(hostname)) {
-    if (isBlockedIPv4(hostname)) {
-      throw new Error(`SSRF_GUARD: Blocked IPv4 in URL: ${hostname}`);
+async function resolveAndPin(hostname, { recordBlocked = true } = {}) {
+  // Raw IP literal in the URL — validate directly, no DNS. IPv6 literals arrive
+  // bracketed from URL.hostname (e.g. "[::1]"), so strip brackets before the
+  // net.isIP() check. For a real hostname this is a no-op.
+  const cleanHost = hostname.replace(/^\[|\]$/g, '');
+  if (net.isIP(cleanHost)) {
+    if (isIpBlocked(cleanHost)) {
+      throw new Error(`SSRF_GUARD: Blocked IP in URL: ${cleanHost}`);
     }
-    return hostname;
+    return cleanHost;
   }
 
-  if (net.isIPv6(hostname)) {
-    // The URL class strips brackets, e.g. "[::1]" becomes "::1"
-    const cleanIp = hostname.replace(/^\[|\]$/g, '');
-    if (isBlockedIPv6(cleanIp)) {
-      throw new Error(`SSRF_GUARD: Blocked IPv6 in URL: ${cleanIp}`);
-    }
-    return cleanIp;
-  }
-
-  // Perform a single DNS A-record lookup and check every returned address.
-  let addresses;
+  // Resolve both address families once, then check every returned address.
+  let results;
   try {
-    addresses = await dnsPromises.resolve4(hostname);
+    results = await dnsPromises.lookup(cleanHost, { all: true });
   } catch (e) {
-    throw new Error(`SSRF_GUARD: DNS resolution failed for: ${hostname}`);
+    throw new Error(`SSRF_GUARD: DNS resolution failed for: ${cleanHost}`);
   }
 
-  if (!addresses || addresses.length === 0) {
-    throw new Error(`SSRF_GUARD: No DNS A-records returned for: ${hostname}`);
+  const addresses = (results || []).map(r => r.address);
+  if (addresses.length === 0) {
+    throw new Error(`SSRF_GUARD: No DNS records returned for: ${hostname}`);
   }
 
   for (const addr of addresses) {
-    if (isBlockedIPv4(addr)) {
-      throw new Error(`SSRF_GUARD: Blocked IPv4 ${addr} resolved for ${hostname}`);
+    if (isIpBlocked(addr)) {
+      // A NAME that resolves to an internal address is the DnsBleed shape
+      // (and DNS rebinding's): record it once here for every outbound fetch -
+      // unless the caller records the refusal under its own name (List Sync's
+      // SyncBleed), so one attempt is one row with the caller's severity.
+      if (recordBlocked) try {
+        require('/server/lib/securityLog').record({
+          key: 'ssrf.fetch', action: 'blocked', source: 'fetchSafe:dns',
+          detail: `${String(hostname).slice(0, 100)} resolved to blocked ${addr}`,
+        });
+      } catch (e) { /* logging must never break the guard */ }
+      throw new Error(`SSRF_GUARD: Blocked IP ${addr} resolved for ${hostname}`);
     }
   }
 
-  return addresses[0];
+  // Prefer an IPv4 address to pin/dial (widest compatibility); fall back to the
+  // first validated address for IPv6-only endpoints.
+  return addresses.find(a => net.isIPv4(a)) || addresses[0];
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
+// The certificate(s) WeKan should trust for outgoing webhooks, from
+// WEBHOOK_TLS_CA_CERT: either the PEM itself or a path to a file holding it.
+// Read once - an operator changing it restarts WeKan anyway - and never fatal: a
+// bad path leaves the default trust store in place rather than stopping webhooks.
+let webhookCaCache;
+export function webhookCaCert(env = process.env, readFile = fs.readFileSync) {
+  if (webhookCaCache !== undefined) return webhookCaCache;
+
+  const value = (env.WEBHOOK_TLS_CA_CERT || '').trim();
+  if (!value) {
+    webhookCaCache = null;
+    return webhookCaCache;
+  }
+
+  if (value.includes('-----BEGIN CERTIFICATE-----')) {
+    webhookCaCache = value;
+    return webhookCaCache;
+  }
+
+  try {
+    webhookCaCache = readFile(value, 'utf8');
+  } catch (error) {
+    console.error(
+      `WEBHOOK_TLS_CA_CERT: cannot read ${value} (${error.message}). Outgoing ` +
+      'webhooks keep the system trust store, so a server with a private ' +
+      'certificate will still be refused.',
+    );
+    webhookCaCache = null;
+  }
+
+  return webhookCaCache;
+}
+
 /**
- * Drop-in replacement for `fetch` with full SSRF + DNS-rebinding protection.
+ * Validate ONE URL — protocol allowlist, raw blocked IP, decimal-IP notation —
+ * and resolve it to the single IP the connection will be pinned to.
  *
- * Protection flow:
- *   1. Parse the URL; reject invalid or non-HTTP(S) protocols.
- *   2. Reject raw private / loopback IPs supplied directly in the URL.
- *   3. Detect decimal / octal / hex integer IP notation, e.g. http://2130706433
- *   4. Resolve the hostname once, reject blocked resolved IPs.
- *   5. Pin the TCP connection to the resolved IP (zero rebinding window).
- *   6. Block all redirects — a redirect could silently point to 127.0.0.1.
+ * This is the whole guard for one hop. It is a function of its own because a
+ * REDIRECT is a new hop to a new URL, and a hop that is not put through this is
+ * not guarded at all (FollowBleed, below).
  *
- * @param {string} rawUrl           User-supplied URL
- * @param {RequestInit} [options]   Standard fetch options (method, headers, body…)
- * @returns {Promise<Response>}
+ * @param {string} rawUrl
+ * @returns {Promise<{parsed: URL, resolvedIp: string}>}
  */
-export async function fetchSafe(rawUrl, options = {}) {
+async function validateAndResolve(rawUrl, guard = {}) {
   // Step 1 — parse and protocol allowlist
   let parsed;
   try {
@@ -160,19 +201,17 @@ export async function fetchSafe(rawUrl, options = {}) {
   const hostname = parsed.hostname;
 
   // Step 2 — reject raw private IPs directly in the URL
-  // (buildPinnedAgent also checks, but doing it here gives a clearer error
-  //  before we even attempt DNS)
-  if (net.isIPv4(hostname) && isBlockedIPv4(hostname)) {
-    throw new Error(`SSRF_GUARD: Blocked IPv4 in URL: ${hostname}`);
-  }
-  if (net.isIPv6(hostname)) {
-    const cleanIp = hostname.replace(/^\[|\]$/g, '');
-    if (isBlockedIPv6(cleanIp)) {
-      throw new Error(`SSRF_GUARD: Blocked IPv6 in URL: ${cleanIp}`);
-    }
+  // (resolveAndPin also checks, but doing it here gives a clearer error
+  //  before we even attempt DNS). IPv6 literals arrive bracketed from
+  //  URL.hostname, so strip brackets before the net.isIP() check.
+  const cleanHost = hostname.replace(/^\[|\]$/g, '');
+  if (net.isIP(cleanHost) && isIpBlocked(cleanHost)) {
+    throw new Error(`SSRF_GUARD: Blocked IP in URL: ${cleanHost}`);
   }
 
-  // Step 3 — detect decimal / octal / hex integer IP notation
+  // Step 3 — detect decimal integer IP notation, e.g. http://2130706433
+  // (dns.lookup below can also decode this via getaddrinfo, but an explicit,
+  //  deterministic reject here does not depend on resolver behaviour)
   if (/^\d+$/.test(hostname)) {
     const num = parseInt(hostname, 10);
     if (num >= 0 && num <= 0xffffffff) {
@@ -182,7 +221,7 @@ export async function fetchSafe(rawUrl, options = {}) {
         (num >>> 8)  & 0xff,
         num          & 0xff,
       ].join('.');
-      if (isBlockedIPv4(decoded)) {
+      if (isIpBlocked(decoded)) {
         throw new Error(
           `SSRF_GUARD: Decimal IP ${hostname} decodes to blocked ${decoded}`,
         );
@@ -191,18 +230,30 @@ export async function fetchSafe(rawUrl, options = {}) {
   }
 
   // Step 4 & 5 — resolve DNS once and pin the connection
-  const resolvedIp = await resolveAndPin(hostname);
+  const resolvedIp = await resolveAndPin(hostname, guard);
 
   console.info(`SSRF_GUARD: ${hostname} resolved and pinned to ${resolvedIp}`);
 
-  // Step 6 — make the request via Node.js built-in http/https.
-  // By setting hostname = resolvedIp we bypass the OS resolver entirely;
-  // no second DNS lookup can ever occur (rebinding window = 0).
-  // The original hostname is preserved in the Host header and as the TLS
-  // servername (SNI) so virtual-hosting and certificate validation work.
+  return { parsed, resolvedIp };
+}
+
+/**
+ * Send one request to an already-validated URL, pinned to an already-validated
+ * IP, and resolve with the raw Node response. The caller decides whether to
+ * read the body or to follow a redirect.
+ *
+ * By setting hostname = resolvedIp we bypass the OS resolver entirely; no
+ * second DNS lookup can ever occur (rebinding window = 0). The original
+ * hostname is preserved in the Host header and as the TLS servername (SNI) so
+ * virtual-hosting and certificate validation work.
+ */
+function requestOnce(parsed, resolvedIp, options, deadline) {
+  const proxy = proxyFor(parsed);
+  if (proxy) return requestViaProxy(parsed, resolvedIp, proxy, options, deadline);
   return new Promise((resolve, reject) => {
     const isHttps = parsed.protocol === 'https:';
     const transport = isHttps ? https : http;
+    const hostname = parsed.hostname;
     const port = parsed.port
       ? parseInt(parsed.port, 10)
       : (isHttps ? 443 : 80);
@@ -220,41 +271,319 @@ export async function fetchSafe(rawUrl, options = {}) {
     if (isHttps) {
       // servername drives TLS SNI → certificate validates against the real host
       reqOptions.servername = hostname;
+
+      // #6553: an outgoing webhook to a server with a self-signed certificate (an
+      // internal Mattermost, a company CA) failed at the handshake with no way
+      // around it.
+      //
+      // The answer is NOT to switch verification off. WEBHOOK_TLS_CA_CERT names
+      // the certificate - or the CA - that WeKan should TRUST for these requests:
+      // verification stays on, the chain is checked as always, and what changes is
+      // only who counts as an issuer. A self-signed certificate is its own issuer,
+      // so putting that certificate here is exactly what makes it valid.
+      //
+      // `rejectUnauthorized: false` was the first attempt and is gone: it accepts
+      // ANY certificate, including one a man in the middle presents, which is the
+      // attack the handshake exists to stop (CodeQL
+      // js/disabling-certificate-validation, alert #430).
+      const ca = webhookCaCert();
+      if (ca) {
+        reqOptions.ca = ca;
+      }
     }
 
-    const req = transport.request(reqOptions, (res) => {
-      // Block all redirects — they could silently point to internal IPs
-      if (res.statusCode >= 300 && res.statusCode < 400) {
-        res.destroy();
-        reject(new Error('SSRF_GUARD: Redirects are not allowed'));
+    sendRequest(transport, reqOptions, options, deadline, resolve, reject);
+  });
+}
+
+// #1455: through the proxy HTTP(S)_PROXY names, unless NO_PROXY sends the
+// destination direct. The destination was already resolved and checked, and
+// the proxy is asked for that IP address, never the name: it cannot resolve
+// the name to somewhere else. An https:// destination goes through a CONNECT
+// tunnel with TLS (SNI, certificate check) still against the real host; an
+// http:// one is sent to the proxy as an absolute URL on the pinned address.
+function requestViaProxy(parsed, resolvedIp, proxy, options, deadline) {
+  return new Promise((resolve, reject) => {
+    const isHttps = parsed.protocol === 'https:';
+    const port = parsed.port ? parseInt(parsed.port, 10) : (isHttps ? 443 : 80);
+    const proxyTransport = proxy.protocol === 'https:' ? https : http;
+    const proxyPort = proxy.port ? parseInt(proxy.port, 10) : (proxy.protocol === 'https:' ? 443 : 80);
+    const authority = pinnedAuthority(resolvedIp, port);
+    const auth = proxyAuthorization(proxy);
+    const proxyHeaders = auth ? { 'Proxy-Authorization': auth } : {};
+    const headers = Object.assign({}, options.headers, { Host: parsed.host });
+
+    if (!isHttps) {
+      sendRequest(proxyTransport, {
+        method: options.method || 'GET',
+        hostname: proxy.hostname,
+        port: proxyPort,
+        // Absolute form, on the pinned address: the proxy connects there.
+        path: `${parsed.protocol}//${authority}${parsed.pathname}${parsed.search}`,
+        headers: Object.assign(headers, proxyHeaders),
+      }, options, deadline, resolve, reject);
+      return;
+    }
+
+    deadline?.assertActive();
+    const connect = proxyTransport.request({
+      method: 'CONNECT',
+      hostname: proxy.hostname,
+      port: proxyPort,
+      path: authority,
+      headers: Object.assign({ Host: authority }, proxyHeaders),
+    });
+    connect.on('error', reject);
+    deadline?.watch(connect);
+    connect.on('connect', (res, socket) => {
+      if (res.statusCode !== 200) {
+        socket.destroy();
+        reject(new Error(`SSRF_GUARD: the proxy refused the tunnel (${res.statusCode})`));
         return;
       }
+      const ca = webhookCaCert();
+      sendRequest(https, {
+        method: options.method || 'GET',
+        hostname: parsed.hostname,
+        port,
+        path: parsed.pathname + parsed.search,
+        headers,
+        agent: false,
+        createConnection: () => tls.connect(Object.assign({ socket, servername: parsed.hostname }, ca ? { ca } : {})),
+      }, options, deadline, resolve, reject);
+    });
+    connect.end();
+  });
+}
 
-      const chunks = [];
-      res.on('data', (chunk) => chunks.push(chunk));
-      res.on('end', () => {
-        const body = Buffer.concat(chunks);
-        resolve({
-          status: res.statusCode,
-          headers: res.headers,
-          json: () => {
-            try {
-              return Promise.resolve(JSON.parse(body.toString('utf8')));
-            } catch (e) {
-              return Promise.reject(e);
-            }
-          },
-          text: () => Promise.resolve(body.toString('utf8')),
-        });
+function sendRequest(transport, reqOptions, options, deadline, resolve, reject) {
+  {
+    deadline?.assertActive();
+    const req = transport.request(reqOptions, (res) => {
+      // The caller reads the body a microtask later (or destroys the response
+      // and follows a redirect). Hold onto an error that arrives in between so
+      // it is neither unhandled nor lost.
+      res.once('error', (err) => {
+        res.ssrfGuardEarlyError = err;
       });
-      res.on('error', reject);
+      try { deadline?.watch(res); } catch (error) { reject(error); return; }
+      resolve(res);
     });
 
     req.on('error', reject);
+    deadline?.watch(req);
+
+    const timeoutMs = Number.isFinite(options.timeoutMs)
+      ? Math.max(1000, Math.min(options.timeoutMs, 300000))
+      : 30000;
+    if (typeof req.setTimeout === 'function') {
+      req.setTimeout(timeoutMs, () => {
+        req.destroy(new Error(`outbound request timed out after ${timeoutMs}ms`));
+      });
+    }
 
     if (options.body) {
       req.write(options.body);
     }
     req.end();
+  }
+}
+
+// Read a response to the end and wrap it in the small WHATWG-fetch-shaped
+// object callers expect. `ok` and `arrayBuffer()` are here so a caller that
+// downloads a binary body (avatar localization, Trello attachment import) can
+// use fetchSafe as a drop-in. `headers` stays the Node lowercased-object form
+// (res.headers['content-type']) and also answers headers.get('content-type'),
+// so code written against either shape works unchanged.
+function readResponse(res, options = {}) {
+  return new Promise((resolve, reject) => {
+    if (res.ssrfGuardEarlyError) {
+      reject(res.ssrfGuardEarlyError);
+      return;
+    }
+    const maxBytes = Number.isFinite(options.maxResponseBytes)
+      ? Math.max(1024, Math.min(options.maxResponseBytes, 1024 * 1024 * 1024))
+      : 10 * 1024 * 1024;
+    // stream: true hands the body on as a stream instead of reading it into
+    // memory - for a large download that goes straight into storage. The same
+    // byte limit holds, counted as the bytes flow, and the request's inactivity
+    // timeout still applies while it is read.
+    if (options.stream) {
+      const { Transform } = require('stream');
+      let streamed = 0;
+      const body = new Transform({
+        transform(chunk, encoding, done) {
+          streamed += chunk.length;
+          if (streamed > maxBytes) return done(new Error(`outbound response exceeds ${maxBytes} bytes`));
+          return done(null, chunk);
+        },
+      });
+      res.on('error', error => body.destroy(error));
+      body.on('close', () => { if (!res.complete) res.destroy(); });
+      res.pipe(body);
+      const headers = Object.assign({}, res.headers);
+      Object.defineProperty(headers, 'get', {
+        enumerable: false,
+        value: name => {
+          const value = headers[String(name).toLowerCase()];
+          return value === undefined ? null : value;
+        },
+      });
+      resolve({ status: res.statusCode, ok: res.statusCode >= 200 && res.statusCode < 300, headers, body });
+      return;
+    }
+    const chunks = [];
+    let bytes = 0;
+    res.on('data', (chunk) => {
+      bytes += chunk.length;
+      if (bytes > maxBytes) {
+        res.destroy(new Error(`outbound response exceeds ${maxBytes} bytes`));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    res.on('error', reject);
+    res.on('end', () => {
+      const body = Buffer.concat(chunks);
+      const headers = Object.assign({}, res.headers);
+      Object.defineProperty(headers, 'get', {
+        enumerable: false,
+        value: name => {
+          const value = headers[String(name).toLowerCase()];
+          return value === undefined ? null : value;
+        },
+      });
+      resolve({
+        status: res.statusCode,
+        ok: res.statusCode >= 200 && res.statusCode < 300,
+        headers,
+        json: () => {
+          try {
+            return Promise.resolve(JSON.parse(body.toString('utf8')));
+          } catch (e) {
+            return Promise.reject(e);
+          }
+        },
+        text: () => Promise.resolve(body.toString('utf8')),
+        arrayBuffer: () => Promise.resolve(
+          body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength),
+        ),
+      });
+    });
   });
+}
+
+/**
+ * Drop-in replacement for `fetch` with full SSRF + DNS-rebinding protection.
+ *
+ * Every hop — the URL the caller passed AND every URL a redirect points at — is
+ * put through validateAndResolve() before a packet is sent to it, so the guard
+ * cannot be walked around by an answer instead of a request.
+ *
+ * `options.maxRedirects` (default 0) is how many redirects a caller is willing
+ * to follow. 0 keeps the original behaviour: any 3xx is refused outright, which
+ * is what an outgoing webhook and an avatar download want, because a legitimate
+ * one never redirects. A caller that MUST follow redirects to work at all — the
+ * live Trello import, whose attachment URLs 302 to signed S3 URLs — passes a
+ * small number, and each hop is validated exactly like the first.
+ *
+ * `options.totalTimeoutMs` optionally caps the entire operation (1–300000ms),
+ * including DNS and all redirects, and destroys active streams on expiry.
+ *
+ * `options.recordBlocked: false` leaves a name that resolves inward out of
+ * Admin Panel -> Problems as DnsBleed, for a caller that records the refusal
+ * under its own name; the request is refused all the same.
+ *
+ * @param {string} rawUrl           User-supplied URL
+ * @param {RequestInit} [options]   Standard fetch options, plus maxRedirects
+ * @returns {Promise<Response>}
+ */
+export async function fetchSafe(rawUrl, options = {}) {
+  const deadline = options.totalTimeoutMs === undefined ? null : createOutboundDeadline(options.totalTimeoutMs);
+  try { return await fetchWithinDeadline(rawUrl, options, deadline); }
+  catch (error) { deadline?.cancel(error); throw error; }
+  finally { deadline?.dispose(); }
+}
+
+async function fetchWithinDeadline(rawUrl, options, deadline) {
+  const maxRedirects = Number.isInteger(options.maxRedirects)
+    ? Math.max(0, options.maxRedirects)
+    : 0;
+
+  let currentUrl = rawUrl;
+  let currentOptions = Object.assign({}, options, {
+    headers: Object.assign({}, options.headers),
+  });
+  let origin = null;
+
+  for (let hop = 0; ; hop += 1) {
+    deadline?.assertActive();
+    const resolution = validateAndResolve(currentUrl, { recordBlocked: options.recordBlocked !== false });
+    const { parsed, resolvedIp } = await (deadline ? deadline.wait(resolution) : resolution);
+    deadline?.assertActive();
+    if (origin === null) {
+      origin = parsed.origin;
+    }
+
+    const pending = requestOnce(parsed, resolvedIp, currentOptions, deadline);
+    const res = await (deadline ? deadline.wait(pending) : pending);
+
+    const isRedirect = res.statusCode >= 300 && res.statusCode < 400;
+    if (!isRedirect) {
+      const body = readResponse(res, currentOptions);
+      return deadline ? deadline.wait(body) : body;
+    }
+
+    // A redirect is never followed silently.
+    res.destroy();
+    if (maxRedirects === 0) {
+      throw new Error('SSRF_GUARD: Redirects are not allowed');
+    }
+    if (hop >= maxRedirects) {
+      throw new Error(`SSRF_GUARD: Too many redirects (limit ${maxRedirects})`);
+    }
+    const location = res.headers && res.headers.location;
+    if (!location) {
+      throw new Error('SSRF_GUARD: Redirect without a Location header');
+    }
+
+    // Resolve a relative Location against the URL that answered, then loop:
+    // the next pass re-validates protocol, IP and DNS for the new URL.
+    let next;
+    try {
+      next = new URL(location, parsed.href).href;
+    } catch {
+      throw new Error('SSRF_GUARD: Invalid redirect Location');
+    }
+
+    const nextOrigin = new URL(next).origin;
+    const headers = Object.assign({}, currentOptions.headers);
+    if (nextOrigin !== origin) {
+      // Credentials belong to the host they were issued for. Following a
+      // cross-origin redirect with them attached hands them to whoever the
+      // redirect names — which is the attacker, when the redirect is the
+      // attack. Native fetch drops them here too.
+      Object.keys(headers).forEach(name => {
+        if (/^(authorization|cookie|proxy-authorization)$/i.test(name)) {
+          delete headers[name];
+        }
+      });
+      origin = nextOrigin;
+    }
+
+    // 303, and 301/302 on a non-GET/HEAD, continue as a bodyless GET; 307/308
+    // keep the method and body. This is what RFC 9110 and every HTTP client do.
+    const method = (currentOptions.method || 'GET').toUpperCase();
+    const downgrade =
+      res.statusCode === 303 ||
+      ((res.statusCode === 301 || res.statusCode === 302) &&
+        method !== 'GET' && method !== 'HEAD');
+
+    currentOptions = Object.assign({}, currentOptions, { headers });
+    if (downgrade) {
+      currentOptions.method = 'GET';
+      delete currentOptions.body;
+    }
+    currentUrl = next;
+  }
 }

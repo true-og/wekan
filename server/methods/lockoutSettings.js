@@ -1,7 +1,15 @@
 import { Meteor } from 'meteor/meteor';
-import { AccountsLockout } from 'meteor/wekan-accounts-lockout';
+// Absent from the Sandstorm .spk (releases/sandstorm-slim.mjs), so asked for
+// only when the package is in the build.
+const AccountsLockout = Package['wekan-accounts-lockout']
+  ? require('meteor/wekan-accounts-lockout').AccountsLockout
+  : null;
 import { ReactiveCache } from '/imports/reactiveCache';
 import LockoutSettings from '/models/lockoutSettings';
+
+// The lockout reporter (and why it names the TARGET): server/lib/lockoutReporter.js.
+import { reportLockout } from '/server/lib/lockoutReporter';
+
 
 Meteor.methods({
   async reloadAccountsLockout() {
@@ -14,6 +22,8 @@ Meteor.methods({
     if (!user || !user.isAdmin) {
       throw new Meteor.Error('error-not-allowed', 'Not allowed');
     }
+    // No password login, so nothing to lock out (the Sandstorm .spk).
+    if (!AccountsLockout) return false;
 
     try {
       // Get configurations from database
@@ -33,6 +43,7 @@ Meteor.methods({
       const accountsLockout = new AccountsLockout({
         knownUsers: knownUsersConfig,
         unknownUsers: unknownUsersConfig,
+        onLockout: reportLockout,
       });
 
       // Start the accounts lockout mechanism

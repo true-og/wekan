@@ -1,7 +1,26 @@
 import { Meteor } from 'meteor/meteor';
+import { WebApp } from 'meteor/webapp';
 import { ReactiveCache } from '/imports/reactiveCache';
+import { safeSelector } from '/server/lib/selectorGuard';
 import Org from '/models/org';
 import { ensureIndex } from '/server/lib/mongoStartup';
+import { Authentication } from '/server/authentication';
+import { sendJsonResult } from '/server/apiMiddleware';
+// Multitenancy option D: per-tenant Global Admin rules (shared with the client and
+// the publications) - docs/Design/Multitenancy/Multitenancy.md.
+import * as tenantAdmin from '/models/lib/tenantAdmin';
+// ErrorBleed: refusals answer with their real status and a safe message.
+const { publicErrorData } = require('/server/lib/apiResponseHelpers');
+
+// #5850: reliable admin check from a method's this.userId. Meteor.user()/
+// getCurrentUser() can return null inside an async method after an await
+// (the DDP invocation context is not always preserved), so we look the caller
+// up directly by id.
+async function callerIsAdmin(userId) {
+  if (!userId) return false;
+  const u = await ReactiveCache.getUser({ _id: userId }, { fields: { isAdmin: 1 } });
+  return !!(u && u.isAdmin);
+}
 
 Meteor.methods({
   async setCreateOrg(
@@ -54,6 +73,14 @@ Meteor.methods({
     // this.connection === null; a direct client call has a non-null
     // connection. Reject the latter.
     if (this.connection !== null) {
+      // Only the OIDC login flow calls this, server-side: a client call is an
+      // attempt (OIDCBleed).
+      try {
+        require('/server/lib/securityLog').record({
+          key: 'auth-race.oidc', action: 'blocked', source: 'ddp:oidc-internal-method', userId: this.userId || undefined,
+          detail: 'Client called an OIDC-login-only organization/team method.',
+        });
+      } catch (e) { /* logging must never break the guard */ }
       throw new Meteor.Error('not-authorized');
     }
     check(orgDisplayName, String);
@@ -129,6 +156,74 @@ Meteor.methods({
     }
   },
 
+  // #4737/#5850: per-org feature toggles shown as columns in Admin Panel >
+  // People > Organizations. All default off. NOTE: arguments are check()ed
+  // unconditionally (audit-argument-checks), and admin is verified via the
+  // method's this.userId (Meteor.user()/getCurrentUser() can lose the DDP
+  // invocation context across awaits in async methods and return null).
+  async setOrgSharedTemplates(org, value) {
+    check(org, Object);
+    check(value, Boolean);
+    if (await callerIsAdmin(this.userId)) {
+      await Org.updateAsync(org, { $set: { orgSharedTemplates: value } });
+    }
+  },
+
+  async setOrgPropagateMembersToBoards(org, value) {
+    check(org, Object);
+    check(value, Boolean);
+    if (await callerIsAdmin(this.userId)) {
+      await Org.updateAsync(org, { $set: { orgPropagateMembersToBoards: value } });
+      // #4737/#5850: actually ACT on the flag. Turning it on adds this org's
+      // members to the boards that list the org (add-only). Previously the flag
+      // was stored but nothing ever propagated (the method had no caller).
+      //
+      // #6559: `org` is the SELECTOR the client sent - `{ _id: … }`, the same
+      // value handed to updateAsync above - not an id. Passing it whole made the
+      // member lookup compare `orgs.orgId` against an object, which matches
+      // nobody, so the checkbox stored the flag and silently added no one. The
+      // report was about the team column; the org column beside it was identical.
+      if (value === true) {
+        const { propagateGroupMembersToBoards } = require('/server/propagateOrgTeamMembers');
+        await propagateGroupMembersToBoards('org', org._id);
+      }
+    }
+  },
+
+  async setOrgSyncMembersFromAuth(org, value) {
+    check(org, Object);
+    check(value, Boolean);
+    if (await callerIsAdmin(this.userId)) {
+      await Org.updateAsync(org, { $set: { orgSyncMembersFromAuth: value } });
+    }
+  },
+
+  // Bulk select-all / unselect-all for one of the org feature columns.
+  async setAllOrgsFeature(field, value) {
+    check(field, String);
+    check(value, Boolean);
+    if (!(await callerIsAdmin(this.userId))) throw new Meteor.Error('not-authorized');
+    {
+      const allowed = [
+        'orgSharedTemplates',
+        'orgPropagateMembersToBoards',
+        'orgSyncMembersFromAuth',
+      ];
+      if (!allowed.includes(field)) {
+        throw new Meteor.Error('invalid-field');
+      }
+      await Org.updateAsync({}, { $set: { [field]: value } }, { multi: true });
+      // #6559: the select-all header checkbox is the same promise as the per-row
+      // one - tick it and the members should be on the boards - and it did not
+      // propagate at all, not even wrongly. Orgs only: ticking the org column
+      // must not act on the team column beside it.
+      if (field === 'orgPropagateMembersToBoards' && value === true) {
+        const { propagateAllFlaggedGroupsToBoards } = require('/server/propagateOrgTeamMembers');
+        await propagateAllFlaggedGroupsToBoards('org');
+      }
+    }
+  },
+
   async setOrgAllFieldsFromOidc(
     org,
     orgDisplayName,
@@ -144,6 +239,14 @@ Meteor.methods({
     // authorization, so reject direct client/DDP calls (this.connection
     // non-null) to keep the admin-only restriction of setOrgAllFields intact.
     if (this.connection !== null) {
+      // Only the OIDC login flow calls this, server-side: a client call is an
+      // attempt (OIDCBleed).
+      try {
+        require('/server/lib/securityLog').record({
+          key: 'auth-race.oidc', action: 'blocked', source: 'ddp:oidc-internal-method', userId: this.userId || undefined,
+          detail: 'Client called an OIDC-login-only organization/team method.',
+        });
+      } catch (e) { /* logging must never break the guard */ }
       throw new Meteor.Error('not-authorized');
     }
     check(org, Object);
@@ -199,14 +302,144 @@ Meteor.methods({
 
   async getOrgsCollectionCount(query = {}) {
     check(query, Match.OneOf(Object, null, undefined));
-    if (!(await ReactiveCache.getCurrentUser())?.isAdmin) {
+    // Multitenancy option D (D.7): scoped exactly like the `org` publication, so a
+    // per-tenant Global Admin's pager counts the orgs they can actually see.
+    const user = await ReactiveCache.getUser(
+      { _id: this.userId }, { fields: { isAdmin: 1, orgs: 1 } });
+    if (!tenantAdmin.canOpenAdminPanel(user)) {
       throw new Meteor.Error('not-authorized');
     }
-    const cursor = await ReactiveCache.getOrgs(query || {}, {}, true);
+    const cursor = await ReactiveCache.getOrgs(
+      tenantAdmin.orgScopeSelector(user, safeSelector(query || {}, 'getOrgsCollectionCount')), {}, true);
     return typeof cursor.countAsync === 'function' ? await cursor.countAsync() : cursor.count();
   },
 });
 
 Meteor.startup(async () => {
   await ensureIndex(Org, { orgDisplayName: 1 });
+});
+
+// #4737/#5850: per-org feature toggles exposed over the GlobalAdmin REST API.
+const ORG_FEATURE_FIELDS = [
+  'orgSharedTemplates',
+  'orgPropagateMembersToBoards',
+  'orgSyncMembersFromAuth',
+];
+
+/**
+ * @operation get_admin_orgs
+ * @tag Organizations
+ *
+ * @summary List organizations with their feature toggles (GlobalAdmin)
+ *
+ * @description Only the global admin can call this. Returns every organization
+ * with its identifying fields and the per-org feature toggles shown as columns
+ * in Admin Panel > People > Organizations.
+ *
+ * @return_type [{_id: string, orgDisplayName: string, orgShortName: string, orgSharedTemplates: boolean, orgPropagateMembersToBoards: boolean, orgSyncMembersFromAuth: boolean}]
+ */
+WebApp.handlers.get('/api/admin/orgs', async function(req, res) {
+  try {
+    await Authentication.checkUserId(req.userId);
+    const orgs = await Org.find(
+      {},
+      {
+        fields: {
+          orgDisplayName: 1,
+          orgShortName: 1,
+          orgSharedTemplates: 1,
+          orgPropagateMembersToBoards: 1,
+          orgSyncMembersFromAuth: 1,
+        },
+      },
+    ).fetchAsync();
+    const data = orgs.map(org => ({
+      _id: org._id,
+      orgDisplayName: org.orgDisplayName,
+      orgShortName: org.orgShortName,
+      orgSharedTemplates: !!org.orgSharedTemplates,
+      orgPropagateMembersToBoards: !!org.orgPropagateMembersToBoards,
+      orgSyncMembersFromAuth: !!org.orgSyncMembersFromAuth,
+    }));
+    sendJsonResult(res, { code: 200, data });
+  } catch (error) {
+    sendJsonResult(res, publicErrorData(error));
+  }
+});
+
+/**
+ * @operation update_admin_org_features
+ * @tag Organizations
+ *
+ * @summary Set feature toggles on one organization (GlobalAdmin)
+ *
+ * @description Only the global admin can call this. The request body may
+ * contain any of `orgSharedTemplates`, `orgPropagateMembersToBoards` and
+ * `orgSyncMembersFromAuth` (booleans); only those whitelisted fields are
+ * `$set` on the organization. Returns the updated organization.
+ *
+ * @param {string} orgId the ID of the organization
+ * @param {Object} features the feature toggles to set
+ * @return_type Object
+ */
+WebApp.handlers.put('/api/admin/orgs/:orgId/features', async function(req, res) {
+  try {
+    await Authentication.checkUserId(req.userId);
+    const orgId = req.params.orgId;
+    const body = req.body || {};
+    const $set = {};
+    ORG_FEATURE_FIELDS.forEach(field => {
+      if (body[field] !== undefined) {
+        $set[field] = !!body[field];
+      }
+    });
+    if (Object.keys($set).length > 0) {
+      await Org.updateAsync(orgId, { $set });
+    }
+    const updated = await Org.findOneAsync(orgId);
+    if (!updated) {
+      sendJsonResult(res, { code: 404, data: { error: 'Organization not found' } });
+      return;
+    }
+    sendJsonResult(res, { code: 200, data: updated });
+  } catch (error) {
+    sendJsonResult(res, publicErrorData(error));
+  }
+});
+
+/**
+ * @operation update_all_admin_org_features
+ * @tag Organizations
+ *
+ * @summary Set one feature toggle on all organizations (GlobalAdmin)
+ *
+ * @description Only the global admin can call this. The request body is
+ * `{ field, value }` where `field` is one of `orgSharedTemplates`,
+ * `orgPropagateMembersToBoards` or `orgSyncMembersFromAuth` and `value` is a
+ * boolean. The field is `$set` on ALL organizations. Returns the number of
+ * organizations updated.
+ *
+ * @param {string} field the feature field to set
+ * @param {boolean} value the value to set
+ * @return_type {updated: number}
+ */
+WebApp.handlers.put('/api/admin/orgs/features', async function(req, res) {
+  try {
+    await Authentication.checkUserId(req.userId);
+    const body = req.body || {};
+    const field = body.field;
+    if (!ORG_FEATURE_FIELDS.includes(field)) {
+      sendJsonResult(res, { code: 200, data: { error: 'invalid-field' } });
+      return;
+    }
+    const value = !!body.value;
+    const updated = await Org.updateAsync(
+      {},
+      { $set: { [field]: value } },
+      { multi: true },
+    );
+    sendJsonResult(res, { code: 200, data: { updated } });
+  } catch (error) {
+    sendJsonResult(res, publicErrorData(error));
+  }
 });

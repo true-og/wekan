@@ -1,0 +1,23 @@
+template(name="structuralSelectionCheckbox")
+  if MultiSelection.isActive
+    if canModifyBoard
+      button.materialCheckBox.multi-selection-checkbox.js-structural-selection(type="button" class="{{#if selected}}is-checked{{/if}}" role="checkbox" aria-checked=selected aria-label=label data-kind=kind data-id=id)
+
+template(name="moveObjectsPopup")
+  h3 {{_ 'move-selection'}}
+  if error.get
+    .warning {{error.get}}
+  each fields
+    label= label
+    select.js-object-destination(data-field=key)
+      option(value="")= emptyLabel
+      each options
+        option(value=_id selected=selected)= title
+  select.js-object-position(aria-label="{{_ 'move-selection'}}")
+    //- Words, not ↑/↓: an arrow character is a platform-drawn picture (see
+    //- tests/fontAwesomeIcons.test.cjs), and an <option> cannot hold a Font
+    //- Awesome <i>. "Before"/"after" also says the right thing for a list, whose
+    //- neighbours are to its left and right rather than above and below.
+    option(value="before") {{_ 'move-selection-before'}}
+    option(value="after") {{_ 'move-selection-after'}}
+  button.primary.js-move-objects(disabled=busy.get) {{_ 'move-selection'}}

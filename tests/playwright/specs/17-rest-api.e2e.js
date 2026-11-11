@@ -17,8 +17,9 @@
  *  - copy a card to a 0-based position (deep copy)
  *  - #3062  board card settings GET/PUT
  *  - #4815  GET /api/user/cards (My Cards / Due Cards)
+ *  - DELETE /api/users/:userId confirms deletion and reports missing users
  *
- * The API requires WITH_API=true (the rebuild-wekan.sh "Run tests" server sets it).
+ * The API requires WITH_API=true (the build.sh "Run tests" server sets it).
  * The Bearer token is the user's MongoDB resume token (seedUser returns the raw
  * token, whose sha256 matches Accounts._hashLoginToken on the server).
  *
@@ -38,17 +39,11 @@ function authHeaders(token, json = false) {
 
 // List non-archived cards in a list, straight from MongoDB.
 function listCards(boardId, listId) {
-  const raw = db.mongoEval(
-    `JSON.stringify(db.cards.find({ boardId: ${db.literal(boardId)}, listId: ${db.literal(listId)}, archived: false }).toArray())`,
-  );
-  try { return JSON.parse(raw); } catch { return []; }
+  return db.find('cards', { boardId, listId, archived: false });
 }
 
 function allBoardCards(boardId) {
-  const raw = db.mongoEval(
-    `JSON.stringify(db.cards.find({ boardId: ${db.literal(boardId)} }).toArray())`,
-  );
-  try { return JSON.parse(raw); } catch { return []; }
+  return db.find('cards', { boardId });
 }
 
 // Create a label on the board via the API (admin only) and return its id.
@@ -63,6 +58,53 @@ async function createLabel(request, token, boardId, name, color) {
 }
 
 test.describe('REST API: data + permissions', () => {
+  test('#1437 logout revokes the presented REST token', async ({ request, user, board }) => {
+    const before = db.findOne('users', { _id: user.id });
+    expect(before.services.resume.loginTokens.length).toBeGreaterThan(0);
+
+    const logout = await request.post('/users/logout', {
+      headers: authHeaders(user.token, true),
+      data: {},
+    });
+    expect(logout.status()).toBe(200);
+
+    const after = db.findOne('users', { _id: user.id });
+    expect(after.services.resume.loginTokens).toHaveLength(0);
+    const rejected = await request.get(`/api/boards/${board.boardId}`, {
+      headers: authHeaders(user.token),
+    });
+    expect(rejected.status()).toBe(401);
+  });
+
+  // ---- DELETE /api/users/:userId: confirm the authoritative result --------
+  test('user deletion confirms removal and reports a repeat as 404', async ({ request, adminUser }) => {
+    const target = db.seedUser();
+    try {
+      expect(db.findOne('users', { _id: target.id })).not.toBeNull();
+
+      const deleted = await request.delete(`/api/users/${target.id}`, {
+        headers: authHeaders(adminUser.token),
+      });
+      expect(deleted.status()).toBe(200);
+      expect(await deleted.json()).toEqual({ _id: target.id });
+
+      // Independently poll MongoDB so the response cannot merely echo the id.
+      await expect.poll(
+        () => db.findOne('users', { _id: target.id }),
+        { message: 'the deleted user should be absent from MongoDB' },
+      ).toBeNull();
+
+      const missing = await request.delete(`/api/users/${target.id}`, {
+        headers: authHeaders(adminUser.token),
+        failOnStatusCode: false,
+      });
+      expect(missing.status()).toBe(404);
+      expect(await missing.json()).toEqual({ error: 'User not found' });
+    } finally {
+      db.deleteOne('users', { _id: target.id });
+    }
+  });
+
   // ---- #4743 / #5813: bulk create, uniqueness, bulk delete ----------------
   test('#4743/#5813 bulk create assigns unique card numbers, bulk delete removes them', async ({ request, user, board }) => {
     const listId = board.listIds[0];
@@ -257,6 +299,360 @@ test.describe('REST API: data + permissions', () => {
     expect(db.getCard(cardId).dueAt == null).toBe(true);
   });
 
+  // ---- #3697: clearing card members/assignees over REST stores [] not null --
+  test('#3697 clearing members via REST stores an array, never null', async ({ request, user, board }) => {
+    const listId = board.listIds[0];
+    const cardId = listCards(board.boardId, listId)[0]._id;
+    const base = `/api/boards/${board.boardId}/lists/${listId}/cards/${cardId}`;
+
+    // Set a member via card PUT.
+    let res = await request.put(base, {
+      headers: authHeaders(user.token, true),
+      data: { members: [user.id] },
+    });
+    expect(res.status()).toBe(200);
+    expect(db.getCard(cardId).members).toEqual([user.id]);
+
+    // Clearing with an empty string removes the last member and stores [] — the
+    // #3697 fix. Before, this was a no-op (truthiness guard) or stored null,
+    // which then broke editing the card's members in the UI.
+    res = await request.put(base, { headers: authHeaders(user.token, true), data: { members: '' } });
+    expect(res.status()).toBe(200);
+    let card = db.getCard(cardId);
+    expect(Array.isArray(card.members)).toBe(true);
+    expect(card.members).toEqual([]);
+    expect(card.members).not.toBe(null);
+
+    // Clearing with null likewise yields [] (not null).
+    await request.put(base, { headers: authHeaders(user.token, true), data: { members: [user.id] } });
+    res = await request.put(base, { headers: authHeaders(user.token, true), data: { members: null } });
+    expect(res.status()).toBe(200);
+    card = db.getCard(cardId);
+    expect(Array.isArray(card.members)).toBe(true);
+    expect(card.members).toEqual([]);
+
+    // Same guarantee for assignees.
+    await request.put(base, { headers: authHeaders(user.token, true), data: { assignees: [user.id] } });
+    expect(db.getCard(cardId).assignees).toEqual([user.id]);
+    res = await request.put(base, { headers: authHeaders(user.token, true), data: { assignees: '' } });
+    expect(res.status()).toBe(200);
+    card = db.getCard(cardId);
+    expect(Array.isArray(card.assignees)).toBe(true);
+    expect(card.assignees).toEqual([]);
+  });
+
+  // ---- #2875: create a card with no member over REST -----------------------
+  test('#2875 create a card with no / empty members stores [] not null', async ({ request, user, board }) => {
+    const listId = board.listIds[0];
+    const base = `/api/boards/${board.boardId}/lists/${listId}/cards`;
+
+    // No members field at all → schema default [] applies; card is created.
+    let res = await request.post(base, {
+      headers: authHeaders(user.token, true),
+      data: { authorId: user.id, swimlaneId: board.swimlaneId, title: 'No members' },
+    });
+    expect(res.status()).toBe(200);
+    let card = db.getCard((await res.json())._id);
+    expect(Array.isArray(card.members)).toBe(true);
+    expect(card.members).toEqual([]);
+
+    // Explicit null / "" clear to [] (never null), like the PUT handler (#3697).
+    for (const empty of [null, '']) {
+      res = await request.post(base, {
+        headers: authHeaders(user.token, true),
+        data: { authorId: user.id, swimlaneId: board.swimlaneId, title: `Empty ${empty}`, members: empty, assignees: empty },
+      });
+      expect(res.status()).toBe(200);
+      card = db.getCard((await res.json())._id);
+      expect(Array.isArray(card.members)).toBe(true);
+      expect(card.members).toEqual([]);
+      expect(card.members).not.toBe(null);
+      expect(Array.isArray(card.assignees)).toBe(true);
+      expect(card.assignees).toEqual([]);
+    }
+
+    // A single member id is wrapped into an array.
+    res = await request.post(base, {
+      headers: authHeaders(user.token, true),
+      data: { authorId: user.id, swimlaneId: board.swimlaneId, title: 'One member', members: user.id },
+    });
+    expect(res.status()).toBe(200);
+    expect(db.getCard((await res.json())._id).members).toEqual([user.id]);
+
+    // Bulk create with empty members likewise stores [].
+    res = await request.post(`${base}/bulk`, {
+      headers: authHeaders(user.token, true),
+      data: { authorId: user.id, swimlaneId: board.swimlaneId, cards: [{ title: 'Bulk no members', members: null }] },
+    });
+    expect(res.status()).toBe(200);
+    const bulkCards = listCards(board.boardId, listId).filter(c => c.title === 'Bulk no members');
+    expect(bulkCards.length).toBe(1);
+    expect(bulkCards[0].members).toEqual([]);
+  });
+
+  // ---- #5650: board created via REST is owned by (and visible to) caller ----
+  test('#5650 board created via REST without owner is owned by the caller', async ({ request, user }) => {
+    const created = [];
+    try {
+      // No `owner` in the body → must default to the authenticated caller, so the
+      // board's only member has a real userId and the boards publication can match
+      // it. Before the fix this stored userId=undefined, so the board existed via
+      // the API but was invisible in the browser UI.
+      let res = await request.post('/api/boards', {
+        headers: authHeaders(user.token, true),
+        data: { title: 'API board no owner' },
+      });
+      expect(res.status()).toBe(200);
+      const id1 = (await res.json())._id;
+      created.push(id1);
+      const board1 = db.getBoard(id1);
+      expect(board1.members.length).toBe(1);
+      expect(board1.members[0].userId).toBe(user.id);
+      expect(board1.members[0].isActive).toBe(true);
+      expect(board1.members[0].isAdmin).toBe(true);
+
+      // An explicit owner still works.
+      res = await request.post('/api/boards', {
+        headers: authHeaders(user.token, true),
+        data: { title: 'API board with owner', owner: user.id },
+      });
+      expect(res.status()).toBe(200);
+      const id2 = (await res.json())._id;
+      created.push(id2);
+      expect(db.getBoard(id2).members[0].userId).toBe(user.id);
+    } finally {
+      db.cleanup({ boardIds: created });
+    }
+  });
+
+  // ---- #5166: copying a card cross-board re-homes its comments --------------
+  test('copying a card cross-board re-homes its subtasks onto the destination board', async ({ request, user, board }) => {
+    const srcListId = board.listIds[0];
+    const srcCardId = listCards(board.boardId, srcListId)[0]._id;
+
+    // A subtask is a card with parentId = the source card.
+    db.insertOne('cards', {
+      _id: db.uid('sub'), boardId: board.boardId, swimlaneId: board.swimlaneId,
+      listId: srcListId, parentId: srcCardId, title: 'subtask', sort: 0,
+      userId: user.id, archived: false, createdAt: new Date(), dateLastActivity: new Date(),
+    });
+
+    const dest = db.seedBoard({ ownerId: user.id, cardTitlesPerList: [['x']] });
+    try {
+      const res = await request.post(
+        `/api/boards/${board.boardId}/lists/${srcListId}/cards/${srcCardId}/copy`,
+        { headers: authHeaders(user.token, true), data: { toBoardId: dest.boardId, toSwimlaneId: dest.swimlaneId, toListId: dest.listIds[0] } },
+      );
+      expect(res.status()).toBe(200);
+      const newCardId = (await res.json())._id;
+
+      // The copied subtask is on the destination board, not the source board.
+      const copiedSubs = db.find('cards', { parentId: newCardId });
+      expect(copiedSubs.length).toBe(1);
+      expect(copiedSubs[0].boardId).toBe(dest.boardId);
+      expect(copiedSubs[0].boardId).not.toBe(board.boardId);
+      // The original subtask is untouched on the source board.
+      expect(db.find('cards', { parentId: srcCardId }).every(c => c.boardId === board.boardId)).toBe(true);
+    } finally {
+      db.cleanup({ boardIds: [dest.boardId] });
+    }
+  });
+
+  test('#5166 copied comments get the destination boardId and keep their author', async ({ request, user, user2, board }) => {
+    const srcListId = board.listIds[0];
+    const srcCardId = listCards(board.boardId, srcListId)[0]._id;
+
+    // A comment on the source card, authored by a DIFFERENT user.
+    const commentId = db.uid('cmt');
+    const originalCreatedAt = new Date('2017-01-02T03:04:05.000Z');
+    db.insertOne('card_comments', {
+      _id: commentId,
+      boardId: board.boardId,
+      cardId: srcCardId,
+      userId: user2.id,
+      text: 'original author comment',
+      createdAt: originalCreatedAt,
+      modifiedAt: new Date(),
+    });
+
+    // Destination board owned by the same user (so the copy has write access).
+    const dest = db.seedBoard({ ownerId: user.id, cardTitlesPerList: [['x']] });
+    try {
+      const res = await request.post(
+        `/api/boards/${board.boardId}/lists/${srcListId}/cards/${srcCardId}/copy`,
+        {
+          headers: authHeaders(user.token, true),
+          data: { toBoardId: dest.boardId, toSwimlaneId: dest.swimlaneId, toListId: dest.listIds[0] },
+        },
+      );
+      expect(res.status()).toBe(200);
+      const newCardId = (await res.json())._id;
+      expect(newCardId).toBeTruthy();
+
+      // The copied comment belongs to the destination board, not the source —
+      // and its original author is preserved.
+      const copied = db.find('card_comments', { cardId: newCardId });
+      expect(copied.length).toBe(1);
+      expect(copied[0].boardId).toBe(dest.boardId);
+      expect(copied[0].boardId).not.toBe(board.boardId);
+      expect(copied[0].userId).toBe(user2.id);
+      expect(new Date(copied[0].createdAt).toISOString())
+        .toBe(originalCreatedAt.toISOString());
+    } finally {
+      db.cleanup({ boardIds: [dest.boardId] });
+    }
+  });
+
+  // ---- #5688: copying a card duplicates all its checklist items -------------
+  test('#5688 copying a card copies its checklist and all items', async ({ request, user, board }) => {
+    const listId = board.listIds[0];
+    const cardId = listCards(board.boardId, listId)[0]._id;
+
+    // Seed a checklist with several items on the source card.
+    const checklistId = db.uid('cl');
+    db.insertOne('checklists', {
+      _id: checklistId, boardId: board.boardId, cardId, title: 'CL', sort: 0,
+      createdAt: new Date(), modifiedAt: new Date(),
+    });
+    const itemCount = 6;
+    for (let i = 0; i < itemCount; i++) {
+      db.insertOne('checklistItems', {
+        _id: db.uid('cli'), boardId: board.boardId, cardId, checklistId,
+        title: `item ${i}`, sort: i, isFinished: i % 2 === 0,
+        createdAt: new Date(), modifiedAt: new Date(),
+      });
+    }
+
+    const created = [];
+    try {
+      const res = await request.post(
+        `/api/boards/${board.boardId}/lists/${listId}/cards/${cardId}/copy`,
+        { headers: authHeaders(user.token, true), data: { toSwimlaneId: board.swimlaneId, toListId: listId } },
+      );
+      expect(res.status()).toBe(200);
+      const newCardId = (await res.json())._id;
+      expect(newCardId).toBeTruthy();
+      created.push(newCardId);
+
+      // The copied card has exactly one checklist and all its items, on this board.
+      const newChecklists = db.find('checklists', { cardId: newCardId });
+      expect(newChecklists.length).toBe(1);
+      expect(newChecklists[0].boardId).toBe(board.boardId);
+      const newItems = db.find('checklistItems', { cardId: newCardId });
+      expect(newItems.length).toBe(itemCount);
+      expect(newItems.every(it => it.checklistId === newChecklists[0]._id)).toBe(true);
+      expect(newItems.every(it => it.boardId === board.boardId)).toBe(true);
+    } finally {
+      // The copied card is on the same board (cleaned by the board fixture); drop
+      // any leftover docs defensively.
+      created.forEach(id => {
+        db.deleteMany('checklistItems', { cardId: id });
+        db.deleteMany('checklists', { cardId: id });
+        db.deleteMany('cards', { _id: id });
+      });
+    }
+  });
+
+  // ---- #3252/#5322: deleting a card cascades + clears its activities --------
+  test('#3252 deleting a card removes its children and adds one delete activity', async ({ request, user, board }) => {
+    const listId = board.listIds[0];
+    const cardId = listCards(board.boardId, listId)[0]._id;
+    const seed = (coll, extra) => {
+      const _id = db.uid('seed');
+      db.insertOne(coll, { _id, boardId: board.boardId, cardId, createdAt: new Date(), modifiedAt: new Date(), ...extra });
+      return _id;
+    };
+
+    const checklistId = seed('checklists', { title: 'CL' });
+    seed('checklistItems', { title: 'item', checklistId });
+    const commentId = seed('card_comments', { userId: user.id, text: 'hi' });
+    // Pre-existing activities for the card, like real create/comment activity.
+    seed('activities', { userId: user.id, activityType: 'addComment', commentId });
+    seed('activities', { userId: user.id, activityType: 'createCard' });
+
+    const res = await request.delete(
+      `/api/boards/${board.boardId}/lists/${listId}/cards/${cardId}`,
+      { headers: authHeaders(user.token, true), data: { authorId: user.id } },
+    );
+    expect(res.status()).toBe(200);
+
+    // Card and all of its children are gone.
+    expect(db.getCard(cardId)).toBe(null);
+    expect(db.find('checklists', { cardId }).length).toBe(0);
+    expect(db.find('checklistItems', { cardId }).length).toBe(0);
+    expect(db.find('card_comments', { cardId }).length).toBe(0);
+
+    // #1598 (6d99ad73c) keeps the card's timestamped activities for board
+    // reports, where #3252 had deleted them, so the seeded two remain. What
+    // #3252 still guarantees: the children go without one activity each, and
+    // the card gets exactly one deleteCard activity.
+    const acts = db.find('activities', { cardId });
+    expect(acts.map(a => a.activityType).sort()).toEqual(['addComment', 'createCard', 'deleteCard']);
+    expect(acts.filter(a => /removeChecklist|deleteComment|removedChecklistItem/.test(a.activityType))).toEqual([]);
+  });
+
+  // ---- #5592 / #5627: copying a board copies its webhooks and rules --------
+  test('#5592/#5627 copying a board copies its webhooks and rules', async ({ request, user, board }) => {
+    db.insertOne('integrations', {
+      _id: db.uid('intg'), boardId: board.boardId, userId: user.id,
+      title: 'hook', type: 'outgoing-webhooks', url: 'https://example.com/hook',
+      token: 'tok', activities: ['all'], enabled: true,
+      createdAt: new Date(), modifiedAt: new Date(),
+    });
+    const actionId = db.uid('act');
+    db.insertOne('actions', { _id: actionId, boardId: board.boardId, actionType: 'moveCardToTop', listName: '*', swimlaneName: '*', createdAt: new Date(), modifiedAt: new Date() });
+    const triggerId = db.uid('trg');
+    db.insertOne('triggers', { _id: triggerId, boardId: board.boardId, activityType: 'createCard', listName: '*', swimlaneName: '*', cardTitle: '*', userId: '*', createdAt: new Date(), modifiedAt: new Date() });
+    db.insertOne('rules', { _id: db.uid('rule'), boardId: board.boardId, title: 'r', triggerId, actionId, createdAt: new Date(), modifiedAt: new Date() });
+
+    const created = [];
+    try {
+      const res = await request.post(`/api/boards/${board.boardId}/copy`, {
+        headers: authHeaders(user.token, true),
+        data: { title: 'Copied board' },
+      });
+      expect(res.status()).toBe(200);
+      const newBoardId = await res.json();
+      expect(typeof newBoardId).toBe('string');
+      created.push(newBoardId);
+
+      // #5592: the webhook is copied onto the new board.
+      const intgs = db.find('integrations', { boardId: newBoardId });
+      expect(intgs.length).toBe(1);
+      expect(intgs[0].url).toBe('https://example.com/hook');
+
+      // #5627: the rule (+ trigger + action) is copied onto the new board, with
+      // the rule's triggerId/actionId remapped to the copied docs.
+      const newRules = db.find('rules', { boardId: newBoardId });
+      const newActions = db.find('actions', { boardId: newBoardId });
+      const newTriggers = db.find('triggers', { boardId: newBoardId });
+      expect(newRules.length).toBe(1);
+      expect(newActions.length).toBe(1);
+      expect(newTriggers.length).toBe(1);
+      expect(newRules[0].actionId).toBe(newActions[0]._id);
+      expect(newRules[0].triggerId).toBe(newTriggers[0]._id);
+    } finally {
+      db.cleanup({ boardIds: created });
+    }
+  });
+
+  // ---- #1894: a disabled user cannot be added to a board -------------------
+  test('#1894 a disabled user cannot be added to a board', async ({ request, user, user2, board }) => {
+    const addUrl = `/api/boards/${board.boardId}/members/${user2.id}/add`;
+    const isMember = () => (db.getBoard(board.boardId).members || []).some(m => m.userId === user2.id && m.isActive);
+
+    db.updateOne('users', { _id: user2.id }, { $set: { loginDisabled: true } });
+    let res = await request.post(addUrl, { headers: authHeaders(user.token, true), data: { action: 'add' } });
+    expect(res.status()).toBe(400);
+    expect(isMember()).toBe(false);
+
+    // Re-enabling the account allows the add to succeed.
+    db.updateOne('users', { _id: user2.id }, { $set: { loginDisabled: false } });
+    res = await request.post(addUrl, { headers: authHeaders(user.token, true), data: { action: 'add' } });
+    expect(res.status()).toBe(200);
+    expect(isMember()).toBe(true);
+  });
+
   // ---- #5897: linked card -------------------------------------------------
   test('#5897 create a linked card referencing an existing card', async ({ request, user, board }) => {
     const sourceListId = board.listIds[0];
@@ -347,4 +743,81 @@ test.describe('REST API: data + permissions', () => {
     expect(res.ok()).toBe(false);
     expect(res.status()).toBe(401);
   });
+});
+
+// ParentBleed, bulk sibling: cards/bulk wrote each entry's parentId with
+// Cards.direct (no DDP deny rule) and never checked the parent's board.
+test('bulk create refuses a parent card on a board the caller cannot see (ParentBleed)', async ({ request, user, user2, board }) => {
+  const hidden = db.seedBoard({ ownerId: user2.id, cardTitlesPerList: [['Hidden parent']] });
+  const hiddenCard = db.find('cards', { boardId: hidden.boardId })[0];
+  const visibleCard = db.find('cards', { boardId: board.boardId })[0];
+  const listId = board.listIds[0];
+  try {
+    const res = await request.post(`/api/boards/${board.boardId}/lists/${listId}/cards/bulk`, {
+      headers: authHeaders(user.token, true),
+      data: { swimlaneId: board.swimlaneId, cards: [
+        { title: 'ParentBleed child', parentId: hiddenCard._id },
+        { title: 'Visible child', parentId: visibleCard._id },
+      ] },
+    });
+    expect(res.status()).toBe(200);
+    const results = await res.json();
+    expect(results[0]).toMatchObject({ index: 0, error: 'Forbidden' });
+    expect(results[1]._id).toBeTruthy();
+    expect(db.find('cards', { parentId: hiddenCard._id })).toHaveLength(0);
+    expect(db.getCard(results[1]._id).parentId).toBe(visibleCard._id);
+    await expect.poll(() => db.findOne('eventlog', { bleed: 'ParentBleed', source: 'parentId' })?.count).toBeGreaterThan(0);
+  } finally {
+    db.cleanup({ boardIds: [hidden.boardId] });
+  }
+});
+
+// HashBleed siblings: any action other than add/remove answered with the
+// whole user document, password hash and token hashes included.
+test('member add/remove with an unknown action never returns the user document (HashBleed)', async ({ request, user, user2, board }) => {
+  for (const verb of ['add', 'remove']) {
+    const res = await request.post(`/api/boards/${board.boardId}/members/${user2.id}/${verb}`, {
+      headers: authHeaders(user.token, true), data: { action: 'show' },
+    });
+    expect(res.status()).toBe(400);
+    const text = await res.text();
+    expect(text).not.toContain('services');
+    expect(text).not.toContain('bcrypt');
+    expect(text).not.toContain(user2.id);
+  }
+});
+
+// ErrorBleed siblings: refused REST reads answered HTTP 200 with the raw
+// error object. A non-member now gets a real 403.
+test('a refused REST read answers 403, not 200 with an error object (ErrorBleed)', async ({ request, user2, board }) => {
+  for (const url of [`/api/boards/${board.boardId}/lists`, `/api/boards/${board.boardId}/swimlanes`, `/api/boards/${board.boardId}/cards_count`]) {
+    const res = await request.get(url, { headers: authHeaders(user2.token) });
+    expect(res.status(), url).toBe(403);
+    expect(await res.text(), url).not.toMatch(/"stack"|at [A-Za-z]+ \(/);
+  }
+});
+
+// AssignedBleed sibling: REST board-wide reads let an assigned-only member
+// read every card, which the UI hides from them.
+test('an assigned-only member cannot read the whole board over REST (AssignedBleed)', async ({ request, user2, board }) => {
+  const original = db.getBoard(board.boardId).members;
+  db.updateOne('boards', { _id: board.boardId }, { $set: { members: [...original, { userId: user2.id, isActive: true, isAdmin: false, isReadAssignedOnly: true }] } });
+  try {
+    for (const url of [`/api/boards/${board.boardId}/lists`, `/api/boards/${board.boardId}/lists/${board.listIds[0]}/cards`]) {
+      const res = await request.get(url, { headers: authHeaders(user2.token) });
+      expect(res.status(), url).toBe(403);
+    }
+    // A normal member still reads (negative).
+    db.updateOne('boards', { _id: board.boardId }, { $set: { members: [...original, { userId: user2.id, isActive: true, isAdmin: false }] } });
+    // maxRetries: this request reuses the keep-alive socket of the 403s above,
+    // and the db helper between them is a child process that can take seconds
+    // under a full parallel run. Meteor's webapp closes a socket after 5 s idle
+    // (SHORT_SOCKET_TIMEOUT), so a request sent as the server closes it read
+    // ECONNRESET. The 403 path itself leaves the socket open (it throws to
+    // Express's finalhandler, which answers and keeps the connection alive);
+    // Playwright retries only on ECONNRESET, so this cannot hide a wrong status.
+    expect((await request.get(`/api/boards/${board.boardId}/lists`, { headers: authHeaders(user2.token), maxRetries: 2 })).status()).toBe(200);
+  } finally {
+    db.updateOne('boards', { _id: board.boardId }, { $set: { members: original } });
+  }
 });

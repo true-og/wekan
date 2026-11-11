@@ -1,11 +1,98 @@
+/* #4759: Member Settings / Font popup — a button per installed font (each shown in
+   its own font) and a row of size buttons (smaller ... 100% ... larger). Clicking a
+   button applies immediately. */
+.ui-font-buttons,
+.ui-font-size-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 2px 0 10px 0;
+}
+.ui-font-btn,
+.ui-font-size-btn {
+  display: inline-block;
+  padding: 4px 10px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background: #fff;
+  color: #333;
+  cursor: pointer;
+  font-size: calc(14px * var(--wekan-ui-font-scale, 1));
+  line-height: 1.4;
+  text-decoration: none;
+}
+.ui-font-btn:hover,
+.ui-font-size-btn:hover {
+  background: #f0f0f0;
+}
+.ui-font-btn.active,
+.ui-font-size-btn.active {
+  background: #2573a7;
+  border-color: #2573a7;
+  color: #fff;
+}
+/* The "Unset" colour reset links look like buttons. */
+.color-wheel-wrap .js-reset-text-color,
+.color-wheel-wrap .js-reset-bg-color {
+  display: inline-block;
+  padding: 4px 10px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background: #fff;
+  color: #333;
+  cursor: pointer;
+  font-size: calc(14px * var(--wekan-ui-font-scale, 1));
+  line-height: 1.4;
+  text-decoration: none;
+}
+.color-wheel-wrap .js-reset-text-color:hover,
+.color-wheel-wrap .js-reset-bg-color:hover {
+  background: #f0f0f0;
+}
+.color-wheel-wrap .js-reset-text-color.disabled,
+.color-wheel-wrap .js-reset-bg-color.disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+/* #5514: native color-wheel (custom RGB / hex) picker wrapper, shared by the
+   label / list / swimlane / card color popups. */
+.color-wheel-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0 10px 0;
+}
+.color-wheel-wrap label {
+  margin: 0;
+}
+/* Custom card colors already used on this board, offered beside the palette in
+   the card and Multi-Selection color popups. */
+.custom-palette-colors {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin: 6px 0 4px 0;
+}
+.color-wheel-wrap input[type="color"] {
+  width: 44px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  cursor: pointer;
+  background: none;
+}
+
 .card-label {
   border: 1px solid #000;
   border-radius: 4px;
   color: #fff;
   display: inline-block;
   font-weight: 700;
-  font-size: 13px;
-  margin-right: 4px;
+  font-size: calc(13px * var(--wekan-ui-font-scale, 1));
+  margin-inline-end: 4px;
   margin-bottom: 5px;
   padding: 3px 8px;
   max-width: 210px;
@@ -46,6 +133,19 @@
   align-items: center;
   justify-content: center;
 }
+/* Admin Panel / Settings / Shared labels uses the board label popup's picker
+   (labelColorPicker). The swatches grow to fill their row, so on the wide admin
+   page their width followed the window. There each swatch has the size it has
+   in an opened card's label popup - 36 x 25px of content, 3px 8px padding and a
+   1px border, 54 x 33px in all - at every window width. */
+.shared-label-color .palette-colors .palette-color {
+  flex: 0 0 auto;
+  box-sizing: content-box;
+  width: 36px;
+  height: 25px;
+  padding: 3px 8px;
+  margin: 0 2px 2px 0;
+}
 .card-label-white {
   background-color: #fff;
   color: #000;
@@ -55,6 +155,7 @@
 }
 .card-label-green {
   background-color: #3cb500;
+  color: #000;
 }
 .card-label-green:hover {
   color: #000;
@@ -69,6 +170,7 @@
 }
 .card-label-red {
   background-color: #eb4646;
+  color: #000;
 }
 .card-label-purple {
   background-color: #a632db;
@@ -82,6 +184,7 @@
 }
 .card-label-sky {
   background-color: #00c2e0;
+  color: #000;
 }
 .card-label-black {
   background-color: #4d4d4d;
@@ -113,6 +216,7 @@
 }
 .card-label-magenta {
   background-color: #f0f;
+  color: #000;
 }
 .card-label-gold {
   background-color: #ffd700;
@@ -123,6 +227,7 @@
 }
 .card-label-gray {
   background-color: #808080;
+  color: #000;
 }
 .card-label-saddlebrown {
   background-color: #8b4513;
@@ -140,7 +245,7 @@
 }
 .edit-label .card-label,
 .create-label .card-label {
-  float: left;
+  float: inline-start;
   height: 25px;
   margin: 0px 3% 7px 0px;
   width: 10.5%;
@@ -153,18 +258,18 @@
 }
 .edit-labels .card-label {
   height: 30px;
-  left: 0;
+  inset-inline-start: 0;
   padding: 1px 5px;
   position: absolute;
   top: 0;
   width: 24px;
 }
 .edit-labels .labels-static .card-label {
-  line-height: 30px;
+  line-height: calc(30px * var(--wekan-ui-font-scale, 1));
   margin-bottom: 4px;
   position: relative;
   top: auto;
-  left: 0;
+  inset-inline-start: 0;
   width: 260px;
 }
 .edit-labels-pop-over {
@@ -185,24 +290,24 @@
   min-height: 18px;
   padding: 8px;
   position: relative;
-  transition: margin-right 0.1s;
+  transition: margin-inline-end 0.1s;
 }
 .card-label-selectable .card-label-selectable-icon {
   position: absolute;
   top: 8px;
-  right: -20px;
+  inset-inline-end: -20px;
 }
 .card-label-selectable.active:hover,
 .card-label-selectable.active,
 .card-label-selectable.active.selected:hover,
 .card-label-selectable.active.selected {
-  padding-right: 32px;
+  padding-inline-end: 32px;
 }
 .card-label-selectable.active:hover .card-label-selectable-icon,
 .card-label-selectable.active .card-label-selectable-icon,
 .card-label-selectable.active.selected:hover .card-label-selectable-icon,
 .card-label-selectable.active.selected .card-label-selectable-icon {
-  right: 6px;
+  inset-inline-end: 6px;
 }
 .card-label-selectable.selected,
 .card-label-selectable:hover {
@@ -210,21 +315,21 @@
 }
 .active .card-label-selectable,
 .active .card-label-selectable:hover {
-  margin-right: 0;
+  margin-inline-end: 0;
 }
 .active .card-label-selectable .card-label-selectable-icon {
-  right: 8px;
+  inset-inline-end: 8px;
 }
 .card-label-edit-button {
   border-radius: 3px;
-  float: right;
+  float: inline-end;
   padding: 8px;
 }
 .card-label-edit-button:hover {
   background: #dbdbdb;
 }
 ul.edit-labels-pop-over span.label-handle {
-  padding-right: 10px;
+  padding-inline-end: 10px;
   display: inline-block;
   width: 1.2em;
   text-align: center;
@@ -232,4 +337,13 @@ ul.edit-labels-pop-over span.label-handle {
 }
 ul.edit-labels-pop-over span.label-handle + .card-label {
   max-width: 180px;
+}
+/* #2802: the label's own optional "milestone" due date, shown beside it in
+   the labels list. */
+.card-label-due-at {
+  display: inline-block;
+  margin-inline-start: 6px;
+  font-size: 0.85em;
+  color: #999;
+  vertical-align: middle;
 }

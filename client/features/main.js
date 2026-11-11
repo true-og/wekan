@@ -5,9 +5,19 @@ import '/client/components/main/dueCards.jade';
 import '/client/components/main/editor.jade';
 import '/client/components/main/globalSearch.jade';
 import '/client/components/main/header.jade';
+import '/client/components/main/recoveryMaintenance.jade';
+import '/client/components/main/themeColorPicker.jade';
 import '/client/components/main/keyboardShortcuts.jade';
 import '/client/components/main/layouts.jade';
+// The shared page sidebar, rendered by the layout above. A .jade file is not
+// picked up by being on disk - see tests/templateRegistration.test.cjs.
+import '/client/components/main/pageSidebar.jade';
 import '/client/components/main/myCards.jade';
+import '/client/components/main/myAttachments.jade';
+import '/client/components/main/starredItems.jade';
+// The map-provider chooser, shared by the card's location popup and Admin Panel
+// / Problems / Offices. A .jade file is not picked up by being on disk.
+import '/client/components/main/mapProvider.jade';
 import '/client/components/main/popup.tpl.jade';
 import '/client/components/main/spinner.jade';
 import '/client/components/main/spinner_bounce.jade';
@@ -19,9 +29,16 @@ import '/client/components/main/spinner_rotateplane.jade';
 import '/client/components/main/spinner_scaleout.jade';
 import '/client/components/main/spinner_wave.jade';
 import '/client/components/main/support.jade';
+// #1293: Android share target.
+import '/client/components/main/shareTarget.jade';
+// #2026 / #1377: the all-boards activity feed.
+import '/client/components/main/activityFeed.jade';
+import '/client/components/main/activityFeed.css';
 
 import '/client/lib/keyboard';
 import '/client/lib/popup';
+import '/client/lib/pageSidebar';
+import '/client/components/main/pageSidebar.js';
 import '/client/components/main/accessibility.js';
 import '/client/components/main/bookmarks.js';
 import '/client/components/main/brokenCards.js';
@@ -29,12 +46,24 @@ import '/client/components/main/dueCards.js';
 import '/client/components/main/editor.js';
 import '/client/components/main/globalSearch.js';
 import '/client/components/main/header.js';
+import '/client/components/main/globalThemeColor.js';
+import '/client/components/main/themeColorPicker.js';
+import '/client/components/main/uiFont.js';
 import '/client/components/main/layouts.js';
+import '/client/components/main/mapProvider.js';
 import '/client/components/main/myCards.js';
+import '/client/components/main/myAttachments.js';
+import '/client/components/main/starredItems.js';
 import '/client/components/main/popup.js';
+import '/client/components/main/recoveryMaintenance.js';
+import '/client/components/main/historyRecoveryNotice.js';
+import '/client/components/main/safeFilename.js';
 import '/client/components/main/spinner.js';
 import '/client/components/main/support.js';
+import '/client/components/main/shareTarget.js';
+import '/client/components/main/activityFeed.js';
 
+import '/client/components/main/mapProvider.css';
 import '/client/components/main/accessibility.css';
 import '/client/components/main/brokenCards.css';
 import '/client/components/main/dueCards.css';
@@ -45,7 +74,9 @@ import '/client/components/main/header.css';
 import '/client/components/main/keyboardShortcuts.css';
 import '/client/components/main/layouts.css';
 import '/client/components/main/myCards.css';
+import '/client/components/main/myAttachments.css';
 import '/client/components/main/popup.css';
+import '/client/components/main/recoveryMaintenance.css';
 import '/client/components/main/spinner_bounce.css';
 import '/client/components/main/spinner_cube.css';
 import '/client/components/main/spinner_cube_grid.css';

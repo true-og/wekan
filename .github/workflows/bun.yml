@@ -1,0 +1,271 @@
+name: Bun
+
+# Build one ESM app, then rebuild its native addons on each Bun target.
+# Experimental until meteor/meteor#14751 ships; the isolated 3.6 port preserves
+# WeKan's release/package pins and is never used by the ordinary Node builds.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing WeKan release tag (empty = latest published release)'
+        type: string
+        required: false
+      publish:
+        description: 'Attach tested Bun archives and checksums to that release'
+        type: boolean
+        default: true
+      only:
+        description: 'JSON target list, e.g. ["linux-arm64", "android-arm64"] (empty = all)'
+        type: string
+        default: ''
+      missing_only:
+        description: 'Skip targets already carrying an archive AND checksum'
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
+      publish:
+        type: boolean
+        default: true
+      only:
+        type: string
+        default: ''
+      missing_only:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wekan-bun-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+      bun_tag: ${{ steps.plan.outputs.bun_tag }}
+      bun_version: ${{ steps.plan.outputs.bun_version }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      count: ${{ steps.plan.outputs.count }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          ONLY: ${{ inputs.only }}
+          MISSING_ONLY: ${{ inputs.missing_only }}
+        run: python3 releases/bun/assets.py plan
+
+  esm:
+    needs: plan
+    if: needs.plan.outputs.count != '0'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      # Keep workflow helpers from this workflow revision, and the app from the
+      # exact release tag. Never put current main's code on an older release.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: build-tools
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ needs.plan.outputs.tag }}
+          path: app
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26'
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ needs.plan.outputs.bun_version }}
+      - name: Prepare isolated Meteor with ESM support
+        working-directory: app
+        run: |
+          mkdir -p releases/bun
+          cp -R ../build-tools/releases/bun/. releases/bun/
+          bash releases/bun/prepare-meteor.sh
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.meteor
+            ~/.npm
+            app/.tools/meteor-bun/dev_bundle
+            app/.tools/meteor-bun/.babel-cache
+            app/.tools/meteor-bun/packages/*/.npm
+          key: bun-meteor-${{ runner.os }}-${{ hashFiles('app/.meteor/release', 'app/.meteor/versions', 'build-tools/releases/bun/meteor-3.6.patch') }}
+      - name: Build the release's ESM application once
+        working-directory: app
+        env:
+          DO_NOT_TRACK: '1'
+        run: |
+          export TMPDIR="$PWD/.tools/tmp"
+          # Rspack and its native compiler are devDependencies needed to build.
+          meteor npm ci --include=dev --include=optional
+          test -s node_modules/@meteorjs/rspack/rspack.config.js
+          meteor build ../esm-output --directory --server-only --format=esm
+          test -s ../esm-output/bundle/index.mjs
+          git rev-parse HEAD > ../esm-output/bundle/wekan-commit.txt
+          node --test .tools/meteor-bun/scripts/ci/__tests__/*.node-test.js
+          tar -cf - -C ../esm-output bundle | gzip -1 > ../esm-bundle.tar.gz
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bun-esm-source
+          path: esm-bundle.tar.gz
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 3
+
+  build:
+    needs: [plan, esm]
+    permissions:
+      contents: write
+      actions: read
+    name: Bun ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      TARGET: ${{ matrix.target }}
+      TARGET_PLATFORM: ${{ matrix.platform }}
+      TARGET_ARCH: ${{ matrix.arch }}
+      RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+      BUN_TAG: ${{ needs.plan.outputs.bun_tag }}
+      DO_NOT_TRACK: '1'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: bun-esm-source
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
+      - name: Unpack ESM and fetch verified target Bun
+        run: |
+          tar -xzf esm-bundle.tar.gz
+          export WEKAN_COMMIT="$(cat bundle/wekan-commit.txt)"
+          python3 releases/bun/assets.py fetch "$BUN_TAG" "$TARGET"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: matrix.kind == 'native'
+        with:
+          node-version: '26'
+          architecture: ${{ matrix.arch }}
+      - name: Install Chromium smoke test dependencies
+        if: matrix.kind == 'native' && matrix.platform == 'linux'
+        run: |
+          mkdir -p .tools/tmp
+          export TMPDIR="$PWD/.tools/tmp"
+          # Where releases/tools-env.sh, which build-target.sh loads, looks for
+          # them. Installed in ~/.cache instead, the smoke test found no browser
+          # (linux-arm64, v12.66).
+          export PLAYWRIGHT_BROWSERS_PATH="$PWD/.tools/ms-playwright"
+          npm ci --prefix tests/playwright --ignore-scripts
+          tests/playwright/node_modules/.bin/playwright install --with-deps chromium
+      - name: Start an isolated MongoDB for Linux HTTP and DDP tests
+        if: matrix.kind == 'native' && matrix.platform == 'linux'
+        run: |
+          # Not --rm: a container that dies must leave its log behind. v12.56
+          # linux-x64 found nothing on 27019 ("Topology is closed") and there
+          # was no way to see why. Wait until it answers, or show why not.
+          # 9.0.4, not mongo:8: on the runner's 6.19+ kernel mongo:8 refused to
+          # start ("Linux kernel versions 6.19 and newer has a known
+          # incompatibility", v12.66). 9.0.4 recognises Ubuntu kernels that
+          # have the fix; see docs/Databases/Supported.md.
+          docker run -d --name bun-smoke-mongo -p 127.0.0.1:27019:27017 mongo:9.0.4
+          for i in $(seq 1 60); do
+            if docker exec bun-smoke-mongo mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok' 2>/dev/null | grep -qx 1; then
+              echo "MongoDB answers on 127.0.0.1:27019 after ${i}s."; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::the smoke-test MongoDB did not answer within 60s; its state and log follow."
+          docker ps -a --filter name=bun-smoke-mongo
+          docker logs bun-smoke-mongo 2>&1 | tail -n 80
+          exit 1
+      - name: Native Linux, macOS or Windows build and smoke tests
+        if: matrix.kind == 'native'
+        env:
+          BUN_SMOKE_MONGO_URL: ${{ matrix.platform == 'linux' && 'mongodb://127.0.0.1:27019/bun_smoke' || '' }}
+          BUN_SMOKE_BROWSER: ${{ matrix.platform == 'linux' && '1' || '0' }}
+        run: bash releases/bun/build-target.sh
+      - name: Native musl container build and smoke tests
+        if: matrix.kind == 'musl'
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work \
+            -e TARGET -e TARGET_PLATFORM -e TARGET_ARCH -e RELEASE_TAG \
+            alpine:3.23 sh -ec '
+              apk add --no-cache bash nodejs npm python3 make g++ linux-headers
+              bash releases/bun/build-target.sh'
+      - name: Native Android Bionic build and smoke tests
+        if: matrix.kind == 'android'
+        env:
+          TERMUX_ARCH: ${{ matrix.termux_arch }}
+        run: |
+          # Termux uses Android libc/linker and native Android clang, not glibc.
+          # Its entrypoint clears Docker env when switching to the system user.
+          # Pass build metadata as env arguments AFTER that switch.
+          # Its unprivileged system user needs a writable bind mount.
+          chmod -R a+rwX bundle
+          mkdir -p dist .tools/tmp
+          chmod a+rwx dist .tools .tools/tmp
+          docker run --rm --security-opt seccomp=unconfined \
+            -v "$PWD:/work" -w /work \
+            -e TARGET -e TARGET_PLATFORM -e TARGET_ARCH -e RELEASE_TAG \
+            "termux/termux-docker:$TERMUX_ARCH" env \
+              "TARGET=$TARGET" "TARGET_PLATFORM=$TARGET_PLATFORM" \
+              "TARGET_ARCH=$TARGET_ARCH" "RELEASE_TAG=$RELEASE_TAG" \
+              DO_NOT_TRACK=1 bash -ec '
+              apt-get update
+              apt-get install -y nodejs-lts python make clang pkg-config libvips
+              bash releases/bun/build-target.sh'
+      - name: FreeBSD VM build and smoke tests
+        if: matrix.kind == 'freebsd'
+        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
+        with:
+          release: '14.5'
+          arch: ${{ matrix.vm_arch }}
+          envs: TARGET TARGET_PLATFORM TARGET_ARCH RELEASE_TAG
+          sync: rsync
+          copyback: true
+          cache-after-prepare: true
+          prepare: pkg install -y bash node24 npm-node24 python3 gmake pkgconf vips
+          run: bash releases/bun/build-target.sh
+      - name: Check finished archive exists
+        id: ready
+        run: |
+          files=(dist/*.zip)
+          [ "${#files[@]}" -eq 1 ]
+          test -s "${files[0]}"
+          test -s "${files[0]}.sha256sum"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always() && steps.ready.outcome == 'success'
+        with:
+          name: wekan-bun-${{ matrix.target }}
+          path: dist/*
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
+      - name: Attach this target immediately after validation
+        if: ${{ always() && steps.ready.outcome == 'success' && inputs.publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          files=(dist/*.zip dist/*.sha256sum)
+          bash releases/github-release-upload.sh "$GITHUB_REPOSITORY" "$RELEASE_TAG" "${files[@]}"

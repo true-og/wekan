@@ -7,38 +7,181 @@ import { ReactiveCache } from '/imports/reactiveCache';
 import Activities from '/models/activities';
 import Boards from '/models/boards';
 import Cards from '/models/cards';
-import Lists from '/models/lists';
+import Lists, { normalizeListColor } from '/models/lists';
+import UserPositionHistory from '/models/userPositionHistory';
 import { ensureIndex } from '/server/lib/mongoStartup';
 import { computeSortForIndex } from '/server/lib/utils';
+import { buildListPutUpdate } from '/models/lib/listApiUpdate';
+import { Random } from 'meteor/random';
+import { getFeatureFlags } from '/models/lib/featureFlags';
+import { softDeleteSet, restoreModifier, canPurge } from '/models/lib/softDelete';
+import { listsToUnbind } from '/models/lib/listUnbindRepair';
+import ChangeHistory from '/models/changeHistory';
+import { allowIsBoardMemberWithWriteAccess } from '/server/lib/utils';
+import { requireBoardMutation } from '/models/lib/boardMutationGuard';
+// ErrorBleed: refusals answer with their real status and a safe message.
+const { publicErrorData } = require('/server/lib/apiResponseHelpers');
 
-const hasBoardWriteAccess = (userId, board) => {
-  if (!userId || !board) {
-    return false;
-  }
+const hasBoardWriteAccess = allowIsBoardMemberWithWriteAccess;
 
-  if (typeof allowIsBoardMemberWithWriteAccess === 'function') {
-    return allowIsBoardMemberWithWriteAccess(userId, board);
-  }
-
-  return (
-    board.hasMember(userId) &&
-    !board.hasNoComments(userId) &&
-    !board.hasCommentOnly(userId) &&
-    !board.hasWorker(userId) &&
-    !board.hasReadOnly(userId) &&
-    !board.hasReadAssignedOnly(userId)
+// Soft delete (docs/Features/Undo/Undo.md): mark a list — and cascade-mark its live
+// cards with the SAME deleteBatchId — instead of destroying them, and record a
+// reversible 'delete' in position history. Restore/undo is all-or-nothing per batch.
+// Shared by the `lists.softRemove` method and the REST DELETE endpoint. Returns the
+// batchId. Best-effort history: a recording failure never fails the delete.
+async function softRemoveList({ userId, list }) {
+  const at = new Date();
+  const batchId = Random.id();
+  await Cards.updateAsync(
+    { listId: list._id, boardId: list.boardId, deletedAt: null },
+    { $set: softDeleteSet(userId, batchId, at) },
+    { multi: true },
   );
-};
+  await Lists.updateAsync(list._id, { $set: softDeleteSet(userId, batchId, at) });
+  try {
+    await UserPositionHistory.trackChange({
+      userId,
+      boardId: list.boardId,
+      entityType: 'list',
+      entityId: list._id,
+      actionType: 'delete',
+      previousState: { swimlaneId: list.swimlaneId, sort: list.sort, boardId: list.boardId },
+      newState: { deletedAt: at },
+      batchId,
+    });
+  } catch (e) {
+    // best-effort: never fail the delete because history recording failed
+  }
+  // The same change in the universal store (History.md §10.1). A lifecycle row
+  // is read in both directions: undoing it clears the delete mark, redoing it
+  // sets it again, which is what makes #1023 "undo a deleted list" work.
+  await ChangeHistory.record({
+    boardId: list.boardId,
+    swimlaneId: list.swimlaneId,
+    listId: list._id,
+    entityType: 'list',
+    entityId: list._id,
+    group: 'lifecycle',
+    changeType: 'removed',
+    previousContent: { deleted: false, deleteBatchId: batchId },
+    newContent: { deleted: true, deletedAt: at, deleteBatchId: batchId },
+    userId,
+    batchId,
+  });
+  return batchId;
+}
 
 Meteor.methods({
+  // Soft-delete a list (the ordinary "Delete list" action). Marks it + its cards
+  // deleted; restorable from the Recycle Bin / undo. Idempotent.
+  async 'lists.softRemove'(listId) {
+    check(listId, String);
+    if (!this.userId) {
+      throw new Meteor.Error('not-authorized', 'Must be logged in');
+    }
+    const list = await Lists.findOneAsync(listId);
+    if (!list) {
+      throw new Meteor.Error('not-found', 'List not found');
+    }
+    const board = await ReactiveCache.getBoard(list.boardId);
+    if (!hasBoardWriteAccess(this.userId, board)) {
+      throw new Meteor.Error('not-authorized', 'You cannot modify this board.');
+    }
+    if (list.deletedAt) {
+      return { deleted: true, batchId: list.deleteBatchId }; // already soft-deleted
+    }
+    const batchId = await softRemoveList({ userId: this.userId, list });
+    return { deleted: true, batchId };
+  },
+
+  // Restore a soft-deleted list and every card deleted alongside it (same batch).
+  async 'lists.restore'(listId) {
+    check(listId, String);
+    if (!this.userId) {
+      throw new Meteor.Error('not-authorized', 'Must be logged in');
+    }
+    const list = await Lists.findOneAsync(listId);
+    if (!list) {
+      throw new Meteor.Error('not-found', 'List not found');
+    }
+    const board = await ReactiveCache.getBoard(list.boardId);
+    if (!hasBoardWriteAccess(this.userId, board)) {
+      throw new Meteor.Error('not-authorized', 'You cannot modify this board.');
+    }
+    const batchId = list.deleteBatchId;
+    await Lists.updateAsync(list._id, restoreModifier());
+    if (batchId) {
+      await Cards.updateAsync({ deleteBatchId: batchId }, restoreModifier(), { multi: true });
+    }
+    try {
+      await UserPositionHistory.trackChange({
+        userId: this.userId,
+        boardId: list.boardId,
+        entityType: 'list',
+        entityId: list._id,
+        actionType: 'restore',
+        previousState: { deletedAt: list.deletedAt },
+        newState: { deletedAt: null },
+        batchId,
+      });
+    } catch (e) {
+      // best-effort
+    }
+    await ChangeHistory.record({
+      boardId: list.boardId,
+      swimlaneId: list.swimlaneId,
+      listId: list._id,
+      entityType: 'list',
+      entityId: list._id,
+      group: 'lifecycle',
+      changeType: 'added',
+      previousContent: { deleted: true, deletedAt: list.deletedAt, deleteBatchId: batchId },
+      newContent: { deleted: false, deleteBatchId: batchId },
+      userId: this.userId,
+      batchId,
+    });
+    return { restored: true };
+  },
+
+  // PERMANENTLY delete a soft-deleted list + its batch cards. The ONLY physical
+  // list delete in ordinary use — gated on Global Admin AND the Admin Panel /
+  // Features / Delete "Enable permanent delete" flag (models/lib/softDelete canPurge).
+  async 'lists.purge'(listId) {
+    check(listId, String);
+    if (!this.userId) {
+      throw new Meteor.Error('not-authorized', 'Must be logged in');
+    }
+    const user = await Meteor.users.findOneAsync(this.userId);
+    const flags = getFeatureFlags();
+    if (!canPurge(user, flags.enablePermanentDelete)) {
+      throw new Meteor.Error('not-authorized', 'Permanent delete is disabled.');
+    }
+    const list = await Lists.findOneAsync(listId);
+    if (!list) {
+      throw new Meteor.Error('not-found', 'List not found');
+    }
+    if (!list.deletedAt) {
+      throw new Meteor.Error('not-deleted', 'Only soft-deleted lists can be permanently deleted.');
+    }
+    const batchId = list.deleteBatchId;
+    if (batchId) {
+      await Cards.removeAsync({ deleteBatchId: batchId });
+    }
+    await Lists.removeAsync({ _id: list._id });
+    return { purged: true };
+  },
+
   async createListAfter(params) {
+    // Match.Optional (not a bare Match.OneOf) so a caller may OMIT these keys — a
+    // missing object key throws "Match failed" for any non-Optional sub-pattern.
+    // The #6465 inline composer sends no nextListId, which previously 400'd here.
     check(params, {
       title: String,
       boardId: String,
-      swimlaneId: Match.OneOf(String, null, undefined),
-      afterListId: Match.OneOf(String, null, undefined),
-      nextListId: Match.OneOf(String, null, undefined),
-      type: Match.Maybe(String),
+      swimlaneId: Match.Optional(Match.OneOf(String, null)),
+      afterListId: Match.Optional(Match.OneOf(String, null)),
+      nextListId: Match.Optional(Match.OneOf(String, null)),
+      type: Match.Optional(String),
     });
 
     const {
@@ -177,8 +320,11 @@ Meteor.methods({
     }
 
     const sourceBoard = await Boards.findOneAsync(list.boardId);
-    if (!sourceBoard || !sourceBoard.hasMember(this.userId)) {
-      throw new Meteor.Error('not-authorized', 'Not a member of the source board.');
+    requireBoardMutation(this.userId, sourceBoard, 'moveList:source', Meteor);
+    // AssignedBleed copy sibling (2026-10-02): a list holds cards an
+    // assigned-only member cannot see; copying or moving it would show them.
+    if (!require('/models/lib/boardCardScope').mayCopyFromBoard(sourceBoard, this.userId)) {
+      throw new Meteor.Error('not-authorized', 'You cannot copy or move this list.');
     }
 
     const targetBoard = await ReactiveCache.getBoard(boardId);
@@ -186,9 +332,7 @@ Meteor.methods({
       throw new Meteor.Error('board-not-found', 'Target board not found');
     }
 
-    if (!hasBoardWriteAccess(this.userId, targetBoard)) {
-      throw new Meteor.Error('not-authorized', 'Not a member of the target board.');
-    }
+    requireBoardMutation(this.userId, targetBoard, 'moveList:destination', Meteor);
 
     let sort = (await ReactiveCache.getLists({ boardId, archived: false })).length;
     if (neighborListId) {
@@ -211,8 +355,10 @@ Meteor.methods({
       }
     }
 
+    const { copiedScrumMetadata } = require('/models/lib/scrumCopy');
     const newListId = await Lists.insertAsync({
       title: title || list.title,
+      ...copiedScrumMetadata(list, boardId),
       boardId,
       swimlaneId,
       type: list.type,
@@ -247,8 +393,11 @@ Meteor.methods({
     }
 
     const sourceBoard = await Boards.findOneAsync(list.boardId);
-    if (!sourceBoard || !sourceBoard.hasMember(this.userId)) {
-      throw new Meteor.Error('not-authorized', 'Not a member of the source board.');
+    requireBoardMutation(this.userId, sourceBoard, 'moveList:source', Meteor);
+    // AssignedBleed copy sibling (2026-10-02): a list holds cards an
+    // assigned-only member cannot see; copying or moving it would show them.
+    if (!require('/models/lib/boardCardScope').mayCopyFromBoard(sourceBoard, this.userId)) {
+      throw new Meteor.Error('not-authorized', 'You cannot copy or move this list.');
     }
 
     const desiredTitle = typeof title === 'string' && title.trim().length > 0
@@ -260,8 +409,20 @@ Meteor.methods({
       throw new Meteor.Error('board-not-found', 'Target board not found');
     }
 
-    if (!hasBoardWriteAccess(this.userId, targetBoard)) {
-      throw new Meteor.Error('not-authorized', 'Not a member of the target board.');
+    requireBoardMutation(this.userId, targetBoard, 'moveList:destination', Meteor);
+
+    // #6670: a move within the same board now BINDS the list to the chosen
+    // swimlane, so that swimlane has to be one of the target board's - binding a
+    // list to a swimlane on another board would hide it everywhere. An empty
+    // swimlaneId is the deliberate "make it board-wide again" case.
+    if (swimlaneId) {
+      const targetSwimlane = await ReactiveCache.getSwimlane(swimlaneId);
+      if (!targetSwimlane || targetSwimlane.boardId !== boardId) {
+        throw new Meteor.Error(
+          'swimlane-not-found',
+          'That swimlane is not on the board the list is being moved to.',
+        );
+      }
     }
 
     list.title = desiredTitle;
@@ -312,9 +473,13 @@ Meteor.methods({
       throw new Meteor.Error('not-authorized', 'You must be a board admin to modify WIP limits.');
     }
 
-    if (limit === 0) {
+    // The client sends what the user typed. A NaN passes `check(limit, Number)` -
+    // it IS a number - and would reach the document, where the schema refuses it
+    // with nothing to show the user; 0 and negatives are meaningless as a limit.
+    if (!Number.isFinite(limit) || limit < 1) {
       limit = 1;
     }
+
     await list.setWipLimit(limit);
   },
 
@@ -357,6 +522,58 @@ Meteor.methods({
     }
 
     await list.toggleSoftLimit(!(await list.getWipLimit('soft')));
+  },
+
+  // #6484 detection: does this board have lists wrongly bound to a swimlane (so
+  // they "disappeared" from other swimlanes)? Called cheaply when a board opens.
+  // Returns { needsRepair: <count of bound lists>, canRepair: <viewer is a board
+  // admin> } so the client can auto-run repairBoardWideLists (below) with a
+  // progress modal only when there is something to fix and the user may fix it.
+  async boardListRepairNeeded(boardId) {
+    check(boardId, String);
+    if (!this.userId) {
+      throw new Meteor.Error('not-authorized', 'You must be logged in.');
+    }
+    const board = await ReactiveCache.getBoard(boardId);
+    if (!board || !board.hasMember(this.userId)) {
+      throw new Meteor.Error('not-authorized', 'You must be a board member.');
+    }
+    const lists = await ReactiveCache.getLists({ boardId });
+    return {
+      needsRepair: listsToUnbind(lists).length,
+      canRepair: board.hasAdmin(this.userId) === true,
+    };
+  },
+
+  // #6484 repair: restore board-wide lists that were wrongly bound to a single
+  // swimlane (so they "disappeared" from the other swimlanes) by clearing their
+  // swimlaneId back to null. Run by a board admin (deliberately, or auto on board
+  // open when boardListRepairNeeded reports needsRepair). Idempotent: lists
+  // already board-wide are left untouched. Returns the number of lists un-bound.
+  // Note this repairs the LIST binding only; cards the same bug moved into one
+  // swimlane are not restored (recover those from a backup) since their intended
+  // swimlane cannot be known.
+  async repairBoardWideLists(boardId) {
+    check(boardId, String);
+    if (!this.userId) {
+      throw new Meteor.Error('not-authorized', 'You must be logged in.');
+    }
+    const board = await ReactiveCache.getBoard(boardId);
+    if (!board || !board.hasAdmin(this.userId)) {
+      throw new Meteor.Error('not-authorized', 'You must be a board admin to repair this board.');
+    }
+    // Include swimlane-scoped lists regardless of archived state; only the
+    // swimlaneId is being cleared.
+    const lists = await ReactiveCache.getLists({ boardId });
+    const ids = listsToUnbind(lists);
+    if (ids.length > 0) {
+      await Lists.direct.updateAsync(
+        { _id: { $in: ids }, boardId },
+        { $set: { swimlaneId: null } },
+        { multi: true },
+      );
+    }
+    return { repaired: ids.length };
   },
 
   async myLists() {
@@ -414,6 +631,15 @@ Meteor.methods({
       }
     }
 
+    // #6478: capture the pre-move position so the change is UNDOABLE. A list
+    // dragged to another swimlane (especially an accidental one on mobile) can be
+    // reverted from the position history, like card moves already are.
+    const previousState = {
+      sort: list.sort,
+      swimlaneId: list.swimlaneId,
+      boardId: list.boardId,
+    };
+
     await Lists.updateAsync(
       listId,
       {
@@ -423,6 +649,50 @@ Meteor.methods({
         },
       },
     );
+
+    // #6478: record the list move in the undo/redo position history (best-effort;
+    // never fail the reorder if history recording throws).
+    //
+    // No `typeof UserPositionHistory !== 'undefined'` guard here. It is imported
+    // at the top of this file, so the guard was always true and did nothing -
+    // but it is the shape that made undo inert in the first place, and copying
+    // this block into a file that does NOT import the collection silently turns
+    // the recording off again. That is exactly how the card path stayed dead
+    // after #6478 was declared fixed.
+    {
+      try {
+        await UserPositionHistory.trackChange({
+          userId: this.userId,
+          boardId,
+          entityType: 'list',
+          entityId: listId,
+          actionType: 'move',
+          previousState,
+          newState: {
+            boardId,
+            swimlaneId: updateData.swimlaneId !== undefined ? updateData.swimlaneId : list.swimlaneId,
+            sort: updateData.sort !== undefined ? updateData.sort : list.sort,
+          },
+        });
+        await ChangeHistory.record({
+          boardId,
+          swimlaneId: updateData.swimlaneId !== undefined ? updateData.swimlaneId : list.swimlaneId,
+          listId,
+          entityType: 'list',
+          entityId: listId,
+          group: 'position',
+          changeType: 'moved',
+          previousContent: previousState,
+          newContent: {
+            sort: updateData.sort !== undefined ? updateData.sort : list.sort,
+            swimlaneId: updateData.swimlaneId !== undefined ? updateData.swimlaneId : list.swimlaneId,
+          },
+          userId: this.userId,
+        });
+      } catch (e) {
+        console.warn('Failed to track list move in history:', e);
+      }
+    }
 
     return {
       success: true,
@@ -535,20 +805,75 @@ Lists.after.update(async (userId, doc, fieldNames) => {
   }
 });
 
+// #6765: archiving a list archives its cards, and restoring it restores the
+// cards archived WITH it - the rule #2292 gave swimlanes
+// (models/lib/swimlaneArchive.js). Done here, on the server, because every way
+// a list is archived ends in this update: the list menu, the Archive sidebar,
+// the REST API and the methods. A client cascade would only reach the
+// archived cards the browser was sent, which is a capped page of them.
+//
+// Cards already archived on their own keep their own archivedAt and stay
+// archived on restore. The cards archived with the list are given the LIST's
+// archivedAt, which is how restore tells the two apart - the list's time may
+// come from the browser's clock, so the server's own clock is not compared
+// with it.
+Lists.after.update(async (userId, doc, fieldNames) => {
+  if (!fieldNames.includes('archived')) return;
+  const { cardsToArchiveWithSwimlane: toArchive, cardsToRestoreWithSwimlane: toRestore } =
+    require('/models/lib/swimlaneArchive');
+  const cards = await ReactiveCache.getCards({ listId: doc._id, boardId: doc.boardId });
+  if (doc.archived) {
+    let archivedAt = doc.archivedAt;
+    if (!archivedAt) {
+      archivedAt = new Date();
+      await Lists.direct.updateAsync(doc._id, { $set: { archivedAt } });
+    }
+    const archived = toArchive(cards);
+    for (const card of archived) await card.archive();
+    if (archived.length) {
+      await Cards.direct.updateAsync({ _id: { $in: archived.map(card => card._id) } },
+        { $set: { archivedAt } }, { multi: true });
+    }
+  } else {
+    for (const card of toRestore(cards, doc.archivedAt)) await card.restore();
+  }
+});
+
 WebApp.handlers.get('/api/boards/:boardId/lists', async function(req, res) {
   try {
     const paramBoardId = req.params.boardId;
     await Authentication.checkBoardAccess(req.userId, paramBoardId);
 
+    // #5251: two dates per list, so a client can tell whether anything changed
+    // without fetching every card and diffing it.
+    //
+    //   modifiedAt      - the LIST document: title, sort, archived.
+    //   cardsModifiedAt - the newest change among the cards IN it: a card added,
+    //                     edited or archived. The list's own modifiedAt does not
+    //                     move for those, which is what made this unanswerable.
+    //
+    // One query for the board's cards and a reduction in memory, rather than a
+    // query per list. Archived cards are included on purpose: archiving a card is
+    // one of the changes the client is asking about.
+    const { newestCardChangeByList } = require('/models/lib/listActivityDates');
+    const lists = await ReactiveCache.getLists({ boardId: paramBoardId, archived: false });
+    const cards = await ReactiveCache.getCards(
+      { boardId: paramBoardId },
+      { fields: { listId: 1, modifiedAt: 1, dateLastActivity: 1 } },
+    );
+    const newestByList = newestCardChangeByList(cards);
+
     sendJsonResult(res, {
       code: 200,
-      data: (await ReactiveCache.getLists({ boardId: paramBoardId, archived: false })).map(doc => ({
+      data: lists.map(doc => ({
         _id: doc._id,
         title: doc.title,
+        modifiedAt: doc.modifiedAt || null,
+        cardsModifiedAt: newestByList.get(doc._id) || null,
       })),
     });
   } catch (error) {
-    sendJsonResult(res, { code: 200, data: error });
+    sendJsonResult(res, publicErrorData(error));
   }
 });
 
@@ -557,16 +882,19 @@ WebApp.handlers.get('/api/boards/:boardId/lists/:listId', async function(req, re
     const paramBoardId = req.params.boardId;
     const paramListId = req.params.listId;
     await Authentication.checkBoardAccess(req.userId, paramBoardId);
-    sendJsonResult(res, {
-      code: 200,
-      data: await ReactiveCache.getList({
-        _id: paramListId,
-        boardId: paramBoardId,
-        archived: false,
-      }),
+    const list = await ReactiveCache.getList({
+      _id: paramListId,
+      boardId: paramBoardId,
+      archived: false,
     });
+    // 404, not a 200 with an empty body (#6862).
+    if (!list) {
+      sendJsonResult(res, { code: 404, data: { error: 'List not found' } });
+      return;
+    }
+    sendJsonResult(res, { code: 200, data: list });
   } catch (error) {
-    sendJsonResult(res, { code: 200, data: error });
+    sendJsonResult(res, publicErrorData(error));
   }
 });
 
@@ -586,7 +914,7 @@ WebApp.handlers.post('/api/boards/:boardId/lists', async function(req, res) {
     });
     sendJsonResult(res, { code: 200, data: { _id: id } });
   } catch (error) {
-    sendJsonResult(res, { code: 200, data: error });
+    sendJsonResult(res, publicErrorData(error));
   }
 });
 
@@ -608,35 +936,29 @@ WebApp.handlers.put('/api/boards/:boardId/lists/:listId', async function(req, re
       return;
     }
 
-    if (req.body.title) {
-      const newTitle = req.body.title.length > 1000 ? req.body.title.substring(0, 1000) : req.body.title;
-      await Lists.direct.updateAsync(
-        { _id: paramListId, boardId: paramBoardId, archived: false },
-        { $set: { title: newTitle } },
-      );
-      updated = true;
+    // #5396: edit a list's title/color (and starred/wipLimit) via the REST API,
+    // like cards can be edited. The color is validated with normalizeListColor
+    // (named palette color OR custom '#rrggbb' hex); a bad color is rejected
+    // with a clear 4xx rather than being silently stored as None. The pure
+    // field/validation logic lives in models/lib/listApiUpdate.js so it is unit
+    // testable without Meteor.
+    const { set, error } = buildListPutUpdate(req.body, normalizeListColor);
+
+    if (error) {
+      sendJsonResult(res, { code: 400, data: { error } });
+      return;
     }
 
-    if (req.body.color) {
-      await Lists.direct.updateAsync(
-        { _id: paramListId, boardId: paramBoardId, archived: false },
-        { $set: { color: req.body.color } },
-      );
-      updated = true;
+    // The WIP limit is set by a board admin, as the applyWipLimit /
+    // enableWipLimit methods require; write access edits the rest.
+    if (set.wipLimit !== undefined) {
+      await Authentication.checkBoardAdmin(req.userId, paramBoardId);
     }
 
-    if (req.body.hasOwnProperty('starred')) {
+    if (Object.keys(set).length > 0) {
       await Lists.direct.updateAsync(
         { _id: paramListId, boardId: paramBoardId, archived: false },
-        { $set: { starred: req.body.starred } },
-      );
-      updated = true;
-    }
-
-    if (req.body.wipLimit) {
-      await Lists.direct.updateAsync(
-        { _id: paramListId, boardId: paramBoardId, archived: false },
-        { $set: { wipLimit: req.body.wipLimit } },
+        { $set: set },
       );
       updated = true;
     }
@@ -648,7 +970,7 @@ WebApp.handlers.put('/api/boards/:boardId/lists/:listId', async function(req, re
 
     sendJsonResult(res, { code: 200, data: { _id: paramListId } });
   } catch (error) {
-    sendJsonResult(res, { code: 200, data: error });
+    sendJsonResult(res, publicErrorData(error));
   }
 });
 
@@ -657,10 +979,50 @@ WebApp.handlers.delete('/api/boards/:boardId/lists/:listId', async function(req,
     const paramBoardId = req.params.boardId;
     const paramListId = req.params.listId;
       await Authentication.checkBoardWriteAccess(req.userId, paramBoardId);
-    await Lists.removeAsync({ _id: paramListId, boardId: paramBoardId });
+    // Soft delete (docs/Features/Undo/Undo.md): mark deleted + cascade, don't destroy.
+    const list = await Lists.findOneAsync({ _id: paramListId, boardId: paramBoardId });
+    if (list && !list.deletedAt) {
+      await softRemoveList({ userId: req.userId, list });
+    }
     sendJsonResult(res, { code: 200, data: { _id: paramListId } });
   } catch (error) {
-    sendJsonResult(res, { code: 200, data: error });
+    sendJsonResult(res, publicErrorData(error));
+  }
+});
+
+// #2906: archive and restore a list by script, as the board does (models/lists.js
+// archive/restore). The PUT above edits only live lists and cannot archive.
+WebApp.handlers.post('/api/boards/:boardId/lists/:listId/archive', async function(req, res) {
+  try {
+    const paramBoardId = req.params.boardId;
+    const paramListId = req.params.listId;
+    await Authentication.checkBoardWriteAccess(req.userId, paramBoardId);
+    const list = await ReactiveCache.getList({ _id: paramListId, boardId: paramBoardId, archived: false });
+    if (!list) {
+      sendJsonResult(res, { code: 404, data: { error: 'List not found' } });
+      return;
+    }
+    await list.archive();
+    sendJsonResult(res, { code: 200, data: { _id: paramListId, archived: true } });
+  } catch (error) {
+    sendJsonResult(res, publicErrorData(error));
+  }
+});
+
+WebApp.handlers.post('/api/boards/:boardId/lists/:listId/unarchive', async function(req, res) {
+  try {
+    const paramBoardId = req.params.boardId;
+    const paramListId = req.params.listId;
+    await Authentication.checkBoardWriteAccess(req.userId, paramBoardId);
+    const list = await ReactiveCache.getList({ _id: paramListId, boardId: paramBoardId, archived: true });
+    if (!list) {
+      sendJsonResult(res, { code: 404, data: { error: 'List not found' } });
+      return;
+    }
+    await list.restore();
+    sendJsonResult(res, { code: 200, data: { _id: paramListId, archived: false } });
+  } catch (error) {
+    sendJsonResult(res, publicErrorData(error));
   }
 });
 

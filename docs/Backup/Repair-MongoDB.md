@@ -5,9 +5,10 @@ sudo su
 
 snap stop wekan
 
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/snap/wekan/current/lib/x86_64-linux-gnu
+S=/snap; [ -d /snap/wekan ] || S=/var/lib/snapd/snap
+export LD_LIBRARY_PATH="${LD_LIBRARY_PATH-}:$S/wekan/current/lib/$(uname -m)-linux-gnu"
 
-export PATH="/snap/wekan/current/bin:$PATH"
+export PATH="$S/wekan/current/bin:$PATH"
 
 mongod --dbpath "/var/snap/wekan/common" --repair >> /root/repairlog.txt
 
@@ -52,7 +53,7 @@ apt install ntfs-3g
 ```
 mount /dev/sdd1 /mnt
 ```
-4. Stop WeKan Docker containers. If copying raw database files, WeKan and MongoDB should not be running, so that MongoDB would not be even more corrupted. (If MongoDB is running, and you have mongodump backup, you can [Backup with mongorestore](Backup)
+4. Stop WeKan Docker containers. If copying raw database files, WeKan and MongoDB should not be running, so that MongoDB would not be even more corrupted. (If MongoDB is running, and you have mongodump backup, you can [Backup with mongorestore](Backup.md)
 ```
 docker stop wekan-db wekan-app
 ```

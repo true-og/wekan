@@ -1,3 +1,4 @@
+import { formatDateForDisplay } from '/client/lib/dateDisplay';
 import { FlowRouter } from 'meteor/ostrio:flow-router-extra';
 import Cards from '/models/cards';
 
@@ -69,9 +70,7 @@ Template.ganttView.helpers({
 		return TAPi18n.__(weekdayKeys[day.getDay() === 0 ? 6 : day.getDay() - 1]);
 	},
 	formattedDate(day) {
-		const currentUser = ReactiveCache.getCurrentUser && ReactiveCache.getCurrentUser();
-		const dateFormat = currentUser ? currentUser.getDateFormat() : 'YYYY-MM-DD';
-		return formatDateByUserPreference(day, dateFormat, false);
+		return formatDateForDisplay(day, false);
 	},
 	cardsInWeek(week) {
 		const board = Utils.getCurrentBoard();
@@ -124,10 +123,12 @@ Template.ganttView.helpers({
 			 dueAt: card.dueAt ? new Date(card.dueAt) : null,
 			 endAt: card.endAt ? new Date(card.endAt) : null,
 		 };
-		 if (cardDates.receivedAt && cardDates.receivedAt.toDateString() === day.toDateString()) return '📥';
-		 if (cardDates.startAt && cardDates.startAt.toDateString() === day.toDateString()) return '🚀';
-		 if (cardDates.dueAt && cardDates.dueAt.toDateString() === day.toDateString()) return '⏰';
-		 if (cardDates.endAt && cardDates.endAt.toDateString() === day.toDateString()) return '🏁';
+		 // Font Awesome class names, rendered as <i class="fa ..."> by gantt.jade -
+		 // the emoji these used to be were the last of the 8.00-8.24 icon set.
+		 if (cardDates.receivedAt && cardDates.receivedAt.toDateString() === day.toDateString()) return 'fa-inbox';
+		 if (cardDates.startAt && cardDates.startAt.toDateString() === day.toDateString()) return 'fa-rocket';
+		 if (cardDates.dueAt && cardDates.dueAt.toDateString() === day.toDateString()) return 'fa-clock-o';
+		 if (cardDates.endAt && cardDates.endAt.toDateString() === day.toDateString()) return 'fa-flag-checkered';
 		 return '';
 	 },
 	isToday(day) {
@@ -213,9 +214,5 @@ Template.ganttView.onRendered(function() {
 
 });
 
-import markdownit from 'markdown-it';
 import { TAPi18n } from '/imports/i18n';
-import { formatDateByUserPreference } from '/imports/lib/dateUtils';
 import { ReactiveCache } from '/imports/reactiveCache';
-
-const md = markdownit({ breaks: true, linkify: true });

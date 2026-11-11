@@ -1,0 +1,526 @@
+template(name="adminProblems")
+  .setting-content.admin-reports-content
+    unless currentUser.isAdmin
+      | {{_ 'error-notAuthorized'}}
+    else
+      .content-body
+        +leftMenu(menuItems)
+
+        .main-body
+          //- Every Admin Panel pane opens with the same heading, and it is the
+          //- open menu entry's own label (docs/Features/All-Boards/Left-Menu.md).
+          +paneTitle(paneTitleData)
+          if showFileStatusAudit
+            +fileStatusAudit
+          if isPane 'report-recovery'
+            +emailRecoveryReports
+            +activityNotificationRecoveryReports
+            +syncRuleEmailRecoveryReports
+            +syncRuleEmailLegacyCommands
+            +listSyncStuckOperations
+            +interruptedImports
+            +syncRecoveryReports
+          if loading.get
+            +spinner
+          else if isPane 'report-summary'
+            +problemsSummary
+          else if isPane 'features-performance'
+            +featuresPerformance
+          else if isPane 'features-security'
+            +featuresSecurity
+          else if isPane 'features-delete'
+            +featuresDelete
+          else if isPane 'features-notifications'
+            +featuresNotifications
+          else if isPane 'features-backup'
+            +backupRunsStatus(settingsLink=true)
+          else if isPane 'report-security'
+            +eventStreamReport(stream="security")
+          else if isPane 'report-speed'
+            +eventStreamReport(stream="speed")
+          else if isPane 'report-tests'
+            +eventStreamReport(stream="tests")
+          else if isPane 'report-cpu'
+            +eventStreamReport(stream="cpu")
+          else if isPane 'report-ram'
+            +eventStreamReport(stream="ram")
+          else if isPane 'report-disk'
+            +eventStreamReport(stream="disk")
+          else if isPane 'report-instrumentation'
+            +instrumentationReport
+          else if isPane 'report-database'
+            +eventStreamReport(stream="database")
+          else if isPane 'report-integrity'
+            +eventStreamReport(stream="integrity")
+          else if isPane 'report-mail'
+            +eventStreamReport(stream="mail")
+          else if isPane 'report-api'
+            +eventStreamReport(stream="api")
+          else if isPane 'report-office'
+            +officeReport
+          else if isPane 'report-password-length'
+            +passwordLengthReport
+          else if tablePageData
+            +tablePage(tablePageData)
+
+template(name="officeReport")
+  //- Where people log in from, grouped. Through the shared table page like every
+  //- other report here (docs/Features/General/Table.md).
+  +tablePage(tablePageData)
+
+template(name="eventStreamReport")
+  //- Security / Speed / Tests / CPU usage all render through the shared table
+  //- page (docs/Features/General/Table.md). CPU usage additionally passes the live
+  //- figure as the status row between the title and the controls.
+  +tablePage(tablePageData)
+
+template(name="instrumentationReport")
+  p.description Live measurements for this WeKan server process since startup. Refreshes every 5 seconds. Arguments, results, addresses and user identifiers are not stored. Values reset when the server restarts.
+  if error
+    p.error {{error}}
+  else
+    //- The whole picture first: one bar per area of WeKan, its length the
+    //- area's calls against the busiest area's, its red end the share that
+    //- failed. A row filters the table below to that area; again, all of it.
+    //- models/lib/instrumentationAreas.js groups the operations.
+    if areas.length
+      .instrumentation-areas
+        .instrumentation-area-head(aria-hidden="true")
+          span
+          span
+          span.instrumentation-area-num {{_ 'api-calls'}}
+          span.instrumentation-area-num {{_ 'duration'}}
+          span.instrumentation-area-num {{_ 'errors'}}
+        each area in areas
+          button.instrumentation-area.js-instrumentation-area(type="button" data-area=area.id class="{{#if area.active}}is-active{{/if}}" aria-pressed="{{#if area.active}}true{{else}}false{{/if}}" title=area.title)
+            span.instrumentation-area-name {{area.label}}
+            span.instrumentation-area-bar
+              span.instrumentation-area-fill(style="width: {{area.barPct}}%")
+                if area.errors
+                  span.instrumentation-area-errors(style="width: {{area.errorPct}}%")
+            span.instrumentation-area-num {{area.callsText}}
+            span.instrumentation-area-num {{area.avgText}}
+            span.instrumentation-area-num(class="{{#if area.errors}}has-errors{{/if}}") {{area.errorsText}}
+    +tablePage(tablePageData)
+
+template(name="instrumentationStatus")
+  .admin-cpu-current
+    span DDP connections: {{active}} active, {{opened}} opened, {{closed}} closed
+    span.quiet  &middot; Started {{startedAt}}
+
+template(name="cpuCurrentStatus")
+  .admin-cpu-current(class="{{#if high}}admin-cpu-high{{/if}}")
+    span.admin-cpu-label {{_ 'cpu-usage-current'}}
+    span.admin-cpu-percent {{percent}}%
+    span.quiet
+      | {{cores}} {{_ 'cpu-cores-suffix'}} &middot; {{_ 'cpu-load-average'}} {{loadAverage}}
+    if statistics
+      span.quiet
+        |  &middot; min/avg/max {{statistics.minimum}}%/{{statistics.average}}%/{{statistics.maximum}}%
+        |  ({{statistics.samples}} samples, lowest {{statistics.lowestAt}})
+    if activity
+      span.quiet  &middot; {{activity}}
+
+template(name="ramCurrentStatus")
+  .admin-cpu-current(class="{{#if high}}admin-cpu-high{{/if}}")
+    span.admin-cpu-label {{_ 'memory-usage'}}
+    span.admin-cpu-percent {{percent}}%
+    span.quiet  {{used}} / {{total}} GB
+    if swap
+      span.quiet  &middot; swap {{swap.percent}}% ({{swap.used}} / {{swap.total}} GB)
+
+template(name="diskCurrentStatus")
+  each disk in disks
+    .admin-cpu-current(class="{{#if disk.high}}admin-cpu-high{{/if}}")
+      span.admin-cpu-label {{_ 'sandstorm-disk-usage'}}
+      span.admin-cpu-percent {{disk.percent}}%
+      span.quiet  {{disk.available}} / {{disk.total}} GB &middot; {{disk.path}} ({{disk.roles}})
+
+//- Performance, Security and Notifications. They were the whole of Admin Panel /
+//- Features, which is gone; they are Problems panes now and live with the page that
+//- renders them. Each is its own template so its helpers and handlers can live ON it -
+//- Blaze resolves both against the template an element is IN, never an enclosing one.
+
+//- Admin Panel / Problems / Performance.
+template(name="featuresPerformance")
+  ul.setting-detail
+    li.layout-form
+      .title {{_ 'cards-loading'}}
+      p.description {{_ 'cards-loading-description'}}
+
+//- Admin Panel / Problems / Security.
+template(name="featuresSecurity")
+  ul.setting-detail
+    li
+      a.flex.js-toggle-render-links-as-plain-text
+        .materialCheckBox(class="{{#if renderLinksAsPlainText}}is-checked{{/if}}")
+        span {{_ 'render-links-as-plain-text'}}
+      p.description {{_ 'render-links-as-plain-text-description'}}
+    li
+      a.flex.js-toggle-always-show-code-as-text
+        .materialCheckBox(class="{{#if alwaysShowCodeAsText}}is-checked{{/if}}")
+        span {{_ 'always-show-code-as-text'}}
+      p.description {{_ 'always-show-code-as-text-description'}}
+    li
+      a.flex.js-toggle-disable-all-import
+        .materialCheckBox(class="{{#if disableAllImport}}is-checked{{/if}}")
+        span {{_ 'disable-all-import'}}
+      p.description {{_ 'disable-all-import-description'}}
+    li
+      a.flex.js-toggle-disable-all-export
+        .materialCheckBox(class="{{#if disableAllExport}}is-checked{{/if}}")
+        span {{_ 'disable-all-export'}}
+      p.description {{_ 'disable-all-export-description'}}
+    li
+      a.flex.js-toggle-disable-import-avatars
+        .materialCheckBox(class="{{#if disableImportAvatars}}is-checked{{/if}}")
+        span {{_ 'disable-import-avatars'}}
+      p.description {{_ 'disable-import-avatars-description'}}
+    li
+      a.flex.js-toggle-disable-export-avatars
+        .materialCheckBox(class="{{#if disableExportAvatars}}is-checked{{/if}}")
+        span {{_ 'disable-export-avatars'}}
+      p.description {{_ 'disable-export-avatars-description'}}
+    li
+      a.flex.js-toggle-anonymize-import-users
+        .materialCheckBox(class="{{#if anonymizeImportUsers}}is-checked{{/if}}")
+        span {{_ 'anonymize-import-users'}}
+      p.description {{_ 'anonymize-import-users-description'}}
+    li
+      a.flex.js-toggle-anonymize-export-users
+        .materialCheckBox(class="{{#if anonymizeExportUsers}}is-checked{{/if}}")
+        span {{_ 'anonymize-export-users'}}
+      p.description {{_ 'anonymize-export-users-description'}}
+
+//- Admin Panel / Problems / Delete.
+template(name="featuresDelete")
+  ul.setting-detail
+    li
+      a.flex.js-toggle-enable-permanent-delete
+        .materialCheckBox(class="{{#if enablePermanentDelete}}is-checked{{/if}}")
+        span {{_ 'enable-permanent-delete'}}
+      p.description {{_ 'enable-permanent-delete-description'}}
+      p.description {{permanentDeleteRecoveryDescription}}
+
+//- Admin Panel / Problems / Notifications.
+template(name="featuresNotifications")
+  ul.setting-detail
+    li
+      a.flex.js-toggle-disable-activities
+        .materialCheckBox(class="{{#if disableActivities}}is-checked{{/if}}")
+        span {{_ 'disable-activities'}}
+      p.description {{_ 'disable-activities-description'}}
+    li
+      a.flex.js-toggle-disable-notifications
+        .materialCheckBox(class="{{#if disableNotifications}}is-checked{{/if}}")
+        span {{_ 'disable-notifications'}}
+      p.description {{_ 'disable-notifications-description'}}
+    li
+      a.flex.js-toggle-disable-watch
+        .materialCheckBox(class="{{#if disableWatch}}is-checked{{/if}}")
+        span {{_ 'disable-watch'}}
+      p.description {{_ 'disable-watch-description'}}
+
+//- Read-only storage diagnostics are shared by Files, Integrity and Recovery.
+template(name="fileStatusAudit")
+  section.file-status-audit(aria-label="File status checks")
+    p Check file contents, database metadata and recovery evidence. No files or records are changed.
+    .file-status-audit-actions
+      button.js-file-audit-all(type="button" disabled=running) Check files and history
+      button.js-file-audit-types(type="button" disabled=running) Check file types and extensions
+      button.js-file-audit-inventory(type="button" disabled=running) Check missing and untracked files
+      if running
+        button.js-file-audit-cancel(type="button") Cancel check
+      if result
+        button.js-file-audit-download(type="button") Download status summary
+    if error
+      p(role="alert") {{error}}
+    if result
+      .file-status-audit-result(role="status" aria-live="polite")
+        p {{statusText}}
+        p {{countText}}
+        if coverageText
+          p {{coverageText}}
+      if result.limitations
+        details
+          summary Coverage and limitations
+          ul
+            each result.limitations
+              li {{this}}
+      if totals
+        ul
+          each totals
+            li {{kind}}: {{count}}
+      details
+        summary Storage directories
+        ul
+          each result.roots
+            li {{path}} — {{status}} {{resolved}}
+      if result.findings
+        details
+          summary Findings (bounded sample; full counts above)
+          each findings
+            pre {{this}}
+      if result.omittedFindings
+        p Additional findings not displayed: {{result.omittedFindings}}
+
+template(name="syncRecoveryReports")
+  section.sync-recovery-reports
+    h2 {{_ 'sync-recovery-heading'}}
+    p.quiet {{_ 'sync-recovery-description'}}
+    if error
+      p.error {{error}}
+    +tablePage(tablePageData)
+
+template(name="syncRecoveryReportRow")
+  tr
+    td {{started}}
+    td
+      p {{_ 'board'}}: {{boardId}}
+      p {{_ 'list'}}: {{listId}}
+    td {{_ statusLabel}}
+    td
+      details
+        summary {{_ 'details'}}
+        p.quiet {{_ 'sync-report-partial'}}
+        if hasCounts
+          p {{_ 'sync-preview-create'}}: {{created}}
+          p {{_ 'sync-preview-update'}}: {{updated}}
+          p {{_ 'sync-preview-archive'}}: {{archived}}
+        each sourceRows
+          p {{path}}: {{count}} — {{_ reasonLabel}}
+        each normalizedRows
+          p {{field}}: {{count}} — {{_ reasonLabel}}
+        if coverage.source.truncated
+          p {{_ 'sync-source-truncated'}}
+          p {{_ 'sync-source-omitted'}}: {{coverage.source.omittedOccurrences}}
+        p {{_ 'sync-preview-parser-warnings'}}: {{coverage.parserWarnings}}
+        p {{_ 'sync-preview-parser-unsupported'}}: {{coverage.parserUnsupported}}
+
+template(name="emailRecoveryReports")
+  section.email-recovery-reports
+    h2 {{_ 'email-recovery-heading'}}
+    p.quiet {{_ 'email-recovery-description'}}
+    if error
+      p.error(role="alert") {{error}}
+    if busy
+      p.quiet {{_ 'email-recovery-saving'}}
+    +tablePage(tablePageData)
+
+template(name="emailRecoveryReportRow")
+  tr(data-recipient=userId)
+    td
+      p {{username}}
+      p.quiet {{userId}}
+    td {{_ statusLabel}}
+    td
+      p {{_ 'email-recovery-queued'}}: {{queued}}
+      p {{_ 'email-recovery-retrying'}}: {{retrying}}
+      p {{_ 'email-recovery-stopped'}}: {{failed}}
+      each failureRows
+        p.quiet {{_ labelKey}}: {{count}}
+      p {{_ 'email-recovery-attempts'}}: {{attempts}}
+    td
+      p {{_ 'email-recovery-oldest'}}: {{oldestText}}
+      p {{_ 'email-recovery-next'}}: {{nextText}}
+      if changedText
+        p {{_ 'email-recovery-changed'}}: {{changedText}}
+        p.quiet {{changedBy}}
+    td
+      if paused
+        button.js-email-queue-action(type="button" data-action="resume" disabled=busy) {{_ 'email-recovery-resume'}}
+      else
+        button.js-email-queue-action(type="button" data-action="pause" disabled=busy) {{_ 'email-recovery-pause'}}
+      if failed
+        button.js-email-queue-action(type="button" data-action="retry" disabled=busy) {{_ 'email-recovery-retry'}}
+      if queued
+        button.js-email-queue-action(type="button" data-action="cancel" disabled=busy) {{_ 'email-recovery-cancel'}}
+
+
+template(name="activityNotificationRecoveryReports")
+  section.activity-notification-recovery-reports
+    h2 {{_ 'activity-recovery-heading'}}
+    p.quiet {{_ 'activity-recovery-description'}}
+    if error
+      p.error(role="alert") {{error}}
+    if busy
+      p.quiet {{_ 'activity-recovery-retrying'}}
+    +tablePage(tablePageData)
+
+template(name="activityNotificationRecoveryRow")
+  tr(data-intent=intentId)
+    td
+      p {{activityId}}
+      if cardId
+        p.quiet {{_ 'card'}}: {{cardId}}
+    td {{boardId}}
+    td
+      p {{_ statusLabel}}
+      if showPaused
+        p {{_ 'activity-recovery-paused'}}
+    td {{createdText}}
+    td
+      button.js-cancel-activity-notification(type="button" disabled=controlDisabled) {{_ 'activity-recovery-cancel'}}
+      button.js-control-activity-notification(type="button" disabled=controlDisabled) {{_ controlLabel}}
+      button.js-retry-activity-notification(type="button" disabled=retryDisabled) {{_ 'activity-recovery-retry'}}
+
+
+template(name="syncRuleEmailRecoveryReports")
+  section.sync-rule-email-recovery-reports
+    h2 {{_ 'rule-email-recovery-heading'}}
+    p.quiet {{_ 'rule-email-recovery-description'}}
+    label
+      | {{_ 'status'}}
+      select.js-rule-email-status
+        option(value="all") {{_ 'rule-email-recovery-all'}}
+        option(value="unconfirmed") {{_ 'rule-email-recovery-unconfirmed'}}
+        option(value="sent") {{_ 'rule-email-recovery-sent'}}
+        option(value="dropped") {{_ 'rule-email-recovery-dropped'}}
+    if error
+      p.error(role="alert") {{error}}
+    +tablePage(tablePageData)
+    if detail
+      with detail
+        section.rule-email-recovery-detail(data-command=commandId aria-live="polite")
+          h3 {{_ 'rule-email-recovery-recipients'}}
+          ul
+            each recipients
+              li {{address}} — {{_ statusKey}}
+          if resends.length
+            p.quiet {{_ 'rule-email-recovery-resends' count=resends.length}}
+          p.quiet {{_ 'rule-email-recovery-actions-hint'}}
+          unless resolvable
+            if waiting
+              p {{_ 'rule-email-recovery-wait' time=resolvableText}}
+          if actionError
+            p.error(role="alert") {{actionError}}
+          button.js-rule-email-resend(type="button" disabled=actionsDisabled) {{_ 'rule-email-recovery-resend'}}
+          button.js-rule-email-mark-sent(type="button" disabled=actionsDisabled) {{_ 'rule-email-recovery-mark-sent'}}
+          button.js-rule-email-drop(type="button" disabled=actionsDisabled) {{_ 'rule-email-recovery-drop'}}
+
+template(name="syncRuleEmailRecoveryRow")
+  tr(data-command=commandId)
+    td.rule-email-recovery-identifiers
+      p {{commandId}}
+      p.quiet {{invocationId}}
+      p.quiet {{attemptId}}
+    td {{_ statusLabel}}
+    td {{startedText}}
+    td {{finishedText}}
+    td
+      if canReview
+        button.js-rule-email-review(type="button") {{_ 'rule-email-recovery-review'}}
+
+
+template(name="syncRuleEmailLegacyCommands")
+  section.sync-rule-email-legacy-commands
+    h2 {{_ 'rule-email-legacy-heading'}}
+    p.quiet {{_ 'rule-email-legacy-description'}}
+    if error
+      p.error(role="alert") {{error}}
+    if rows.length
+      table
+        thead
+          tr
+            th {{_ 'rule-email-legacy-source'}}
+            th {{_ 'rule-email-legacy-mail'}}
+            th {{_ 'rule-email-legacy-reason'}}
+            th {{_ 'actions'}}
+        tbody
+          each rows
+            tr(data-command=commandId)
+              td
+                p {{boardId}}
+                p.quiet {{cardId}}
+              td
+                p {{to}}
+                p.quiet {{subject}}
+              td {{_ reasonKey}}
+              td
+                button.js-rule-email-legacy-rebind(type="button" disabled=rebindDisabled) {{_ 'rule-email-legacy-rebind'}}
+                button.js-rule-email-legacy-discard(type="button" disabled=busy) {{_ 'rule-email-legacy-discard'}}
+      if hasPages
+        button.js-rule-email-legacy-prev(type="button" disabled=noPrev) &lsaquo;
+        span  {{pageLabel}}
+        button.js-rule-email-legacy-next(type="button" disabled=noNext) &rsaquo;
+    else
+      p.quiet {{_ 'rule-email-legacy-empty'}}
+
+//- A saved List Sync operation that can no longer be replayed blocks that
+//- list's Sync; an administrator reviews and discards it here
+//- (server/lib/listSyncStuck.js, docs/Features/Admin-Panel/Problems/Recovery.md).
+template(name="listSyncStuckOperations")
+  section.list-sync-stuck-operations
+    h2 {{_ 'stuck-sync-operation-heading'}}
+    p.quiet {{_ 'stuck-sync-operation-description'}}
+    if error
+      p.error(role="alert") {{error}}
+    if rows.length
+      table
+        thead
+          tr
+            th {{_ 'stuck-sync-operation-list'}}
+            th {{_ 'stuck-sync-operation-progress'}}
+            th {{_ 'stuck-sync-operation-reason'}}
+            th {{_ 'actions'}}
+        tbody
+          each rows
+            tr(data-list=listId data-operation=operationId)
+              td
+                p {{_ 'board'}}: {{boardId}}
+                p {{_ 'list'}}: {{listId}}
+                p.quiet {{stuckAtText}}
+              td {{_ 'stuck-sync-operation-applied' applied=applied total=total}}
+              td
+                p {{_ reasonKey}}
+                if replayableNow
+                  p.quiet {{_ 'stuck-sync-operation-replayable-now'}}
+              td
+                button.js-list-sync-stuck-discard(type="button" disabled=discardDisabled) {{_ 'stuck-sync-operation-discard'}}
+      if truncated
+        p.quiet {{_ 'stuck-sync-operation-truncated'}}
+    else
+      p.quiet {{_ 'stuck-sync-operation-empty'}}
+    button.js-list-sync-stuck-refresh(type="button" disabled=busy) {{_ 'stuck-sync-operation-refresh'}}
+
+//- A board import that stopped before finishing left a partial board; an
+//- administrator keeps it as it is or discards it here
+//- (server/lib/importRuns.js, docs/Features/Board-Sidebar/Board-Settings/Import-Export/Import-Run-Recovery.md).
+template(name="interruptedImports")
+  section.interrupted-imports
+    h2 {{_ 'interrupted-import-heading'}}
+    p.quiet {{_ 'interrupted-import-description'}}
+    if error
+      p.error(role="alert") {{error}}
+    if rows.length
+      table
+        thead
+          tr
+            th {{_ 'interrupted-import-board'}}
+            th {{_ 'interrupted-import-progress'}}
+            th {{_ 'interrupted-import-created'}}
+            th {{_ 'actions'}}
+        tbody
+          each rows
+            tr(data-run=runId)
+              td
+                p {{_ 'board'}}: {{boardLabel}}
+                p.quiet {{_ 'interrupted-import-source' source=source}}
+                p.quiet {{startedAtText}}
+              td
+                p {{_ stateKey stage=stage error=errorCode}}
+                if scrum
+                  p.quiet {{_ 'interrupted-import-scrum' state=scrum.state next=scrum.next total=scrum.total}}
+              td
+                if boardExists
+                  p {{_ 'interrupted-import-counts' swimlanes=counts.swimlanes lists=counts.lists cards=counts.cards checklists=counts.checklists comments=counts.comments attachments=counts.attachments}}
+                else
+                  p {{_ 'interrupted-import-no-board'}}
+              td
+                button.js-interrupted-import-keep(type="button" disabled=keepDisabled) {{_ 'interrupted-import-keep'}}
+                button.js-interrupted-import-discard(type="button" disabled=discardDisabled) {{_ 'interrupted-import-discard'}}
+      if truncated
+        p.quiet {{_ 'interrupted-import-truncated'}}
+    else
+      p.quiet {{_ 'interrupted-import-empty'}}
+    button.js-interrupted-import-refresh(type="button" disabled=busy) {{_ 'interrupted-import-refresh'}}

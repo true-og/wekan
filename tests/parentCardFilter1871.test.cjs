@@ -1,0 +1,38 @@
+'use strict';
+const assert = require('node:assert/strict');
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
+const { register } = require('node:module');
+register(pathToFileURL(path.join(__dirname, 'helpers/meteorStubLoader.mjs')).href, pathToFileURL(__filename).href);
+(async () => {
+  const { Filter } = await import(pathToFileURL(path.join(__dirname, '../client/lib/filter.js')).href);
+  Filter.reset();
+  assert.equal(Filter.isActive(), false);
+  Filter.parentId.add('projectA');
+  assert.equal(Filter.isActive(), true);
+  assert.equal(Filter.parentId.isSelected('projectA'), true);
+  Filter.parentId.add('projectA');
+  assert.deepEqual(Filter.parentId.list(), ['projectA']);
+  // #3626: "subtasks of" matches the primary parent or any other parent.
+  const parentClause = selector => selector.$or.find(c => Array.isArray(c.$and));
+  let clause = parentClause(Filter._getMongoSelector());
+  assert.deepEqual(clause.$and[0], { $or: [{ parentId: { $in: ['projectA'] } }, { parentIds: { $in: ['projectA'] } }] });
+  assert.equal(clause.$and[0].$or[0].parentId.$in.includes('projectB'), false);
+  assert.equal(clause.$and[0].$or[0].parentId.$in.includes(undefined), false);
+  Filter.labelIds.add('urgent');
+  clause = parentClause(Filter._getMongoSelector());
+  assert.deepEqual(clause.labelIds, { $in: ['urgent'] }, 'normal filters intersect with parent choice');
+  Filter.parentId.add('projectB');
+  assert.deepEqual(Filter.parentId.list(), ['projectA', 'projectB']);
+  Filter.parentId.toggle('projectA');
+  assert.deepEqual(Filter.parentId.list(), ['projectB']);
+  Filter.members.add('memberA');
+  Filter.resetBoardScoped();
+  assert.deepEqual(Filter.parentId.list(), [], 'parent IDs do not follow the user onto another board');
+  assert.deepEqual(Filter.members.list(), ['memberA'], 'global member filters retain existing behavior');
+  Filter.parentId.add('projectC');
+  Filter.reset();
+  assert.equal(Filter.isActive(), false);
+  assert.deepEqual(Filter.parentId.list(), []);
+  console.log('#1871 parent filter: selection, exclusion, combination, reset and board navigation pass');
+})().catch(error => { console.error(error); process.exitCode = 1; });

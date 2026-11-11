@@ -1,0 +1,135 @@
+'use strict';
+
+// Guards for the WeKan text-data backup safety measure (#6492).
+//
+// Before FerretDB opens its SQLite files, every FerretDB launch path keeps a rotating
+// backup of the TEXT-DATA database (wekan.sqlite*) in a "backup" subfolder of the same
+// data dir, so a known copy is ready to restore if the live database is ever detected
+// corrupt. Attachments and avatars live on the filesystem and are not copied.
+//
+// The CRITICAL safety property enforced here: the backup must only ever COPY from the
+// live database — it must NEVER move or delete the live wekan.sqlite, and must never
+// wipe the whole data dir. A backup that could destroy the data it protects is worse
+// than none.
+//
+// Run: node tests/ferretdbTextDataBackup.test.cjs
+
+const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
+
+let passed = 0;
+function test(name, fn) { fn(); passed += 1; console.log('  ok -', name); }
+const read = rel => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+
+console.log('ferretdbTextDataBackup:');
+
+const SCRIPTS = [
+  'snap-src/bin/ferretdb-control',
+  'releases/ferretdb/start-wekan.sh',
+  'releases/ferretdb/wekan-entrypoint.sh',
+];
+
+// The live MAIN database file (the top-level one, not a backup subfolder copy, and not
+// the -wal/-shm side files). A restore legitimately drops the stale -wal/-shm and
+// overwrites the main file by COPY; what must never happen is rm/mv of the main
+// wekan.sqlite itself — the "(?!-)" excludes the -wal/-shm side files.
+const LIVE_RE = /\$\{?(SQLITE_DIR|FERRETDB_SQLITE_DIR)\}?\/wekan\.sqlite(?!-)/;
+
+for (const rel of SCRIPTS) {
+  const src = read(rel);
+  const lines = src.split('\n');
+
+  test(`${rel}: copies the live text-data db into a backup dir`, () => {
+    // A cp of the live wekan.sqlite* into the backup subfolder ($_bk).
+    assert.ok(
+      /cp -f [^\n]*wekan\.sqlite\*[^\n]*_bk/.test(src),
+      'must cp the live wekan.sqlite* into the backup dir',
+    );
+    // Backups live in a "backup" subfolder of the data dir.
+    assert.ok(/backup/.test(src) && /_bk=/.test(src), 'must use a backup subfolder');
+  });
+
+  test(`${rel}: keeps a previous backup generation`, () => {
+    assert.ok(/\/prev/.test(src), 'must keep a previous backup generation under backup/prev');
+  });
+
+  test(`${rel}: backup is guarded (WEKAN_SQLITE_BACKUP default on, file must exist)`, () => {
+    assert.ok(/WEKAN_SQLITE_BACKUP:-true/.test(src), 'backup must default on and be overridable');
+    assert.ok(
+      /\[ -f "\$\{?(SQLITE_DIR|FERRETDB_SQLITE_DIR)\}?\/wekan\.sqlite" \]/.test(src),
+      'backup must only run when the live database exists',
+    );
+  });
+
+  test(`${rel}: NEGATIVE — the live text data is never moved or deleted`, () => {
+    for (const line of lines) {
+      const t = line.trim();
+      if (t.startsWith('#')) continue; // ignore comments
+
+      // No rm/mv may target the LIVE wekan.sqlite (top-level data dir). Deleting or
+      // moving the live database is exactly what a backup must never do.
+      if (/\b(rm|mv)\b/.test(t)) {
+        assert.ok(
+          !LIVE_RE.test(t),
+          `rm/mv must never target the live wekan.sqlite: ${t}`,
+        );
+        // And never wipe the whole data dir.
+        assert.ok(
+          !/rm\s+-[a-z]*r[a-z]*\s+["']?\$?\{?(SQLITE_DIR|FERRETDB_SQLITE_DIR)\}?["']?\s*$/.test(t),
+          `rm must not remove the whole data dir: ${t}`,
+        );
+      }
+    }
+  });
+
+  test(`${rel}: restore copies a backup INTO the live db, request-gated, no backup deleted`, () => {
+    // Restore copies from the chosen backup source into the live data dir.
+    assert.ok(
+      /cp -f "\$\{?_rsrc\}?"\/wekan\.sqlite\* "\$\{?(SQLITE_DIR|FERRETDB_SQLITE_DIR)\}?\/"/.test(src),
+      'restore must copy the backup INTO the live database dir',
+    );
+    // A restore is only ever REQUESTED (env or marker), never automatic guesswork.
+    assert.ok(
+      /WEKAN_FORCE_RESTORE/.test(src) && /RESTORE_REQUESTED/.test(src),
+      'restore must be request-gated (WEKAN_FORCE_RESTORE / RESTORE_REQUESTED)',
+    );
+    // NEGATIVE: no rm/mv may target a backup copy's wekan.sqlite — the backups that
+    // recovery depends on must never be destroyed.
+    for (const line of lines) {
+      const t = line.trim();
+      if (t.startsWith('#')) continue;
+      if (/\b(rm|mv)\b/.test(t) && /(_rbk|_bk|_rsrc)/.test(t)) {
+        assert.ok(!/wekan\.sqlite/.test(t), `rm/mv must never target a backup copy: ${t}`);
+      }
+    }
+  });
+
+  test(`${rel}: failed backup and restore attempts are reported and retried`, () => {
+    assert.match(src, /"type":"backup-failed"/,
+      'a failed backup must appear in Admin Panel -> Problems -> Recovery');
+    assert.match(src, /"type":"restore-failed"/,
+      'a failed restore copy must appear in Admin Panel -> Problems -> Recovery');
+    assert.match(src, /"type":"manual-required"/,
+      'a missing or invalid restore source must require visible manual action');
+    assert.match(src, /if cp -f "\$\{?_rsrc\}?"\/wekan\.sqlite\*/,
+      'restore success must depend on the copy exit status');
+    assert.doesNotMatch(src,
+      /cp -f "\$\{?_rsrc\}?"\/wekan\.sqlite\*[^\n]*\|\| true\n[^\n]*"type":"restore-/,
+      'a failed copy must never be reported as a successful restore');
+    const failed = src.indexOf('"type":"restore-failed"');
+    const retained = src.indexOf('request retained for retry', failed);
+    assert.ok(failed >= 0 && retained >= 0,
+      'a failed restore must retain an actionable request for the next restart');
+  });
+
+  test(`${rel}: NEGATIVE — attachments/avatars are not copied into the backup`, () => {
+    // Only wekan.sqlite* is backed up here; attachments/avatars stay on the filesystem.
+    assert.ok(
+      !/cp[^\n]*(attachments|avatars)[^\n]*backup/.test(src),
+      'the text-data backup must not copy attachments/avatars',
+    );
+  });
+}
+
+console.log(`\n${passed} tests passed`);

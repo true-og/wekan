@@ -1,27 +1,50 @@
-import { AccountsLockout } from 'meteor/wekan-accounts-lockout';
+// Not imported statically: the Sandstorm .spk is built without
+// wekan-accounts-lockout, like the password login it locks out
+// (releases/sandstorm-slim.mjs,
+// docs/Platforms/FOSS/Container/Sandstorm/Smaller-wekan-spk.md).
+const AccountsLockout = Package['wekan-accounts-lockout']
+  ? require('meteor/wekan-accounts-lockout').AccountsLockout
+  : null;
 import LockoutSettings from '/models/lockoutSettings';
 
+// The lockout reporter (and why it names the TARGET): server/lib/lockoutReporter.js.
+import { reportLockout } from '/server/lib/lockoutReporter';
+
+// A setting that cannot be read falls back to its default instead of
+// abandoning the whole lockout: the old catch around everything left the
+// server with NO login lockout at all whenever one read failed at startup.
+async function lockoutSetting(id, fallback) {
+  try {
+    return (await LockoutSettings.findOneAsync(id))?.value || fallback;
+  } catch (error) {
+    console.error(`Lockout setting ${id} unreadable, using ${fallback}:`, error);
+    return fallback;
+  }
+}
+
 Meteor.startup(async () => {
+  if (!AccountsLockout) return;
   // Wait for the database to be ready
   Meteor.setTimeout(async () => {
+    // Get configurations from database
+    const knownUsersConfig = {
+      failuresBeforeLockout: await lockoutSetting('known-failuresBeforeLockout', 3),
+      lockoutPeriod: await lockoutSetting('known-lockoutPeriod', 60),
+      failureWindow: await lockoutSetting('known-failureWindow', 15),
+    };
+
+    const unknownUsersConfig = {
+      failuresBeforeLockout: await lockoutSetting('unknown-failuresBeforeLockout', 3),
+      lockoutPeriod: await lockoutSetting('unknown-lockoutPeriod', 60),
+      failureWindow: await lockoutSetting('unknown-failureWindow', 15),
+    };
+
     try {
-      // Get configurations from database
-      const knownUsersConfig = {
-        failuresBeforeLockout: (await LockoutSettings.findOneAsync('known-failuresBeforeLockout'))?.value || 3,
-        lockoutPeriod: (await LockoutSettings.findOneAsync('known-lockoutPeriod'))?.value || 60,
-        failureWindow: (await LockoutSettings.findOneAsync('known-failureWindow'))?.value || 15
-      };
-
-      const unknownUsersConfig = {
-        failuresBeforeLockout: (await LockoutSettings.findOneAsync('unknown-failuresBeforeLockout'))?.value || 3,
-        lockoutPeriod: (await LockoutSettings.findOneAsync('unknown-lockoutPeriod'))?.value || 60,
-        failureWindow: (await LockoutSettings.findOneAsync('unknown-failureWindow'))?.value || 15
-      };
-
       // Initialize the AccountsLockout with configuration
       const accountsLockout = new AccountsLockout({
         knownUsers: knownUsersConfig,
         unknownUsers: unknownUsersConfig,
+        onLockout: reportLockout,
       });
 
       // Start the accounts lockout mechanism

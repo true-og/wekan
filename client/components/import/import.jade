@@ -1,38 +1,153 @@
-template(name="importHeaderBar")
-  h1
-    a.back-btn(href="{{pathFor 'home'}}")
-      i.fa-arrow-left
-    | {{_ title}}
-
 template(name="import")
-  .wrapper
+  .wrapper.import-page(class="{{#if importReport}}has-import-report{{/if}}")
     if error.get
       .warning {{_ error.get}}
+    //- An import that completed with warnings says what it could not bring
+      over before opening the board (server/methods/importReport.js).
+    if importReport
+      .import-report.js-import-report
+        h2 {{_ 'import-report-heading'}}
+        p {{_ 'import-report-description'}}
+        ul
+          each importReport.rows
+            li.import-report-row {{detail}}
+        button.primary.js-open-imported-board(type="button") {{_ 'import-report-open-board'}}
     if zipImporting
       .warning {{_ 'import-trello-zip-progress'}}
-    +Template.dynamic(template=currentTemplate)
+    if manyProgress
+      .warning.js-import-many-progress {{manyProgress}}
+    //- What "Import many boards" did, file by file.
+    if manyResults
+      .import-report.js-import-many-results
+        h2 {{_ 'import-many-results-heading'}}
+        ul
+          each manyResults
+            li.import-report-row(class="{{#if ok}}is-imported{{else}}is-failed{{/if}}") {{name}}: {{#if ok}}{{_ 'import-many-imported'}}{{else}}{{error}}{{/if}}
+        button.primary.js-import-many-all-boards(type="button") {{_ 'all-boards'}}
+    //- #1173: ONE import page. Every source used to be its own address reached
+      from its own link in the board sidebar, and the page never said which
+      others existed - so "where do I import a Jira export" was answered by a
+      menu somewhere else. The source is picked HERE, the parts are picked with
+      the same checkboxes every export uses, and the boards inside a file that
+      holds several are picked below that.
+    //- The two questions side by side when the page is wide enough: which
+      source, and what to take from it. They are asked in that order and
+      answered in either, so reading them as two columns beats scrolling past
+      fourteen sources to reach the parts. client/components/import/import.css
+    .import-columns
+      .import-sources
+        h2 {{_ 'import-source-heading'}}
+        ul.import-source-list
+          each importSources
+            li
+              //- The same green tick every checkbox in the app uses
+                (`.materialCheckBox`, forms.css) - the one Admin Panel /
+                Announcement has. Nothing is chosen to begin with, and choosing
+                one un-chooses the last: an import reads ONE file in one format,
+                so this is a radio wearing the app's own checkbox.
+              a.flex.js-select-import-source(data-source="{{key}}" href="#")
+                .materialCheckBox(class="{{#if selected}}is-checked{{/if}}")
+                span {{name}}
+      if hasImportSource
+        .import-parts
+          h2 {{_ 'export-select-what-to-include'}}
+          p.quiet {{_ 'import-parts-instruction'}}
+          ul.import-part-list
+            each importParts
+              li
+                a.flex.js-import-part-toggle(data-field="{{field}}" href="#")
+                  .materialCheckBox(class="{{#if checked}}is-checked{{/if}}")
+                  span {{_ label}}
+    if hasImportSource
+      hr
+      +Template.dynamic(template=currentTemplate)
 
 template(name="importTextarea")
   form
-    p: label(for='import-textarea') {{_ instruction}} {{_ 'import-board-instruction-about-errors'}}
-    textarea.js-import-json(id='import-textarea' placeholder="{{_ importPlaceHolder}}" autofocus)
-      | {{jsonText}}
-    if isTrelloImport
+    p: label(for='import-textarea') {{instruction}} {{_ 'import-board-instruction-about-errors'}}
+    //- One file chooser and one text box for every source
+      (models/lib/importSources.js): the chooser accepts that source's
+      files, and the text box shows where its export can be pasted.
+    if importAccept
       p.import-file-row
-        label(for='import-json-file') {{_ 'import-trello-json-file'}}
-        span.quiet.import-file-hint {{_ 'import-trello-json-file-hint'}}
-        input.js-import-json-file(id='import-json-file' type="file" accept=".json,application/json")
+        label(for='import-file') {{_ 'import-file-label'}}
+        if isTrelloImport
+          span.quiet.import-file-hint {{_ 'import-trello-json-file-hint'}}
+        input.js-import-file(id='import-file' type="file" accept="{{importAccept}}")
+    //- Fetch it from the service's API with the member's credentials
+      (models/lib/apiImportServices.js, server/apiImport.js): the fetched
+      JSON fills the text box, and the import goes on from there.
+    if apiImport
+      +apiImportFetch(service=apiImport)
+    if importPaste
+      textarea.js-import-json(id='import-textarea' placeholder="{{_ importPlaceHolder}}" autofocus)
+        | {{jsonText}}
+    if isJiraImport
+      label(for='jira-estimate-field') Jira: {{_ 'scrum-estimate'}} / {{_ 'custom-fields'}}
+      //- The export's numeric fields, offered as the user types (models/lib/jiraEstimateMapping.js).
+      input.js-jira-estimate-field(id='jira-estimate-field' type='text' placeholder='customfield_10016' maxlength='32' list='jira-estimate-fields')
+      datalist#jira-estimate-fields
+        each jiraEstimateCandidates
+          option(value=fieldId) {{name}}
+      label(for='jira-estimate-unit') {{_ 'scrum-estimate-unit'}}
+      input.js-jira-estimate-unit(id='jira-estimate-unit' type='text' maxlength='80')
+    //- The export names its files without carrying them; the service's
+      documented download needs its sign-in (models/lib/importAttachmentAuth.js).
+      Used for this import only, sent only to the address typed here.
+    if attachmentAuth
+      fieldset.import-attachment-auth
+        legend {{_ 'import-attachment-auth'}}
+        p.quiet {{_ 'import-attachment-auth-hint'}}
+        if attachmentAuth.url
+          label(for='import-attachment-url') {{_ 'import-attachment-auth-url'}}
+          input.js-import-attachment-url(id='import-attachment-url' type='url' autocomplete='off' maxlength='2048' placeholder='https://')
+        if attachmentAuth.username
+          label(for='import-attachment-username') {{_ 'username'}} / {{_ 'email'}}
+          input.js-import-attachment-username(id='import-attachment-username' type='text' autocomplete='off' maxlength='2048')
+        label(for='import-attachment-token') {{_ 'import-attachment-auth-token'}}
+        input.js-import-attachment-token(id='import-attachment-token' type='password' autocomplete='new-password' maxlength='2048')
+    if isTrelloImport
       p.import-file-row
         label(for='import-zip-file') {{_ 'import-trello-zip-file'}}
         span.quiet.import-file-hint {{_ 'import-trello-zip-file-hint'}}
         input.js-import-zip-file(id='import-zip-file' type="file" accept=".zip,application/zip")
       p.import-file-row
         label(for='import-workspace-name') {{_ 'import-trello-workspace'}}
-        input.js-import-workspace-name(id='import-workspace-name' type="text" placeholder="{{_ 'import-trello-workspace-placeholder'}}")
+        textarea.js-import-workspace-name(rows="2" id='import-workspace-name' placeholder="{{_ 'import-trello-workspace-placeholder'}}")
+    //- Who the file's people become, the same for every source
+      (models/lib/importMembersMode.js): existing users chosen in the next
+      step, placeholder users keeping their names, or the person importing.
+    .import-members-mode
+      p
+        strong {{_ 'import-members-mode-heading'}}
+      each membersModes
+        a.flex.js-import-members-mode(data-mode="{{mode}}" href="#")
+          .materialCheckBox(class="{{#if checked}}is-checked{{/if}}")
+          span {{_ label}}
+    //- "Import many boards" (models/lib/importManyFiles.js): several export
+      files of this source, or one .zip holding them, each its own board -
+      what the Trello .zip does, for every source. When files are chosen here,
+      the Import buttons import them instead of the field above.
+    p.import-file-row.import-many
+      label(for='import-many-files') {{_ 'import-many-boards'}}
+      span.quiet.import-file-hint {{_ 'import-many-boards-hint'}}
+      input.js-import-many-files(id='import-many-files' type="file" multiple)
+    if isGeneralizedImport
+      //- "One board per project" (models/lib/importSplit.js): each swimlane the
+        import would make becomes its own board.
+      p.import-file-row
+        a.flex.js-import-split-toggle(href="#")
+          .materialCheckBox(class="{{#if splitByProject}}is-checked{{/if}}")
+          span {{_ 'import-one-board-per-project'}}
+        span.quiet.import-file-hint {{_ 'import-one-board-per-project-hint'}}
     input.primary.wide(type="submit" value="{{_ 'import'}}")
+    button.primary.wide.js-import-without-mapping(type="button") {{_ 'import-without-mapping-members'}}
   if isTrelloImport
     hr
     +importTrelloApi
+  if isGithubImport
+    hr
+    +importGithubOrg
 
 template(name="importTrelloApi")
   .trello-api-import
@@ -47,6 +162,7 @@ template(name="importTrelloApi")
     p.trello-api-creds-buttons
       button.primary.js-trello-save-creds(type="button") {{_ 'save'}}
       button.negate.js-trello-delete-creds(type="button") {{_ 'delete'}}
+    +sandstormExternalApiGrant(service="trello")
     if credsSaved
       p.quiet.trello-creds-saved
         i.fa.fa-check
@@ -127,6 +243,62 @@ template(name="importTrelloApi")
                 span.quiet  {{_ 'copied'}}
             textarea.js-trello-errors-text(readonly rows="8" wrap="off")= jobErrorText
 
+//- A whole GitHub organization (or user): every repository as its own
+  board, opened in Board View / Version Control (server/githubOrgImport.js).
+template(name="importGithubOrg")
+  .github-org-import
+    h2 {{_ 'github-org-import'}}
+    p.quiet {{_ 'github-org-import-desc'}}
+    form.js-github-org-form
+      p.import-file-row
+        label(for='github-org-owner') {{_ 'github-org-import-owner'}}
+        input.js-github-org-owner(id='github-org-owner' type="text" autocomplete="off" placeholder="wekan" required)
+      p.import-file-row
+        label(for='github-org-token') {{_ 'github-org-import-token'}}
+        input.js-github-org-token(id='github-org-token' type="password" autocomplete="off")
+      p.quiet {{_ 'github-org-import-token-hint'}}
+      .github-org-parts
+        each orgParts
+          label.flex
+            input.js-github-org-part(type="checkbox" value="{{key}}" checked="{{#if checked}}checked{{/if}}" disabled="{{#if fixed}}disabled{{/if}}")
+            span  {{_ labelKey}}
+        label.flex
+          input.js-github-org-forks(type="checkbox")
+          span  {{_ 'github-org-import-forks'}}
+      if error.get
+        .warning {{_ error.get}}
+      unless jobIsRunning
+        button.primary.wide(type="submit") {{_ 'github-org-import-start'}}
+    if currentJob
+      hr
+      with currentJob
+        h3 {{_ 'github-org-import-progress'}} {{options.owner}}
+        p
+          b {{_ 'status'}}:
+          span  {{_ status}} ({{currentIndex}} / {{total}})
+        .trello-progress-bar
+          .trello-progress-fill(class="{{#if $eq status 'running'}}is-running{{/if}}" style="width: {{percent}}%")
+        if lastError
+          .warning {{lastError}}
+      p.trello-job-controls
+        if jobIsRunning
+          button.primary.js-github-org-cancel(type="button") {{_ 'trello-cancel'}}
+        if jobCanResume
+          button.primary.js-github-org-resume(type="button") {{_ 'trello-resume'}}
+        unless jobIsRunning
+          button.primary.js-github-org-clear(type="button") {{_ 'trello-clear-job'}}
+      .trello-import-results
+        each jobResults
+          p.trello-import-result(class="{{#if success}}is-ok{{else}}is-error{{/if}}")
+            if success
+              i.fa.fa-check
+              |  
+              a(href="{{boardUrl}}") {{repo}}
+              span.quiet  {{_ 'github-org-import-result' issues releases rules wikiPages}}
+            else
+              i.fa.fa-warning
+              span  {{repo}}: {{this.error}}
+
 template(name="importMapMembers")
   h2 {{_ 'import-map-members'}}
   if usersLoaded.get
@@ -145,7 +317,7 @@ template(name="importMapMembers")
               if wekanId
                 +userAvatar(userId=wekanId)
               else
-                a.member.add-member
+                a.member.add-member(title="{{_ 'add-members'}}")
                   i.fa.fa-plus
         //-
           Due to the way the flewbox layout is working, we need to set some
@@ -158,6 +330,7 @@ template(name="importMapMembers")
         .mapping-item.ghost-item
       form
         input.primary.wide(type="submit" value="{{_ 'done'}}")
+        button.primary.wide.js-import-skip-mapping(type="button") {{_ 'import-without-mapping-members'}}
   else
     +spinner
 
@@ -166,7 +339,7 @@ template(name="importMapMembersAddPopup")
     p
       | {{_ 'import-user-select'}}
     .js-map-member
-      input.js-search-member-input(type="text" placeholder="{{_ 'search-users'}}")
+      input.js-search-member-input(type="text" placeholder="{{_ 'search'}}")
     ul.pop-over-list
       each searchResults
         li.item.js-member-item
@@ -180,3 +353,26 @@ template(name="importMapMembersAddPopup")
       if noResults.get
         .manage-member-section
           p.quiet {{_ 'no-results'}}
+
+template(name="apiImportFetch")
+  .api-import-fetch
+    p.quiet {{_ 'api-import-desc'}}
+    each fields
+      p
+        label(for="api-import-{{name}}") {{_ label}}
+        if secret
+          input.js-api-import-field(id="api-import-{{name}}" data-name="{{name}}" type="password" autocomplete="off" required=required)
+        else
+          input.js-api-import-field(id="api-import-{{name}}" data-name="{{name}}" type="text" autocomplete="off" required=required)
+    p
+      button.js-api-import-list(type="button" disabled=busy) {{_ 'api-import-list'}}
+    if items.length
+      p
+        label(for="api-import-item") {{_ 'api-import-choose'}}
+        select.js-api-import-item(id="api-import-item")
+          each items
+            option(value=id) {{name}}
+      p
+        button.primary.js-api-import-fetch(type="button" disabled=busy) {{_ 'api-import-fetch'}}
+    if message
+      p.quiet.js-api-import-message= message

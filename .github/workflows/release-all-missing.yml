@@ -1,0 +1,568 @@
+name: Release all missing
+
+# Build only the bundles a release does not already carry.
+#
+# WHY: release-all.yml is one run that bumps versions, tags, builds every
+# platform, publishes Docker images, snaps, the website and the charts. It is
+# the right thing for MAKING a release and the wrong thing for FINISHING one.
+# When the v10.57 run ended with the six extra architectures missing - four of
+# them on a shell-quoting bug and two on a base image - there was no way to get
+# those six without running the whole thing again, version bump and all.
+#
+# This finishes a release that already exists. It never bumps a version, never
+# tags, and does not rebuild the main Docker images, snap or the website.
+# UCS and Nextcloud portal publishing runs separately through their manual workflows.
+# UCS migration tools are part of the main WeKan Docker image. recover retries
+# its failed Docker build/publish job, including the bundled-tools smoke check;
+# there is no separate migration image to build or registry package to publish.
+#
+# It DOES publish the Helm chart, because that is a thing a release can be
+# missing like any other: the chart entry is written once, during the release it
+# belongs to, so a release whose charts job did not run leaves a hole that the
+# next release never goes back for - v10.80 is one of those, and it was not
+# alone. See the charts job at the end.
+#
+# WHAT IT CAN BUILD, and why that is not everything. Only build-amd64 runs
+# Meteor; every other bundle WeKan ships is that same bundle repacked. This job
+# downloads the PUBLISHED wekan-<v>-amd64.zip and repacks it, so it can rebuild:
+#
+#   the six extra architectures  s390x ppc64le riscv64 i386 armhf loong64
+#   the AppImages, Mac apps and Flatpaks by calling their own workflows
+#
+# The recover job first retries failed jobs from the matching named full-release
+# run, including native builds, Docker, snap and website. Successful jobs are
+# preserved. The asset planner below then fills packaging gaps.
+#
+# The asset planner alone cannot rebuild amd64 itself (that is the Meteor build), nor arm64, win64
+# and mac-arm64 (each needs its own kind of runner and its own steps), nor the
+# Sandstorm .spk. When one of those is missing it says so and names
+# release-all.yml, rather than pretending.
+#
+# The repack is releases/repack-bundle-for-arch.sh - the SAME script
+# release-all.yml's build-extra-arches runs, so a bundle added to a release
+# months later is built exactly like the ones already on it.
+#
+# What a complete release looks like is releases/expected-assets.sh, in one
+# place. An asset counts as present only when its .sha256sum is there too; the
+# Sandstorm .spk is signed rather than checksummed and is marked nosums.
+#
+# Usage:
+#   gh workflow run release-all-missing.yml -f version=10.58
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release to complete, without the v (e.g. 10.58). Empty = the newest release.'
+        required: false
+        type: string
+
+# Read-only by default; the job that writes is granted it below.
+permissions:
+  contents: read
+
+env:
+  DO_NOT_TRACK: '1'
+  # Must match release-all.yml: the Node.js major the bundles carry.
+  NODE_VERSION: '26'
+
+# Never at the same time as a full release run, which would be uploading to the
+# same assets.
+concurrency:
+  group: wekan-release-${{ inputs.version || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    permissions:
+      contents: read
+      actions: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check dependency risk indicators before recovery
+        run: python3 releases/remote-release.py --audit
+      - name: Retry failed jobs of the matching full release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          V="$VERSION"
+          [ -n "$V" ] || V="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"
+          python3 releases/retry-failed-release.py "$V"
+
+  plan:
+    needs: recover
+    # The planner runs whatever recover's rerun ended with. A rerun that still
+    # fails - Launchpad answering 503, a fault that is in the tagged code and
+    # so in every rerun of it (v12.68's OpenBSD start) - used to skip the
+    # planner and every build after it, so not even the assets that COULD be
+    # filled were. recover stays red and names the jobs; the rest goes on.
+    if: ${{ !cancelled() }}
+    timeout-minutes: 15
+    name: what the release is missing
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      extra: ${{ steps.plan.outputs.extra }}
+      appimage: ${{ steps.plan.outputs.appimage }}
+      bun: ${{ steps.plan.outputs.bun }}
+      mac: ${{ steps.plan.outputs.mac }}
+      flatpak: ${{ steps.plan.outputs.flatpak }}
+      windows: ${{ steps.plan.outputs.windows }}
+      manual: ${{ steps.plan.outputs.manual }}
+      total: ${{ steps.plan.outputs.total }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check dependency risk indicators before release work
+        shell: bash
+        run: python3 releases/remote-release.py --audit
+
+      - name: Audit telemetry source before release work
+        shell: bash
+        run: python3 ./releases/check-telemetry.py --source .
+
+      - id: plan
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          V="${INPUT_VERSION}"
+          V="${V#v}"
+          if [ -z "$V" ]; then
+            V="$(gh release view --repo "${GITHUB_REPOSITORY:-wekan/wekan}" --json tagName --jq .tagName)"
+            V="${V#v}"
+            echo "No version given; the newest release is v$V."
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+          if gh release view --repo "${GITHUB_REPOSITORY:-wekan/wekan}" "v$V" >/dev/null 2>&1; then
+            gh release view --repo "${GITHUB_REPOSITORY:-wekan/wekan}" "v$V" --json assets --jq '.assets[].name' | sort > existing.txt
+          else
+            echo "::error::There is no release v$V to complete. This workflow FINISHES a release; release-all.yml makes one."
+            exit 1
+          fi
+          echo "v$V carries $(wc -l < existing.txt | tr -d ' ') asset(s)."
+
+          bash releases/expected-assets.sh "$V" > expected.txt
+
+          : > missing.txt
+          present=0
+          while read -r kind selector asset sums; do
+            need="$asset"
+            [ "$sums" = "sums" ] && need="$need ${asset}.sha256sum"
+            have=yes
+            for n in $need; do grep -qxF "$n" existing.txt || have=no; done
+            if [ "$have" = yes ]; then present=$((present + 1)); else echo "$kind $selector" >> missing.txt; fi
+          done < expected.txt
+
+          total="$(wc -l < missing.txt | tr -d ' ')"
+          echo "total=$total" >> "$GITHUB_OUTPUT"
+
+          for kind in extra appimage mac flatpak windows bun; do
+            sels="$(awk -v k="$kind" '$1 == k { print $2 }' missing.txt)"
+            json="$(printf '%s\n' $sels | sed '/^$/d' | jq -R . | jq -sc .)"
+            [ -n "$json" ] || json='[]'
+            echo "$kind=$json" >> "$GITHUB_OUTPUT"
+            echo "  $kind: $json"
+          done
+
+          # The ones this workflow cannot make. Named, not silently skipped.
+          manual="$(awk '$1 == "meteor" || $1 == "repack" || $1 == "sandstorm" { printf "%s/%s ", $1, $2 }' missing.txt)"
+          echo "manual=${manual% }" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### v$V"
+            echo ""
+            echo "$present of $((present + total)) assets already published."
+            echo ""
+            if [ "$total" -eq 0 ]; then
+              echo "Nothing is missing - the release is complete."
+            else
+              echo "Missing:"
+              echo ""
+              echo '```'
+              cat missing.txt
+              echo '```'
+              if [ -n "$manual" ]; then
+                echo ""
+                echo "Not buildable here (run release-all.yml): \`$manual\`"
+              fi
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Missing $total. Needs release-all.yml: ${manual:-none}"
+
+      - name: Say plainly what this run will not do
+        if: ${{ steps.plan.outputs.manual != '' }}
+        env:
+          STEP_PLAN_VERSION: ${{ steps.plan.outputs.version }}
+          STEP_PLAN_MANUAL: ${{ steps.plan.outputs.manual }}
+        run: |
+          echo "::error::v${STEP_PLAN_VERSION} still lacks ${STEP_PLAN_MANUAL} after recovery. Inspect the matching full-release run; older unnamed runs need their failed jobs retried manually."
+          exit 1
+
+  # The six architectures nobody else builds for, repacked from the PUBLISHED
+  # amd64 bundle - which is what makes this possible without a Meteor build.
+  extra-arches:
+    permissions:
+      contents: write
+    name: ${{ matrix.arch }}
+    needs: plan
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.extra != '[]' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The same table as release-all.yml's build-extra-arches, and it has
+          # to stay the same: `node_arch` is what the Node.js download is
+          # called (Node says x86 where we say i386, armv7l where we say
+          # armhf), `ferretdb_arch` is the asset name in the wekan/FerretDB
+          # release, and `image` must be a base image that PUBLISHES this
+          # platform - ubuntu:26.04 does not build 386, debian:trixie does.
+          - { arch: s390x,   platform: linux/s390x,   image: debian:trixie, node_arch: s390x,   ferretdb_arch: s390x }
+          - { arch: ppc64le, platform: linux/ppc64le, image: debian:trixie, node_arch: ppc64le, ferretdb_arch: ppc64le }
+          - { arch: riscv64, platform: linux/riscv64, image: debian:trixie, node_arch: riscv64, ferretdb_arch: riscv64 }
+          - { arch: i386,    platform: linux/386,     image: debian:trixie, node_arch: x86,     ferretdb_arch: i386 }
+          - { arch: armhf,   platform: linux/arm/v7,  image: debian:trixie, node_arch: armv7l,  ferretdb_arch: armhf }
+          # loong64 has NO base image on Docker Hub at any tag, so there is no
+          # loong64 userland to rebuild the native modules in. Its Node.js and
+          # its FerretDB both exist; the container does not. The preflight
+          # inside the script stops it saying exactly that, and it stays in the
+          # matrix so it is visible rather than quietly absent.
+          - { arch: loong64, platform: linux/loong64, image: debian:trixie, node_arch: loong64, ferretdb_arch: loong64 }
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - name: Skip the architectures this release already has
+        id: want
+        env:
+          NEEDS_PLAN_EXTRA: ${{ needs.plan.outputs.extra }}
+          MATRIX_ARCH: ${{ matrix.arch }}
+        run: |
+          if printf '%s' "${NEEDS_PLAN_EXTRA}" | jq -e --arg a "${MATRIX_ARCH}" 'index($a)' >/dev/null; then
+            echo "build=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=no" >> "$GITHUB_OUTPUT"
+            echo "v${VERSION} already has ${MATRIX_ARCH}; nothing to do."
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Audit telemetry source before release work
+        shell: bash
+        run: python3 ./releases/check-telemetry.py --source .
+
+      - name: Install dependencies
+        if: ${{ steps.want.outputs.build == 'yes' }}
+        run: |
+          bash "$GITHUB_WORKSPACE/releases/apt-install.sh" curl unzip zip
+
+      - name: Set up QEMU for ${{ matrix.arch }} emulation
+        if: ${{ steps.want.outputs.build == 'yes' }}
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+      # Before the download, because actions/checkout cleans the workspace.        if: ${{ steps.want.outputs.build == 'yes' }}
+
+      # THE DIFFERENCE from release-all.yml, and the whole point of this
+      # workflow: the amd64 bundle comes from the RELEASE, not from an artifact
+      # of a build that is not running. Its checksum is verified when the
+      # release has one - a bundle every other architecture is cut from is worth
+      # checking before it is cut.
+      - name: Download the published amd64 bundle
+        if: ${{ steps.want.outputs.build == 'yes' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          zip="wekan-${VERSION}-amd64.zip"
+          gh release download "v${VERSION}" --pattern "$zip" --clobber
+          if gh release download "v${VERSION}" --pattern "${zip}.sha256sum" --clobber 2>/dev/null; then
+            sha256sum -c "${zip}.sha256sum"
+            echo "amd64 bundle checksum verified."
+          else
+            echo "::warning::v${VERSION} publishes no ${zip}.sha256sum, so the bundle every other architecture is cut from could not be verified."
+          fi
+          unzip -q "$zip"
+          [ -d bundle ] || { echo "::error::$zip did not contain a bundle/ directory."; exit 1; }
+          rm -f "$zip" "${zip}.sha256sum"
+
+      - name: Repack it for ${{ matrix.arch }}
+        id: repack
+        if: ${{ steps.want.outputs.build == 'yes' }}
+        env:
+          ARCH: ${{ matrix.arch }}
+          NODE_ARCH: ${{ matrix.node_arch }}
+          FERRETDB_ARCH: ${{ matrix.ferretdb_arch }}
+          IMAGE: ${{ matrix.image }}
+          PLATFORM: ${{ matrix.platform }}
+        run: bash releases/repack-bundle-for-arch.sh
+
+      # Attached by THIS job, the moment the repack (which builds and checks
+      # the zip) has finished - the same rule as every build job in
+      # release-all.yml. always() + the repack step's outcome: a cancel that
+      # arrives after the zip was built still attaches it.
+      #
+      # It used to upload WITHOUT --clobber, reasoning that this architecture
+      # was absent so an overwrite meant the release changed under this run.
+      # The shared uploader retries, and a retry after a half-finished upload
+      # has to replace its own partial asset, so it always clobbers. The plan
+      # job has already established the asset is missing, and the concurrency
+      # group keeps a full release run from uploading the same names at once.
+      - name: Attach ${{ matrix.arch }} to the release
+        if: ${{ always() && steps.want.outputs.build == 'yes' && steps.repack.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MATRIX_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          asset="wekan-${VERSION}-${MATRIX_ARCH}.zip"
+          # Retried, bounded, and verified by name AND size from the release
+          # side - an upload that reports success and leaves no asset behind is
+          # the failure nobody notices until a download 404s.
+          bash releases/github-release-upload.sh "${GITHUB_REPOSITORY:-wekan/wekan}" "v${VERSION}" "$asset" "${asset}.sha256sum"
+
+  bun:
+    name: Missing Bun runtime bundles
+    needs: plan
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bun != '[]' }}
+    uses: ./.github/workflows/bun.yml
+    permissions:
+      contents: write
+      actions: read
+    with:
+      tag: v${{ needs.plan.outputs.version }}
+      publish: true
+      only: ${{ needs.plan.outputs.bun }}
+      missing_only: true
+
+  appimage:
+    name: AppImages
+    needs: plan
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.appimage != '[]' }}
+    uses: ./.github/workflows/AppImage.yml
+    permissions:
+      contents: write
+    with:
+      tag: v${{ needs.plan.outputs.version }}
+      publish: true
+      only: ${{ needs.plan.outputs.appimage }}
+
+  mac:
+    name: Mac apps
+    needs: plan
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.mac != '[]' }}
+    uses: ./.github/workflows/mac.yml
+    permissions:
+      contents: write
+    with:
+      tag: v${{ needs.plan.outputs.version }}
+      publish: true
+      only: ${{ needs.plan.outputs.mac }}
+
+  flatpak:
+    name: Flatpaks
+    needs: plan
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.flatpak != '[]' }}
+    uses: ./.github/workflows/Flatpak.yml
+    permissions:
+      contents: write
+    with:
+      tag: v${{ needs.plan.outputs.version }}
+      publish: true
+      only: ${{ needs.plan.outputs.flatpak }}
+
+  windows-exe:
+    name: Windows single EXE
+    needs: plan
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.windows != '[]' }}
+    uses: ./.github/workflows/windows.yml
+    permissions:
+      contents: write
+    with:
+      tag: v${{ needs.plan.outputs.version }}
+      publish: true
+
+  # A single file per platform, for every platform whose bundle the release
+  # has and whose single file it does not (docs/Platforms/Single-File.md).
+  # Not in expected-assets.sh: a platform without a bundle has no single file
+  # to miss. After extra-arches, which may have just published a bundle.
+  single-file:
+    name: Missing single-file WeKan
+    needs: [plan, extra-arches]
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    uses: ./.github/workflows/single-file.yml
+    permissions:
+      contents: write
+    with:
+      tag: v${{ needs.plan.outputs.version }}
+      publish: true
+      missing_only: true
+
+
+  # ─── The Helm chart, for a release that never got one ───────────────────────
+  #
+  # Everything else here rebuilds a missing BUNDLE; this publishes a missing
+  # CHART, which goes missing the same way and for the same reason. A chart is
+  # written once, by release-charts.sh, during the release it belongs to, so a
+  # release whose charts job did not run has no chart and nothing ever goes back
+  # for it. That is not rare - 146 of the packages already on gh-pages had no
+  # index entry, and v10.80 has no package at all, because a cancelled
+  # build-mac-x64 cancelled its run before the charts job started.
+  #
+  # It is the one part of this workflow that PUSHES to another repository, so it
+  # is guarded twice: it does nothing unless a token that can push to
+  # wekan/charts is configured, and nothing if the chart for this version is
+  # already published. Re-publishing an existing version would re-tar the package
+  # and change the digest of a chart people have already pulled.
+  charts:
+    timeout-minutes: 30
+    name: Helm chart
+    needs: plan
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.version != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout wekan (for releases/release-charts.sh)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: wekan
+
+      - name: Audit telemetry source before release work
+        shell: bash
+        run: python3 wekan/releases/check-telemetry.py --source wekan
+
+      - name: Is a chart already published for this version?
+        id: check
+        env:
+          V: ${{ needs.plan.outputs.version }}
+          REPO_TOKEN: ${{ secrets.WEKAN_REPO_TOKEN }}
+        run: |
+          set -uo pipefail
+          if [ -z "${REPO_TOKEN:-}" ]; then
+            echo "::warning::No WEKAN_REPO_TOKEN, so the Helm chart cannot be published. Add a token that can push to wekan/charts to have this finish the chart too."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The published index is the authority on what exists, not this
+          # checkout. An entry's own version is at EXACTLY four spaces; the
+          # mongodb subchart's version sits deeper and would match a loose grep.
+          bash wekan/releases/fetch.sh -o index.yaml https://wekan.github.io/charts/index.yaml || {
+            echo "::warning::Could not read the published chart index; not touching the charts repo."
+            echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0; }
+          # -F, a FIXED string: the dots in a version are regex wildcards
+          # otherwise, so "10.80" would also match a line reading 10x80. -x so it
+          # is the whole line, and the four-space indent is what makes it an
+          # entry's own version rather than the mongodb subchart's, which sits
+          # deeper.
+          if grep -qxF "    version: ${V}.0" index.yaml; then
+            echo "::notice::v$V already has a published Helm chart (${V}.0); nothing to do."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "v$V has no published chart; publishing ${V}.0."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+
+      - name: Checkout wekan/charts (main + gh-pages)
+        if: steps.check.outputs.skip != 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: wekan/charts
+          token: ${{ secrets.WEKAN_REPO_TOKEN }}
+          fetch-depth: 0
+          path: charts
+
+      - name: Install Helm
+        if: steps.check.outputs.skip != 'true'
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+      - name: Publish the chart for this release
+        if: steps.check.outputs.skip != 'true'
+        env:
+          CHARTS_DIR: ${{ github.workspace }}/charts
+          NEEDS_PLAN_VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd charts
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin '+refs/heads/*:refs/remotes/origin/*'
+          git branch --track gh-pages origin/gh-pages 2>/dev/null || true
+          git checkout main
+          cd ..
+          ./wekan/releases/release-charts.sh "${NEEDS_PLAN_VERSION}"
+
+      - name: Job result
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          case "${JOB_STATUS}" in
+            success)   mark='OK       ' ;;
+            failure)   mark='FAILED   ' ;;
+            cancelled) mark='CANCELLED' ;;
+            *)         mark="${JOB_STATUS}" ;;
+          esac
+          echo "$mark charts" >> "$GITHUB_STEP_SUMMARY"
+
+  # The end of the run attaches nothing: every job above attached its own files
+  # as it finished them. This only reports what the release still lacks, and it
+  # runs on always() - not !cancelled() - so a cancelled run still says what
+  # did and did not get attached. It needs plan to have succeeded, because the
+  # version comes from there.
+  done:
+    timeout-minutes: 15
+    name: what is still missing
+    needs: [plan, extra-arches, appimage, mac, flatpak, windows-exe, charts, bun]
+    if: ${{ always() && needs.plan.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Audit telemetry source before release work
+        shell: bash
+        run: python3 ./releases/check-telemetry.py --source .
+
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          V: ${{ needs.plan.outputs.version }}
+          BEFORE: ${{ needs.plan.outputs.total }}
+        run: |
+          set -euo pipefail
+          if [ "$BEFORE" = "0" ]; then
+            echo "::notice::v$V was already complete - nothing was built."
+            exit 0
+          fi
+          gh release view --repo "${GITHUB_REPOSITORY:-wekan/wekan}" "v$V" --json assets --jq '.assets[].name' | sort > now.txt
+          bash releases/expected-assets.sh "$V" > expected.txt
+          still=""
+          while read -r kind selector asset sums; do
+            need="$asset"
+            [ "$sums" = "sums" ] && need="$need ${asset}.sha256sum"
+            for n in $need; do
+              grep -qxF "$n" now.txt || { still="$still $kind/$selector"; break; }
+            done
+          done < expected.txt
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ -z "$still" ]; then
+            echo "v$V is complete."
+            echo "**v$V is complete.**" >> "$GITHUB_STEP_SUMMARY"
+          else
+            # A warning, not a failure: what is left may be the parts this
+            # workflow never claimed to build.
+            echo "::warning::v$V is still missing:${still}"
+            echo "Still missing:\`${still# }\`" >> "$GITHUB_STEP_SUMMARY"
+          fi

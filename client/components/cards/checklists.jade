@@ -1,8 +1,9 @@
 template(name="checklists")
+  //- The NAME of this section is drawn by +cardSectionHeader in cardDetails.jade,
+    with the caret that collapses it and the rule above it. What stays here is
+    the control that belongs to the list itself: add a checklist.
   .checklists-title
     h3.card-details-item-title
-      i.fa.fa-check
-      | {{_ 'checklists'}}
       if canModifyCard
         +inlinedForm(autoclose=false classNames="js-add-checklist" cardId = cardId
           position="top")
@@ -14,22 +15,38 @@ template(name="checklists")
       .material-toggle-switch(title="{{_ 'hide-finished-checklist'}}")
         //span.toggle-switch-title
         if card.hideFinishedChecklistIfItemsAreHidden
-          input.toggle-switch(type="checkbox" id="toggleHideFinishedChecklist" checked="checked")
+          input.toggle-switch.js-toggle-hide-finished-checklist(type="checkbox" aria-label="{{_ 'hide-finished-checklist'}}" id="{{visibilitySwitchId}}" checked="checked")
         else
-          input.toggle-switch(type="checkbox" id="toggleHideFinishedChecklist")
-        label.toggle-label(for="toggleHideFinishedChecklist")
+          input.toggle-switch.js-toggle-hide-finished-checklist(type="checkbox" aria-label="{{_ 'hide-finished-checklist'}}" id="{{visibilitySwitchId}}")
+        label.toggle-label(for="{{visibilitySwitchId}}")
 
   .card-checklist-items
     each checklist in checklists
       if checklist.showChecklist card.hideFinishedChecklistIfItemsAreHidden
         +checklistDetail(checklist = checklist card = card)
 
+  //- #6796: the controls under the list share one line: add at the bottom
+    (only once there is a checklist - before that it is the title line's "+"),
+    copy from a template, and the checklist from the description.
   if canModifyCard
-    +inlinedForm(autoclose=false classNames="js-add-checklist" cardId = cardId)
-      +addChecklistItemForm(checklist=checklist showNewlineBecomesNewChecklistItem=false)
-    else
-      a.add-checklist.js-open-inlined-form(title="{{_ 'add-checklist'}}")
-        i.fa.fa-plus
+    .checklists-bottom-actions
+      if hasChecklists
+        +inlinedForm(autoclose=false classNames="js-add-checklist" cardId = cardId)
+          +addChecklistItemForm(checklist=checklist showNewlineBecomesNewChecklistItem=false)
+        else
+          a.add-checklist.js-open-inlined-form(title="{{_ 'add-checklist'}}")
+            i.fa.fa-plus
+      //- #4017: append a template card's checklists (and their items,
+        unchecked) onto this already-existing card, alongside whatever
+        checklists it already has.
+      a.copy-checklist-from-template.js-copy-checklist-from-template(title="{{_ 'copyChecklistFromTemplate'}}")
+        i.fa.fa-clone
+      //- Checklist from description, Show on Card: only when the description
+        has a list (docs/Features/Cards/Checklist-From-Description.md).
+      if descriptionChecklistItemsOf card
+        a.checklist-from-description.js-checklist-from-description(title="{{_ 'checklist-from-description'}}")
+          i.fa.fa-list-ul
+          |  {{_ 'from-description'}}
 
 template(name="checklistDetail")
   .js-checklist.checklist.nodragscroll
@@ -38,13 +55,26 @@ template(name="checklistDetail")
     else
       .checklist-title
         span
+        //- #1591: fold a long checklist out of the way. A caret rather than
+          another entry in the actions menu, because the whole point is to do it
+          at a glance while reading the card - and it is a view preference of
+          this user, so it does not touch the card.
+        a.fa.checklist-collapse.js-collapse-checklist(
+          class="{{#if checklistCollapsed}}fa-caret-right{{else}}fa-caret-down{{/if}}"
+          title="{{#if checklistCollapsed}}{{_ 'expand-checklist'}}{{else}}{{_ 'collapse-checklist'}}{{/if}}"
+          role="button" tabindex="0"
+          aria-expanded="{{#if checklistCollapsed}}false{{else}}true{{/if}}")
+        unless $eq currentBoard.allowsChecklistDueDate false
+          unless checklist.getDue
+            if canModifyCard
+              +checklistDueDateAdd(checklist=checklist)
         if canModifyCard
           a.fa.fa-navicon.checklist-details-menu.js-open-checklist-details-menu(title="{{_ 'checklistActionsPopup-title'}}")
 
         if canModifyCard
           h4.title.js-open-inlined-form.is-editable
             if isTouchScreenOrShowDesktopDragHandles
-              span.fa.checklist-handle(class="fa-arrows" title="{{_ 'dragChecklist'}}")
+              span.fa.checklist-handle(class="fa-arrows" title="{{_ 'moveChecklist'}}")
             +viewer
               = checklist.title
         else
@@ -52,12 +82,15 @@ template(name="checklistDetail")
             +viewer
                 = checklist.title
 
-    if $gt finishedPercent 0
-      .checklist-progress-bar-container
-        .checklist-progress-text {{finishedPercent}}%
-        .checklist-progress-bar
-          .checklist-progress(style="width:{{finishedPercent}}%")
-    +checklistItems(checklist = checklist card = card)
+    unless $eq currentBoard.allowsChecklistDueDate false
+      if checklist.getDue
+        +checklistDueDate(checklist=checklist canModifyCard=canModifyCard)
+
+    //- The progress bar stays visible when folded: it is the summary of what was
+      folded away, so hiding it too would leave a title that says nothing.
+    +checklistProgress(checklist=checklist)
+    unless checklistCollapsed
+      +checklistItems(checklist = checklist card = card)
 
 template(name="checklistDeletePopup")
   p {{_ 'confirm-checklist-delete-popup'}}
@@ -76,12 +109,12 @@ template(name="addChecklistItemForm")
     a.fa.fa-times-thin.js-close-inlined-form(title="{{_ 'close-add-checklist-item'}}")
     if showNewlineBecomesNewChecklistItem
       .material-toggle-switch(title="{{_ 'newlineBecomesNewChecklistItem'}}")
-        input.toggle-switch(type="checkbox" id="toggleNewlineBecomesNewChecklistItem")
+        input.toggle-switch(type="checkbox" aria-label="{{_ 'newlineBecomesNewChecklistItem'}}" id="toggleNewlineBecomesNewChecklistItem")
         label.toggle-label(for="toggleNewlineBecomesNewChecklistItem")
         | {{_ 'newLineNewItem'}}
       if $eq position 'top'
         .material-toggle-switch(title="{{_ 'newlineBecomesNewChecklistItemOriginOrder'}}")
-          input.toggle-switch(type="checkbox" id="toggleNewlineBecomesNewChecklistItemOriginOrder")
+          input.toggle-switch(type="checkbox" aria-label="{{_ 'newlineBecomesNewChecklistItemOriginOrder'}}" id="toggleNewlineBecomesNewChecklistItemOriginOrder")
           label.toggle-label(for="toggleNewlineBecomesNewChecklistItemOriginOrder")
           | {{_ 'originOrder'}}
 
@@ -115,6 +148,9 @@ template(name="editChecklistItemForm")
       a.js-convert-checklist-item-to-card
         i.fa.fa-copy
         | {{_ 'convertChecklistItemToCardPopup-title'}}
+      a.js-convert-checklist-item-to-subtask
+        i.fa.fa-sitemap
+        | {{_ 'convertChecklistItemToSubtask-title'}}
 
 template(name="checklistItems")
   if checklist.items.length
@@ -124,7 +160,7 @@ template(name="checklistItems")
       else
         a.add-checklist-item.js-open-inlined-form(title="{{_ 'add-checklist-item'}}")
           i.fa.fa-plus
-  .checklist-items.js-checklist-items
+  +checklistSortableItems(checklist=checklist card=card)
     each item in checklist.items
       +inlinedForm(classNames="js-edit-checklist-item" item = item checklist = checklist)
         +editChecklistItemForm(type = 'item' item = item checklist = checklist)
@@ -138,23 +174,80 @@ template(name="checklistItems")
           i.fa.fa-plus
 
 template(name='checklistItemDetail')
-  .js-checklist-item.checklist-item(class="{{#if item.isFinished }}is-checked{{#if checklist.hideCheckedChecklistItems}} invisible{{/if}}{{/if}}{{#if checklist.hideAllChecklistItems}} is-checked invisible{{/if}}"
-    role="checkbox" aria-checked="{{#if item.isFinished }}true{{else}}false{{/if}}" tabindex="0")
-    if canModifyCard
+  .js-checklist-item.checklist-item(class="{{#if item.isFinished }}is-checked{{#if checklist.isItemHidden item.isFinished}} invisible{{/if}}{{/if}}{{#if checklist.hideAllChecklistItems}} is-checked invisible{{/if}}"
+    role="checkbox" aria-checked="{{#if item.isFinished }}true{{else}}false{{/if}}" aria-readonly="{{#if canCheckChecklistItem}}false{{else}}true{{/if}}" tabindex="{{#if canCheckChecklistItem}}0{{else}}-1{{/if}}")
+    +structuralSelectionCheckbox(kind="item" id=item._id label=item.title)
+    //- #3307: checking off an item is a lower bar than editing/deleting one - a
+      Worker may do the former but not the latter, so the checkbox itself is
+      gated on canCheckChecklistItem while everything else here still needs
+      canModifyCard.
+    if canCheckChecklistItem
       .check-box-container
         .check-box.materialCheckBox(class="{{#if item.isFinished }}is-checked{{/if}}")
+    else
+      .materialCheckBox(class="{{#if item.isFinished }}is-checked{{/if}}")
+    if canModifyCard
       if isTouchScreenOrShowDesktopDragHandles
-        span.fa.checklistitem-handle(class="fa-arrows" title="{{_ 'dragChecklistItem'}}")
+        span.fa.checklistitem-handle(class="fa-arrows" title="{{_ 'move-scope'}}")
       .item-title.js-open-inlined-form.is-editable(class="{{#if item.isFinished }}is-checked{{/if}}")
         +viewer
           = item.title
+      //- #2422: "linked subtask" indicator - shown when this item was
+        converted to a subtask and the link is still valid (linkedSubtask
+        helper returns undefined once the subtask no longer exists).
+      if linkedSubtask
+        a.checklist-item-linked-subtask.js-checklist-item-linked-subtask(title="{{_ 'checklistItem-linked-subtask'}}")
+          i.fa.fa-sitemap
+      if item.getDue
+        +checklistItemDueDate(item=item canModifyCard=canModifyCard)
+      else
+        a.checklist-item-due-date-add.js-checklist-item-due-date(title="{{_ 'card-due'}}")
+          i.fa.fa-clock-o
+      //- #1618: who is responsible for this item.
+      a.checklist-item-assignee.js-checklist-item-assignee(title="{{_ 'checklist-item-assignee'}}")
+        if item.assigneeId
+          +userAvatar(userId=item.assigneeId noRemove=true)
+        else
+          i.fa.fa-user-plus
     else
-      .materialCheckBox(class="{{#if item.isFinished }}is-checked{{/if}}")
       .item-title(class="{{#if item.isFinished }}is-checked{{/if}}")
         +viewer
           = item.title
+      if linkedSubtask
+        a.checklist-item-linked-subtask.js-checklist-item-linked-subtask(title="{{_ 'checklistItem-linked-subtask'}}")
+          i.fa.fa-sitemap
+      if item.getDue
+        +checklistItemDueDate(item=item canModifyCard=false)
+      if item.assigneeId
+        span.checklist-item-assignee
+          +userAvatar(userId=item.assigneeId noRemove=true)
+
+//- #1618: the board's active members; picking one makes them responsible
+  for the item, "Nobody" clears it.
+template(name="checklistItemAssigneePopup")
+  ul.pop-over-list
+    li
+      a.js-set-checklist-item-assignee(data-user-id="")
+        i.fa.fa-ban
+        |  {{_ 'checklist-item-assignee-none'}}
+    each assigneeChoices
+      li
+        a.js-set-checklist-item-assignee(data-user-id=_id class="{{#if isCurrentAssignee}}is-active{{/if}}")
+          +userAvatar(userId=_id noRemove=true)
+          |  {{displayName}}
 
 template(name="checklistActionsPopup")
+  //- #1173: a checklist exports like everything else - the same popup body, with
+    the checklist as its scope. Reading, so it is above the rows that change it.
+  ul.pop-over-list
+    li
+      a.js-export-checklist
+        i.fa.fa-exchange
+        | {{_ 'export'}} / {{_ 'import'}} ...
+      a.js-edit-checklist-items-as-text
+        i.fa.fa-align-left
+        | {{_ 'edit-checklist-items-as-text'}} ...
+  hr
   ul.pop-over-list
     li
       a.js-delete-checklist.delete-checklist
@@ -166,38 +259,69 @@ template(name="checklistActionsPopup")
       a.js-copy-checklist.copy-checklist
         i.fa.fa-copy
         | {{_ "copyChecklist"}} ...
+      a.js-set-checklist-reset-interval.checklist-reset-interval
+        i.fa.fa-refresh
+        | {{_ "checklist-reset-interval"}} ...
+      a.js-check-all-checklist-items.check-all-checklist-items
+        i.fa.fa-check-square-o
+        | {{_ "checkAllItems"}}
+      a.js-uncheck-all-checklist-items.uncheck-all-checklist-items
+        i.fa.fa-square-o
+        | {{_ "uncheckAllItems"}}
       a.js-hide-checked-checklist-items
         i.fa.fa-eye-slash
         | {{_ "hideCheckedChecklistItems"}} ...
         .material-toggle-switch(title="{{_ 'hide-checked-items'}}")
-          if checklist.hideCheckedChecklistItems
-            input.toggle-switch(type="checkbox" id="toggleHideCheckedChecklistItems_{{checklist._id}}" checked="checked")
+          if checklist.hideCheckedState
+            input.toggle-switch(type="checkbox" aria-label="{{_ 'hide-checked-items'}}" id="toggleHideCheckedChecklistItems_{{checklist._id}}" checked="checked")
           else
-            input.toggle-switch(type="checkbox" id="toggleHideCheckedChecklistItems_{{checklist._id}}")
+            input.toggle-switch(type="checkbox" aria-label="{{_ 'hide-checked-items'}}" id="toggleHideCheckedChecklistItems_{{checklist._id}}")
           label.toggle-label(for="toggleHideCheckedChecklistItems_{{checklist._id}}")
       a.js-hide-all-checklist-items
         i.fa.fa-ban
         | {{_ "hideAllChecklistItems"}} ...
         .material-toggle-switch(title="{{_ 'hideAllChecklistItems'}}")
           if checklist.hideAllChecklistItems
-            input.toggle-switch(type="checkbox" id="toggleHideAllChecklistItems_{{checklist._id}}" checked="checked")
+            input.toggle-switch(type="checkbox" aria-label="{{_ 'hideAllChecklistItems'}}" id="toggleHideAllChecklistItems_{{checklist._id}}" checked="checked")
           else
-            input.toggle-switch(type="checkbox" id="toggleHideAllChecklistItems_{{checklist._id}}")
+            input.toggle-switch(type="checkbox" aria-label="{{_ 'hideAllChecklistItems'}}" id="toggleHideAllChecklistItems_{{checklist._id}}")
           label.toggle-label(for="toggleHideAllChecklistItems_{{checklist._id}}")
       a.js-show-checklist-at-minicard
         i.fa.fa-th-list
         | {{_ "show-on-minicard"}} ...
         .material-toggle-switch(title="{{_ 'show-on-minicard'}}")
-          if checklist.showChecklistAtMinicard
-            input.toggle-switch(type="checkbox" id="toggleShowChecklistAtMinicard_{{checklist._id}}" checked="checked")
+          //- The switch shows what is ON THE MINICARD, not the raw field. Drawn
+            from the field it read OFF beside a checklist that was plainly showing,
+            because the board default (allowsChecklistsOnMinicard, on out of the
+            box) put it there - reported by email.
+          if shownAtMinicard
+            input.toggle-switch(type="checkbox" aria-label="{{_ 'show-on-minicard'}}" id="toggleShowChecklistAtMinicard_{{checklist._id}}" checked="checked")
           else
-            input.toggle-switch(type="checkbox" id="toggleShowChecklistAtMinicard_{{checklist._id}}")
+            input.toggle-switch(type="checkbox" aria-label="{{_ 'show-on-minicard'}}" id="toggleShowChecklistAtMinicard_{{checklist._id}}")
           label.toggle-label(for="toggleShowChecklistAtMinicard_{{checklist._id}}")
+
+//- #3818 / #4729: pick this checklist's automatic-reset interval (or 'none' to
+  turn it off). server/checklistResetSchedule.js unchecks all of the
+  checklist's items once the chosen interval comes due.
+template(name="checklistResetIntervalPopup")
+  ul.pop-over-list
+    each resetIntervals
+      li
+        a.js-set-reset-interval(data-interval="{{this}}" class="{{#if isCurrentInterval}}is-checked{{/if}}")
+          i.fa(class="{{#if isCurrentInterval}}fa-check-circle{{else}}fa-circle-o{{/if}}")
+          | {{_ (concat 'checklist-reset-interval-' this)}}
 
 template(name="copyChecklistPopup")
   +copyAndMoveChecklist
 
 template(name="moveChecklistPopup")
+  +copyAndMoveChecklist
+
+//- #4017: pick a source (e.g. template) card whose checklists - all of them,
+  with their items unchecked - are appended onto the current card's existing
+  checklists. Reuses the same board/swimlane/list/card picker as Move/Copy
+  Checklist above; only what "done" does differs (see checklists.js).
+template(name="copyChecklistFromTemplatePopup")
   +copyAndMoveChecklist
 
 template(name="copyAndMoveChecklist")
@@ -224,3 +348,46 @@ template(name="copyAndMoveChecklist")
 
   .edit-controls.clearfix
     button.primary.confirm.js-done {{_ 'done'}}
+
+//- Due date on a single checklist item (#4755). The badge and its edit popup
+  reuse the card's own date-badge markup (dateBadgeBody) and date-picker form
+  (editDateForm) - see client/components/cards/cardDate.jade - so a checklist
+  item's due date looks and behaves exactly like a card's.
+template(name="checklistItemDueDate")
+  +dateBadgeBody(canModifyCard=canModifyCard baseClass="card-date due-date checklist-item-due-date" showTitle=showTitle classes=classes showISODate=showISODate showDate=showDate showWeekOfYear=showWeekOfYear showWeek=showWeek)
+
+template(name="editChecklistItemDueDatePopup")
+  +editDateForm(showDate=showDate showTime=showTime error=error datePicker=datePicker)
+
+//- #4218: bulk-edit a checklist's items as one multi-line text block, one
+  item per line, `[x]`/`[ ]` marking checked/unchecked - so reordering,
+  copying between checklists/cards and bulk edits are paste/cut/type instead
+  of a click-drag or a click-edit-save per item.
+template(name="editChecklistItemsAsTextPopup")
+  form.js-edit-checklist-items-as-text-form
+    textarea.js-checklist-items-as-text(rows='10' autofocus)= checklistItemsAsText
+    .edit-controls.clearfix
+      button.primary.confirm(type="submit") {{_ 'save'}}
+      a.fa.fa-times-thin.js-cancel-checklist-items-as-text(title="{{_ 'close-edit-checklist-item'}}")
+
+template(name="checklistDueDate")
+  +dateBadgeBody(canModifyCard=canModifyCard baseClass="card-date due-date checklist-due-date" showTitle=showTitle classes=classes showISODate=showISODate showDate=showDate showWeekOfYear=showWeekOfYear showWeek=showWeek)
+
+template(name="checklistDueDateAdd")
+  button.js-checklist-due-date.checklist-due-date-add(type="button" title="{{_ 'card-due'}}" aria-label="{{_ 'card-due'}}")
+    i.fa.fa-clock-o
+
+template(name="editChecklistDueDatePopup")
+  +editDateForm(showDate=showDate showTime=showTime error=error datePicker=datePicker)
+
+//- Shared by opened cards and minicards; owns sortable lifecycle.
+template(name="checklistSortableItems")
+  .checklist-items.js-checklist-items.nodragscroll
+    +Template.contentBlock
+
+template(name="checklistProgress")
+  if $gt finishedPercent 0
+    .checklist-progress-bar-container
+      .checklist-progress-text {{finishedPercent}}%
+      .checklist-progress-bar(role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow=finishedPercent aria-label=checklist.title)
+        .checklist-progress(style="width:{{finishedPercent}}%")

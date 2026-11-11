@@ -1,7 +1,9 @@
+import { parseDueAt } from '/server/lib/checklistDeadlines';
 import { Meteor } from 'meteor/meteor';
 import { WebApp } from 'meteor/webapp';
 import { Authentication } from '/server/authentication';
 import { sendJsonResult } from '/server/apiMiddleware';
+import { assertListNotRefused } from '/server/lib/listPermissionGate';
 import { ReactiveCache } from '/imports/reactiveCache';
 import ChecklistItems, {
   itemCreation,
@@ -13,14 +15,18 @@ import ChecklistItems, {
 import Activities from '/models/activities';
 import { ensureIndex } from '/server/lib/mongoStartup';
 import { backfillBoardIdFromCard } from '/server/lib/denormalizeBoardId';
+const { deferSyncItemRecording, deferSyncChecklistRecording } = require('/server/lib/syncRecordingScope');
 
 // --- Denormalized boardId (see models/checklistItems.js schema) -------------
 // Set boardId from the card on insert, and re-sync it whenever the item is
 // moved to another card (its move helper sets a new cardId), so the board
 // publication can filter checklist items with a single reactive cursor on
 // boardId and still see items on newly added cards. Server-authoritative.
+// #6813: ALWAYS from the card, not only when missing - a client's own boardId
+// would otherwise stay, and a document on its own card could carry another
+// board's id (published to that board, and mistaken for being on it).
 ChecklistItems.before.insert(async (userId, doc) => {
-  if (!doc.boardId && doc.cardId) {
+  if (doc.cardId) {
     const card = await ReactiveCache.getCard(doc.cardId);
     if (card) {
       doc.boardId = card.boardId;
@@ -50,16 +56,22 @@ Meteor.startup(async () => {
   });
 });
 
+// A durable rule checklist action writes these from its saved plan
+// (server/lib/syncRuleChecklistCommand.js), never both.
 ChecklistItems.after.update(async (userId, doc, fieldNames) => {
+  if (deferSyncItemRecording('itemCheck', doc)) return;
   await publishCheckActivity(userId, doc);
   await publishChekListCompleted(userId, doc, fieldNames);
 });
 
 ChecklistItems.before.update(async (userId, doc, fieldNames) => {
+  if (deferSyncItemRecording('itemUncomplete', doc)) return;
   await publishChekListUncompleted(userId, doc, fieldNames);
 });
 
 ChecklistItems.after.insert(async (userId, doc) => {
+  // A durable rule addChecklistWithItems writes this activity from its plan.
+  if (deferSyncChecklistRecording('checklistItemActivity', doc)) return;
   await itemCreation(userId, doc);
 });
 
@@ -126,7 +138,7 @@ WebApp.handlers.post(
     const paramBoardId = req.params.boardId;
     const paramChecklistId = req.params.checklistId;
     const paramCardId = req.params.cardId;
-    await Authentication.checkBoardAccess(req.userId, paramBoardId);
+    await Authentication.checkBoardWriteAccess(req.userId, paramBoardId);
     const checklist = await ReactiveCache.getChecklist({
       _id: paramChecklistId,
       cardId: paramCardId,
@@ -134,12 +146,34 @@ WebApp.handlers.post(
     if (checklist) {
       const card = await ReactiveCache.getCard(paramCardId);
       if (card && card.boardId === paramBoardId) {
+        // ListLockBleed (GHSA-4734-8vrg-8j3w): the list's refusal holds over REST too (#4527).
+        await assertListNotRefused(req.userId, await ReactiveCache.getBoard(paramBoardId), card.listId, 'write', 'rest:checklist-item');
+        // Append, like the UI does. Every item created over REST used to be given
+        // `sort: 0`, so a checklist filled through the API came out in an order
+        // nobody chose - and every item after the first shared the first one's
+        // position. An explicit `sort` in the body still wins, for a caller that
+        // is rebuilding a checklist in a known order (#6544).
+        let sort = Number(req.body.sort);
+        if (!Number.isFinite(sort)) {
+          const last = await ReactiveCache.getChecklistItems(
+            { checklistId: paramChecklistId },
+            { sort: { sort: -1 }, limit: 1 },
+          );
+          sort = last && last.length && Number.isFinite(last[0].sort) ? last[0].sort + 1 : 0;
+        }
+
+        const deadline = parseDueAt(req.body);
+        if (deadline.error) {
+          sendJsonResult(res, { code: 400, data: { error: deadline.error } });
+          return;
+        }
         const id = await ChecklistItems.insertAsync({
           cardId: paramCardId,
           checklistId: paramChecklistId,
           title: req.body.title,
+          ...(deadline.dueAt ? { dueAt: deadline.dueAt } : {}),
           isFinished: false,
-          sort: 0,
+          sort,
         });
         sendJsonResult(res, {
           code: 200,
@@ -167,7 +201,7 @@ WebApp.handlers.put(
     const paramCardId = req.params.cardId;
     const paramChecklistId = req.params.checklistId;
     const paramItemId = req.params.itemId;
-    await Authentication.checkBoardAccess(req.userId, paramBoardId);
+    await Authentication.checkBoardWriteAccess(req.userId, paramBoardId);
 
     const checklistItem = await ReactiveCache.getChecklistItem(paramItemId);
     if (!checklistItem || checklistItem.cardId !== paramCardId || checklistItem.checklistId !== paramChecklistId) {
@@ -183,7 +217,18 @@ WebApp.handlers.put(
       });
       return;
     }
+    // ListLockBleed (GHSA-4734-8vrg-8j3w): the list's refusal holds over REST too (#4527).
+    await assertListNotRefused(req.userId, await ReactiveCache.getBoard(paramBoardId), card.listId, 'write', 'rest:checklist-item');
 
+    const deadline = parseDueAt(req.body);
+    if (deadline.error) {
+      sendJsonResult(res, { code: 400, data: { error: deadline.error } });
+      return;
+    }
+    if (Object.prototype.hasOwnProperty.call(deadline, 'dueAt')) {
+      await ChecklistItems.direct.updateAsync({ _id: paramItemId },
+        deadline.dueAt === null ? { $unset: { dueAt: '' } } : { $set: { dueAt: deadline.dueAt } });
+    }
     function isTrue(data) {
       try {
         return data.toLowerCase() === 'true';
@@ -221,7 +266,7 @@ WebApp.handlers.delete(
     const paramCardId = req.params.cardId;
     const paramChecklistId = req.params.checklistId;
     const paramItemId = req.params.itemId;
-    await Authentication.checkBoardAccess(req.userId, paramBoardId);
+    await Authentication.checkBoardWriteAccess(req.userId, paramBoardId);
 
     const checklistItem = await ReactiveCache.getChecklistItem(paramItemId);
     if (!checklistItem || checklistItem.cardId !== paramCardId || checklistItem.checklistId !== paramChecklistId) {
@@ -237,6 +282,8 @@ WebApp.handlers.delete(
       });
       return;
     }
+    // ListLockBleed (GHSA-4734-8vrg-8j3w): the list's refusal holds over REST too (#4527).
+    await assertListNotRefused(req.userId, await ReactiveCache.getBoard(paramBoardId), card.listId, 'write', 'rest:checklist-item');
 
     await ChecklistItems.direct.removeAsync({ _id: paramItemId });
     sendJsonResult(res, {

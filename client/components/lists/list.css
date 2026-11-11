@@ -4,16 +4,16 @@
   flex-direction: column;
   position: relative;
   background: #dedede;
-  border-left: 1px solid #ccc;
+  border-inline-start: 1px solid #ccc;
   padding: 0;
-  float: left;
+  float: inline-start;
 }
 
 /* List resize handle */
 .list-resize-handle {
   position: absolute;
   top: 0;
-  right: -3px;
+  inset-inline-end: -3px;
   width: 6px;
   height: 100%;
   cursor: col-resize;
@@ -84,16 +84,17 @@
   flex-basis: auto !important;
   flex-grow: 0 !important;
   flex-shrink: 0 !important;
-  /* Override any conflicting layout properties */
-  float: left !important;
-  display: block !important;
+  /* Override any conflicting layout properties.
+     Keep the flex column layout so the list-body stays height-bounded and
+     keeps its vertical scrollbar (display:block would collapse it). */
+  float: inline-start !important;
+  display: flex !important;
+  flex-direction: column !important;
   position: relative !important;
   /* Force width to be respected */
   width: var(--list-width, auto) !important;
   min-width: var(--list-width, auto) !important;
   max-width: var(--list-width, auto) !important;
-  /* Ensure the width is applied immediately */
-  overflow: visible !important;
 }
 
 body.list-resizing-active {
@@ -118,6 +119,7 @@ body.list-resizing-active * {
 }
 
 /* More aggressive override for any container that might interfere */
+.js-lists .list.list-resizing,
 .js-swimlane .list.list-resizing,
 .dragscroll .list.list-resizing,
 [id^="swimlane-"] .list.list-resizing {
@@ -129,14 +131,31 @@ body.list-resizing-active * {
   flex-basis: auto !important;
   flex-grow: 0 !important;
   flex-shrink: 0 !important;
-  float: left !important;
-  display: block !important;
+  float: inline-start !important;
+  display: flex !important;
+  flex-direction: column !important;
 }
 
-/* Ensure the width persists after resize is complete */
-.js-swimlane .list[style*="--list-width"],
-.dragscroll .list[style*="--list-width"],
-[id^="swimlane-"] .list[style*="--list-width"] {
+/* Ensure the width persists after resize is complete.
+   Exclude collapsed lists: a collapsed list keeps its inline --list-width custom
+   property, and without :not() this !important rule overrode the 30px collapsed
+   width, so collapsing a list that had a custom width left it full width.
+   See https://github.com/wekan/wekan/issues/5892 */
+/* #6573: `.js-lists` is the selector that has to be here, and `.dragscroll` is
+   the one that cannot be relied on. In LISTS view the container is
+   `.swimlane.list-group.js-lists.dragscroll` - no `js-swimlane` class and no
+   `swimlane-<id>` id - so `.dragscroll` was the only one of the three that
+   matched, and the width of every list hung on it. Starting a card drag calls
+   suspendBoardDragscroll(), which REMOVES the dragscroll class from the board so
+   the same pointer cannot pan and drag at once (#6558); this rule stopped
+   matching with it, every list fell back to the flex rules below, and the whole
+   board re-flowed to fill the window the instant a card was picked up - then
+   snapped back on drop, when the class returned. Both views' containers carry
+   `js-lists`, and nothing removes it. */
+.js-lists .list[style*="--list-width"]:not(.list-collapsed),
+.js-swimlane .list[style*="--list-width"]:not(.list-collapsed),
+.dragscroll .list[style*="--list-width"]:not(.list-collapsed),
+[id^="swimlane-"] .list[style*="--list-width"]:not(.list-collapsed) {
   /* Maintain the width after resize */
   width: var(--list-width, auto) !important;
   min-width: var(--list-width, auto) !important;
@@ -145,8 +164,26 @@ body.list-resizing-active * {
   flex-basis: auto !important;
   flex-grow: 0 !important;
   flex-shrink: 0 !important;
-  float: left !important;
-  display: block !important;
+  float: inline-start !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
+
+/* ...but NOT in mobile mode, where a list is always full width.
+   `.mobile-mode .list` (in boardHeader.css) already says width:100% !important, but
+   the rule above is !important too and more specific, so it won. On a phone that did
+   not show, because a phone gets `list-auto-width` and no inline --list-width at all;
+   in mobile mode on a desktop browser the inline width was there and the lists stayed
+   at their desktop width while everything else was in mobile layout. Same three
+   selectors, prefixed with body.mobile-mode so this one is the more specific. */
+body.mobile-mode .js-lists .list[style*="--list-width"]:not(.list-collapsed),
+body.mobile-mode .js-swimlane .list[style*="--list-width"]:not(.list-collapsed),
+body.mobile-mode .dragscroll .list[style*="--list-width"]:not(.list-collapsed),
+body.mobile-mode [id^="swimlane-"] .list[style*="--list-width"]:not(.list-collapsed) {
+  width: 100% !important;
+  min-width: 100% !important;
+  max-width: 100% !important;
+  float: none !important;
 }
 
 /* Ensure consistent header height for all lists */
@@ -154,10 +191,12 @@ body.list-resizing-active * {
   /* Maintain consistent height and padding for all lists */
   min-height: 30px !important;
   height: auto !important;
-  padding: 28px 1.5vw 6px !important;
-  /* Make sure the background covers the full height */
-  background-color: #e4e4e4 !important;
-  border-bottom: 8px solid #e4e4e4 !important;
+  padding: 28px 21px 6px !important;
+  /* Make sure the background covers the full height. Not !important: it beat
+     every theme's own list header (moderndark's #6a6a6a, exodark's #222), and
+     left their light text on this grey at 1.09:1 and 1.27:1 (#6863). */
+  background-color: #e4e4e4;
+  border-bottom: 8px solid #e4e4e4;
   /* Use original display for consistent button positioning */
   display: block !important;
   position: relative !important;
@@ -175,7 +214,7 @@ body.list-resizing-active * {
 /* Ensure title text doesn't cause height changes for all lists */
 .list-header .list-header-name {
   /* Allow text wrapping to flow below buttons */
-  white-space: normal !important;
+  white-space: pre-wrap !important;
   /* Ensure proper line height */
   line-height: 1.2 !important;
   /* Ensure it doesn't overflow horizontally */
@@ -189,7 +228,7 @@ body.list-resizing-active * {
 .list-header .js-open-list-menu {
   position: absolute !important;
   top: 5px !important;
-  right: 10px !important;
+  inset-inline-end: 10px !important;
   z-index: 15 !important;
   display: inline-block !important;
   padding: 4px !important;
@@ -198,7 +237,7 @@ body.list-resizing-active * {
 .list-header .list-header-plus-top {
   position: absolute !important;
   top: 5px !important;
-  right: 30px !important;
+  inset-inline-end: 30px !important;
   z-index: 15 !important;
   display: inline-block !important;
   padding: 4px !important;
@@ -207,12 +246,28 @@ body.list-resizing-active * {
 .list-header .list-header-handle-desktop {
   position: absolute !important;
   top: 5px !important;
-  right: 80px !important;
+  inset-inline-end: 80px !important;
   z-index: 15 !important;
   display: inline-block !important;
   cursor: move !important;
   pointer-events: auto !important;
   padding: 4px !important;
+}
+
+/* #3847: board-wide "sticky list headers" toggle (List hamburger menu ->
+   listActionPopup in listHeader.jade, models/boards.js's stickyListHeaders).
+   .list-header already sits BEFORE .list-body (its cards' own scrolling
+   container, overflow-y: scroll below) as a flex sibling rather than inside
+   it, so it does not scroll away with the cards in the ordinary bounded-
+   height board layout. `position: sticky` additionally pins it whenever the
+   ancestor that actually scrolls turns out to be `.list` itself instead -
+   e.g. a layout where `.list-body` is not the independently scrolling box -
+   so the header stays visible either way. Content/behaviour of the header
+   is unchanged; only whether it stays pinned during scroll. */
+.list.list-sticky-header .list-header {
+  position: sticky !important;
+  top: 0;
+  z-index: 20;
 }
 
 /* Anchor header action buttons within header during resize */
@@ -223,17 +278,17 @@ body.list-resizing-active * {
   position: absolute !important;
 }
 [id^="swimlane-"] .list:first-child {
-  min-width: 2.5vw;
+  min-width: 35px;
 }
 .list.list-auto-width {
   flex: 1;
 }
 .list:first-child {
-  border-left: none;
+  border-inline-start: none;
   flex: none;
 }
 .card-details + .list {
-  border-left: none;
+  border-inline-start: none;
 }
 .list.ui-sortable-helper {
   box-shadow: -2px 2px 8px rgba(0,0,0,0.3), 0 0 1px rgba(0,0,0,0.5);
@@ -243,19 +298,36 @@ body.list-resizing-active * {
 .list.ui-sortable-helper .list-header.ui-sortable-handle {
   cursor: grabbing;
 }
+/* #6763: where a dragged list will land must be as obvious as a card's drop
+   gap. The placeholder is a bare `.list` with no inline --list-width, so none
+   of the width rules above match it and it kept the flex default
+   `flex-shrink: 1` with no content to hold it open - in a swimlane already
+   wider than the window, flexbox shrank it to a few pixels and all that showed
+   was a thin shadow between two lists. It now never shrinks (the sortable's
+   start() also gives it the dragged list's width as min-width), and it is
+   drawn as a tinted, dashed drop area instead of a faint grey one. The outline
+   sits inside the box, so it neither changes the layout nor fights the mobile
+   rules that set this element's borders. */
 .list.placeholder {
-  background-color: rgba(0,0,0,0.2);
+  background-color: rgba(0,123,255,0.15);
   border-color: transparent;
   box-shadow: none;
-  height: 15vh;
+  outline: 3px dashed rgba(0,123,255,0.75);
+  outline-offset: -3px;
+  border-radius: 4px;
+  flex: none !important;
+  flex-shrink: 0 !important;
+  height: 135px;
 }
 .list.list-collapsed {
-  flex: none;
-  min-width: 30px;
-  max-width: 30px;
-  width: 30px;
-  min-height: 60vh;
-  height: 60vh;
+  flex: none !important;
+  /* !important so a custom per-list --list-width never keeps a collapsed list
+     full width (see https://github.com/wekan/wekan/issues/5892) */
+  min-width: 30px !important;
+  max-width: 30px !important;
+  width: 30px !important;
+  min-height: 540px;
+  height: 540px;
   overflow: visible;
   position: relative;
 }
@@ -307,11 +379,11 @@ body.list-resizing-active * {
   margin: 5px auto;
   z-index: 30;
   padding: 5px;
-  font-size: 16px;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1));
   white-space: nowrap;
   display: block;
   width: auto;
-  left: auto !important;
+  inset-inline-start: auto !important;
   top: auto !important;
 }
 .list.list-collapsed .list-header .list-header-handle {
@@ -322,7 +394,7 @@ body.list-resizing-active * {
   display: block;
   width: auto;
   top: auto !important;
-  right: auto !important;
+  inset-inline-end: auto !important;
   visibility: visible !important;
   opacity: 1 !important;
   pointer-events: auto !important;
@@ -336,8 +408,8 @@ body.list-resizing-active * {
   display: block;
   width: auto;
   top: auto !important;
-  right: auto !important;
-  left: auto !important;
+  inset-inline-end: auto !important;
+  inset-inline-start: auto !important;
   transform: none !important;
   visibility: visible !important;
   opacity: 1 !important;
@@ -362,18 +434,22 @@ body.list-resizing-active * {
 .list.list-collapsed .list-header .list-rotated h2.list-header-name {
   text-align: center;
   overflow: hidden;
-  white-space: normal;
+  white-space: pre-wrap;
   display: block !important;
-  font-size: 12px;
+  font-size: calc(12px * var(--wekan-ui-font-scale, 1));
   line-height: 1.2;
   color: #333;
   padding: 0;
   margin: 0;
   width: 100%;
+  /* Same min-width: 56px clash as the desktop rule below - the 30px
+     collapsed column is narrower than that, so this must be overridden
+     back to 0 for width: 100% to take effect (#6680 follow-up). */
+  min-width: 0;
   max-height: 100%;
   height: 100%;
   position: static;
-  left: auto;
+  inset-inline-start: auto;
   top: auto;
   writing-mode: vertical-rl;
   text-orientation: mixed;
@@ -396,7 +472,7 @@ form.inlined-form .list-composer {
 
 .list.list-composer .open-list-composer,
 .list .list-composer .open-list-composer {
-  color: #8c8c8c;
+  color: var(--wekan-quiet-text, #595959);
 }
 .list.list-composer .list-name-input,
 .list .list-composer .list-name-input {
@@ -405,13 +481,13 @@ form.inlined-form .list-composer {
 }
 .list-header-add {
   flex: 0 0 auto;
-  padding: 14px 1.5vw;
+  padding: 14px 21px;
   position: relative;
   min-height: 30px;
 }
 .list-header {
   flex: 0 0 auto;
-  padding: 28px 1.5vw 6px;
+  padding: 28px 21px 6px;
   position: relative;
   min-height: 30px;
   background-color: #e4e4e4;
@@ -429,12 +505,25 @@ form.inlined-form .list-composer {
 }
 .list-header .list-header-name {
   display: block;
-  font-size: clamp(14px, 3vw, 18px);
+  /* #6465: the type scale of a list, from the outside in. A list heading is to
+     its cards what an h2 is to its paragraphs, and it had ended up SMALLER than
+     them: the heading was 14px while a minicard title and the "Add card" link
+     both inherited the 16px document size, so the column looked like it was
+     labelled in fine print and the affordance to add a card shouted louder than
+     the cards. The scale is now heading 16 > card title 14 >= add-card link 13,
+     kept in that order by tests/listTypeScale.test.cjs. Mobile keeps its own
+     larger sizes (the !important rules further down) - a phone is read at arm's
+     length.
+     #6587: written in rem, not px. The three sizes are the same as before at the
+     default root size (1rem = 16px), but a px size cannot follow Member Settings
+     / Font size, which sets the root font size - so a board's type was the one
+     part of the UI that ignored the setting entirely. */
+  font-size: 1rem;
   line-height: 1.2;
   margin: 0;
   font-weight: bold;
-  min-height: 14px;
-  min-width: 4vw;
+  min-height: 16px;
+  min-width: 56px;
   overflow-wrap: break-word;
   word-wrap: break-word;
   vertical-align: top;
@@ -443,32 +532,32 @@ form.inlined-form .list-composer {
 /* Sum badge shown before list title */
 .list-header .list-sum-badge {
   display: inline-block;
-  margin-right: 8px;
+  margin-inline-end: 8px;
   padding: 0;
   border-radius: 0;
   background: transparent;
-  color: #8c8c8c;
+  color: var(--wekan-quiet-text, #595959);
   font-weight: bold;
-  font-size: 12px;
+  font-size: calc(12px * var(--wekan-ui-font-scale, 1));
   vertical-align: middle;
 }
 .list-rotated {
-  width: 1.3vw;
-  height: 35vh;
-  margin-top: -12vh;
-  margin-left: -14vw;
-  margin-right: 0;
+  width: 18px;
+  height: 315px;
+  margin-top: -108px;
+  margin-inline-start: -196px;
+  margin-inline-end: 0;
   transform: rotate(90deg);
   position: relative;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .list-header .list-header-watch-icon {
-  padding-left: 10px;
+  padding-inline-start: 10px;
   color: #a6a6a6;
 }
 .list-header .list-header-menu {
-  float: right;
+  float: inline-end;
 }
 @media print {
   .list-header .list-header-menu,
@@ -478,7 +567,7 @@ form.inlined-form .list-composer {
 }
 .list-header .list-header-plus-top {
   color: #a6a6a6;
-  margin-right: 15px;
+  margin-inline-end: 15px;
   vertical-align: middle;
   line-height: 1.2;
 }
@@ -487,13 +576,13 @@ form.inlined-form .list-composer {
 }
 .list-header .list-header-collapse-left {
   color: #a6a6a6;
-  margin-right: 15px;
+  margin-inline-end: 15px;
 }
 /* List header collapse button styling - positioned at top left */
 .list-header .js-collapse {
   position: absolute !important;
   top: 5px !important;
-  left: 10px !important;
+  inset-inline-start: 10px !important;
   color: #a6a6a6;
   display: inline-block;
   vertical-align: top;
@@ -502,7 +591,7 @@ form.inlined-form .list-composer {
   border-radius: 0;
   background-color: transparent;
   cursor: pointer;
-  font-size: 18px;
+  font-size: calc(18px * var(--wekan-ui-font-scale, 1));
   line-height: 1.2;
   min-width: 30px;
   text-align: center;
@@ -523,13 +612,20 @@ form.inlined-form .list-composer {
   clear: both;
 }
 
-/* Expanded desktop collapse button — static, participates in flex row 1. */
+/* Expanded desktop collapse button. #6675: floated to the START of the
+   header's top content line, the same line .list-header-menu (the
+   hamburger/+ icons, below) floats to the END of - so the caret lands at
+   the header's top corner, level with those icons (the left edge for LTR,
+   the right for RTL, from the logical float value with no extra rule),
+   instead of wherever plain static in-flow order put it (between the card
+   count and them, nowhere near either). */
 .list:not(.list-collapsed):not(.mobile-view) .list-header .js-collapse {
   position: static !important;
   top: auto !important;
-  left: auto !important;
-  right: auto !important;
+  inset-inline-start: auto !important;
+  inset-inline-end: auto !important;
   transform: none !important;
+  float: inline-start;
   margin: 0 !important;
   min-width: 24px;
   padding: 2px 4px !important;
@@ -552,8 +648,8 @@ form.inlined-form .list-composer {
     min-width: 30px;
     max-width: 30px;
     width: 30px;
-    min-height: 60vh;
-    height: 60vh;
+    min-height: 540px;
+    height: 540px;
   }
   .list.list-collapsed .list-header {
     width: 30px;
@@ -573,14 +669,18 @@ form.inlined-form .list-composer {
   }
   .list.list-collapsed .list-header .list-rotated h2.list-header-name {
     width: 100%;
-    font-size: 12px;
+    /* Same min-width: 56px clash as the other collapsed-title rules (#6680
+       follow-up) - override back to 0 so width: 100% of the 30px column
+       applies. */
+    min-width: 0;
+    font-size: calc(12px * var(--wekan-ui-font-scale, 1));
     height: 100%;
     line-height: 1.2;
     padding: 0;
     margin: 0;
     overflow: hidden;
     position: static;
-    left: auto;
+    inset-inline-start: auto;
     top: auto;
     writing-mode: vertical-rl;
     text-orientation: mixed;
@@ -599,127 +699,43 @@ form.inlined-form .list-composer {
   }
 }
 
-@media (min-width: 1024px) {
-  .list.list-collapsed {
-    min-width: 30px;
-    max-width: 30px;
-    width: 30px;
-    min-height: 60vh;
-    height: 60vh;
-  }
-  .list.list-collapsed .list-header {
-    width: 30px;
-    max-width: 30px;
-    min-height: 100% !important;
-    height: 100% !important;
-  }
-  .list.list-collapsed .list-header .list-rotated {
-    width: 100% !important;
-    height: auto !important;
-    margin: 10px 0 0 0 !important;
-    position: relative !important;
-    overflow: hidden !important;
-    transform: none;
-    flex: 1;
-  }
-  .list.list-collapsed .list-header .list-rotated h2.list-header-name {
-    width: 100%;
-    font-size: 12px;
-    height: 100%;
-    line-height: 1.2;
-    padding: 0;
-    margin: 0;
-    overflow: hidden;
-    position: static;
-    left: auto;
-    top: auto;
-    writing-mode: vertical-rl;
-    text-orientation: mixed;
-    transform: rotate(180deg);
-    text-align: center;
-    visibility: visible !important;
-    opacity: 1 !important;
-    display: block !important;
-    background-color: transparent;
-    border: none;
-    color: #333;
-    z-index: 10;
-  }
-  .list.list-collapsed .list-header .js-collapse {
-    margin: 5px auto;
-  }
-}
-
-@media (min-width: 1200px) {
-  .list.list-collapsed {
-    min-width: 30px;
-    max-width: 30px;
-    width: 30px;
-    min-height: 60vh;
-    height: 60vh;
-  }
-  .list.list-collapsed .list-header {
-    width: 30px;
-    max-width: 30px;
-    min-height: 100% !important;
-    height: 100% !important;
-  }
-  .list.list-collapsed .list-header .list-rotated {
-    width: 100% !important;
-    height: auto !important;
-    margin: 10px 0 0 0 !important;
-    position: relative !important;
-    overflow: hidden !important;
-    transform: none;
-    flex: 1;
-  }
-  .list.list-collapsed .list-header .list-rotated h2.list-header-name {
-    width: 100%;
-    font-size: 12px;
-    height: 100%;
-    line-height: 1.2;
-    padding: 0;
-    margin: 0;
-    overflow: hidden;
-    position: static;
-    left: auto;
-    top: auto;
-    writing-mode: vertical-rl;
-    text-orientation: mixed;
-    transform: rotate(180deg);
-    text-align: center;
-    visibility: visible !important;
-    opacity: 1 !important;
-    display: block !important;
-    background-color: transparent;
-    border: none;
-    color: #333;
-    z-index: 10;
-  }
-  .list.list-collapsed .list-header .js-collapse {
-    margin: 5px auto;
-  }
-}
 .list-header .list-header-collapse {
   color: #a6a6a6;
-  margin-right: 15px;
+  margin-inline-end: 15px;
 }
 .list-header .highlight {
   color: #ce1414;
 }
+/* #6465: the WIP counter belongs on the title line, and the header of a list
+   that has one must be as tall as its neighbours - the report showed "(2/5)"
+   dropped onto a second line under the title, making that one column's header
+   taller than the lists either side of it.
+   The counter is already inside the h2, right after the title (listHeader.jade),
+   but the title is a `+viewer`, and `.viewer` is display: block with a 22px
+   min-height: a block in the middle of a heading pushes everything after it onto
+   the next line and reserves a band under it. Inline, the counter stays where the
+   markup already puts it. Same treatment the quick-access header and the table
+   view give their viewers. */
+.list-header .list-header-name .viewer,
+.list-header .list-header-name .viewer p {
+  display: inline;
+  min-height: 0;
+  margin: 0;
+}
+
 .list-header .cardCount {
-  color: #8c8c8c;
-  font-size: 12px;
+  color: var(--wekan-quiet-text, #595959);
+  font-size: calc(12px * var(--wekan-ui-font-scale, 1));
   font-weight: bold;
 }
 .list-header .list-header-plus-top,
 .js-open-list-menu,
 .list-header-menu a {
   color: #4d4d4d;
-  padding-left: 4px;
+  padding-inline-start: 4px;
 }
 .js-open-list-menu {
-  font-size: 18px;
+  font-size: calc(18px * var(--wekan-ui-font-scale, 1));
   vertical-align: middle;
   line-height: 1.2;
 }
@@ -727,8 +743,27 @@ form.inlined-form .list-composer {
   flex: 1 1 auto;
   flex-direction: column;
   display: flex;
-  overflow-y: auto;
+  /* #5439: always show a scrollbar on the list body across desktop and mobile
+     browsers (overlay scrollbars on macOS/iOS/Android/Firefox otherwise auto-
+     hide it). Keep these declarations in sync with models/lib/scrollbarCss.js
+     (alwaysVisibleScrollbarCss), which is unit tested. */
+  overflow-y: scroll;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.35) rgba(0, 0, 0, 0.08);
+  scrollbar-gutter: stable;
   padding: 5px 11px;
+}
+.list-body::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+  -webkit-appearance: none;
+}
+.list-body::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.08);
+}
+.list-body::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.35);
+  border-radius: 5px;
 }
 .list-body .minicards {
   flex-grow: 1;
@@ -740,12 +775,20 @@ form.inlined-form .list-composer {
   margin-bottom: 9px;
 }
 .list-body .minicards .add-controls button {
-  min-height: 50px;
+  /* Was min-height: 50px - taller than a minicard is for its title, so the
+     "Add" button was the biggest thing on the board while typing. 34px is a
+     comfortable touch target that still reads as a control rather than a slab. */
+  min-height: 34px;
+  font-size: calc(14px * var(--wekan-ui-font-scale, 1));
 }
 .list-body .open-minicard-composer {
   border-radius: 2px;
-  color: #8c8c8c;
+  color: var(--wekan-quiet-text, #595959);
   display: block;
+  /* Smaller than a card title, because it is not a card: it is the affordance
+     for making one. At the inherited 16px it was the largest text in the list
+     body, level with the board's real content. */
+  font-size: 0.8125rem;
   padding: 7px 10px;
   position: relative;
   text-decoration: none;
@@ -757,7 +800,7 @@ form.inlined-form .list-composer {
   }
 }
 .list-body .open-minicard-composer i.fa {
-  margin-right: 7px;
+  margin-inline-end: 7px;
 }
 .list-body .open-minicard-composer:hover {
   background: #fafafa;
@@ -775,16 +818,16 @@ form.inlined-form .list-composer {
 }
 #js-wip-limit-edit .wip-limit-value {
   width: 20%;
-  margin-right: 5%;
+  margin-inline-end: 5%;
 }
 #js-wip-limit-edit .wip-limit-error {
   display: none;
 }
 #js-wip-limit-edit .soft-wip-limit {
-  margin-right: 8px;
+  margin-inline-end: 8px;
 }
 #js-wip-limit-edit div {
-  float: left;
+  float: inline-start;
 }
 #js-list-width-edit .list-width-error {
   display: none;
@@ -793,32 +836,32 @@ form.inlined-form .list-composer {
 .mini-list.mobile-view {
   flex: 0 0 60px;
   height: auto;
-  width: 100vw;
-  max-width: 100vw;
-  min-width: 100vw;
-  border-left: 0px !important;
+  width: 100%;
+  max-width: 100%;
+  min-width: 100%;
+  border-inline-start: 0px !important;
   border-bottom: 1px solid #ccc;
   display: block !important;
 }
 .list.mobile-view {
   display: block !important;
   flex-basis: auto;
-  width: 100vw;
-  max-width: 100vw;
-  min-width: 100vw;
-  border-left: 0px !important;
+  width: 100%;
+  max-width: 100%;
+  min-width: 100%;
+  border-inline-start: 0px !important;
   margin: 0 !important;
   padding: 0 !important;
 }
 .list.mobile-view:first-child {
-  margin-left: 0px;
+  margin-inline-start: 0px;
 }
 .list.mobile-view.ui-sortable-helper {
   flex: 0 0 60px;
   height: 60px;
-  width: 100vw;
-  max-width: 100vw;
-  border-left: 0px !important;
+  width: 100%;
+  max-width: 100%;
+  border-inline-start: 0px !important;
   border-bottom: 1px solid #ccc;
   display: block !important;
 }
@@ -828,17 +871,17 @@ form.inlined-form .list-composer {
 .list.mobile-view.placeholder {
   flex: 0 0 60px;
   height: 60px;
-  width: 100vw;
-  max-width: 100vw;
-  border-left: 0px !important;
+  width: 100%;
+  max-width: 100%;
+  border-inline-start: 0px !important;
   border-bottom: 1px solid #ccc;
   display: block !important;
 }
 .list.mobile-view .list-body {
   padding: 15px 19px;
-  width: 100vw;
-  max-width: 100vw;
-  min-width: 100vw;
+  width: 100%;
+  max-width: 100%;
+  min-width: 100%;
 }
 .list.mobile-view .list-header {
   /*Updated padding values for mobile devices, this should fix text grouping issue*/
@@ -847,9 +890,9 @@ form.inlined-form .list-composer {
   min-height: 30px;
   margin-top: 10px;
   align-items: center;
-  width: 100vw;
-  max-width: 100vw;
-  min-width: 100vw;
+  width: 100%;
+  max-width: 100%;
+  min-width: 100%;
   /* Force grid layout for iPhone */
   display: grid !important;
   grid-template-columns: 30px 1fr auto auto !important;
@@ -857,29 +900,29 @@ form.inlined-form .list-composer {
 }
 .list.mobile-view .list-header .list-header-left-icon {
   padding: 7px;
-  padding-right: 27px;
+  padding-inline-end: 27px;
   margin-top: 1px;
   top: -7px;
-  left: -7px;
+  inset-inline-start: -7px;
 }
 .list.mobile-view .list-header .list-header-menu-icon {
   padding: 14px;
-  font-size: 40px !important;
+  font-size: calc(40px * var(--wekan-ui-font-scale, 1)) !important;
   text-align: center;
   /* Force positioning for iPhone */
   position: absolute !important;
-  right: 60px !important;
+  inset-inline-end: 60px !important;
   top: 50% !important;
   transform: translateY(-50%) !important;
   z-index: 10;
 }
 .list.mobile-view .list-header .list-header-handle {
   padding: 14px;
-  font-size: 48px !important;
+  font-size: calc(48px * var(--wekan-ui-font-scale, 1)) !important;
   text-align: center;
   /* Force positioning for iPhone */
   position: absolute !important;
-  right: 10px !important;
+  inset-inline-end: 10px !important;
   top: 50% !important;
   transform: translateY(-50%) !important;
   z-index: 10;
@@ -893,7 +936,7 @@ form.inlined-form .list-composer {
   grid-row: 1;
   grid-column: 2;
   align-self: end;
-  font-size: 20px !important;
+  font-size: calc(20px * var(--wekan-ui-font-scale, 1)) !important;
   font-weight: bold;
   line-height: 1.2;
   padding-bottom: 2px;
@@ -902,10 +945,10 @@ form.inlined-form .list-composer {
   grid-row: 2;
   grid-column: 2;
   align-self: start;
-  text-align: left;
-  padding-left: 0;
-  margin-left: 0;
-  font-size: 16px !important;
+  text-align: start;
+  padding-inline-start: 0;
+  margin-inline-start: 0;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1)) !important;
   line-height: 1.2;
 }
 .list.mobile-view .list-header .list-header-menu {
@@ -930,55 +973,60 @@ form.inlined-form .list-composer {
 
 @media screen and (max-width: 800px),
        screen and (max-device-width: 932px) and (-webkit-min-device-pixel-ratio: 3) {
-  .mini-list {
+  /* MOBILE MODE, not merely a narrow window. Stacking every list full width and
+     `display: block` is the phone layout; a phone whose user chose DESKTOP mode
+     asked for the desktop board - lists side by side, scrolled sideways - and was
+     getting one list per row instead. `body.mobile-mode` is exactly "the user is
+     in mobile mode", and it is what the rest of the mobile board layout uses. */
+  body.mobile-mode .mini-list {
     flex: 0 0 60px;
     height: auto;
-    width: 100vw;
-    max-width: 100vw;
-    min-width: 100vw;
-    border-left: 0px !important;
+    width: 100%;
+    max-width: 100%;
+    min-width: 100%;
+    border-inline-start: 0px !important;
     border-bottom: 1px solid #ccc;
     display: block !important;
   }
-  .list {
+  body.mobile-mode .list {
     display: block !important;
     flex-basis: auto;
-    width: 100vw;
-    max-width: 100vw;
-    min-width: 100vw;
-    border-left: 0px !important;
+    width: 100%;
+    max-width: 100%;
+    min-width: 100%;
+    border-inline-start: 0px !important;
     margin: 0 !important;
     padding: 0 !important;
   }
-  .list:first-child {
-    margin-left: 0px;
+  body.mobile-mode .list:first-child {
+    margin-inline-start: 0px;
   }
-  .list.ui-sortable-helper {
+  body.mobile-mode .list.ui-sortable-helper {
     flex: 0 0 60px;
     height: 60px;
-    width: 100vw;
-    max-width: 100vw;
-    border-left: 0px !important;
+    width: 100%;
+    max-width: 100%;
+    border-inline-start: 0px !important;
     border-bottom: 1px solid #ccc;
     display: block !important;
   }
-  .list.ui-sortable-helper .list-header.ui-sortable-handle {
+  body.mobile-mode .list.ui-sortable-helper .list-header.ui-sortable-handle {
     cursor: grabbing;
   }
-  .list.placeholder {
+  body.mobile-mode .list.placeholder {
     flex: 0 0 60px;
     height: 60px;
-    width: 100vw;
-    max-width: 100vw;
-    border-left: 0px !important;
+    width: 100%;
+    max-width: 100%;
+    border-inline-start: 0px !important;
     border-bottom: 1px solid #ccc;
     display: block !important;
   }
   .list-body {
     padding: 15px 19px;
-    width: 100vw;
-    max-width: 100vw;
-    min-width: 100vw;
+    width: 100%;
+    max-width: 100%;
+    min-width: 100%;
   }
   .list-header {
 	  /*Updated padding values for mobile devices, this should fix text grouping issue*/
@@ -987,34 +1035,34 @@ form.inlined-form .list-composer {
     min-height: 30px;
     margin-top: 10px;
     align-items: center;
-    width: 100vw;
-    max-width: 100vw;
-    min-width: 100vw;
+    width: 100%;
+    max-width: 100%;
+    min-width: 100%;
   }
   .list-header .list-header-left-icon {
     padding: 7px;
-    padding-right: 27px;
+    padding-inline-end: 27px;
     margin-top: 1px;
     top: -7px;
-    left: -7px;
+    inset-inline-start: -7px;
   }
   .list-header .list-header-menu-icon {
     padding: 14px;
-    font-size: 40px;
+    font-size: calc(40px * var(--wekan-ui-font-scale, 1));
     text-align: center;
     /* iOS Safari fallback positioning */
     position: absolute;
-    right: 60px;
+    inset-inline-end: 60px;
     top: 50%;
     transform: translateY(-50%);
   }
   .list-header .list-header-handle {
     padding: 14px;
-    font-size: 48px;
+    font-size: calc(48px * var(--wekan-ui-font-scale, 1));
     text-align: center;
     /* iOS Safari fallback positioning */
     position: absolute;
-    right: 10px;
+    inset-inline-end: 10px;
     top: 50%;
     transform: translateY(-50%);
   }
@@ -1032,7 +1080,7 @@ form.inlined-form .list-composer {
     grid-row: 1;
     grid-column: 2;
     align-self: end;
-    font-size: 20px;
+    font-size: calc(20px * var(--wekan-ui-font-scale, 1));
     font-weight: bold;
     line-height: 1.2;
     padding-bottom: 2px;
@@ -1041,7 +1089,7 @@ form.inlined-form .list-composer {
     grid-row: 2;
     grid-column: 2;
     align-self: start;
-    font-size: 16px;
+    font-size: calc(16px * var(--wekan-ui-font-scale, 1));
     line-height: 1.2;
   }
   .list-header .list-header-menu {
@@ -1080,28 +1128,28 @@ form.inlined-form .list-composer {
   .list.mobile-view .list-header .list-header-menu-icon {
     /* Remove absolute positioning for iPhone 12 Mini */
     position: static !important;
-    right: auto !important;
+    inset-inline-end: auto !important;
     top: auto !important;
     transform: none !important;
     /* Use grid positioning */
     grid-row: 1/3 !important;
     grid-column: 3 !important;
     padding: 14px !important;
-    font-size: 40px !important;
+    font-size: calc(40px * var(--wekan-ui-font-scale, 1)) !important;
     text-align: center !important;
   }
 
   .list.mobile-view .list-header .list-header-handle {
     /* Remove absolute positioning for iPhone 12 Mini */
     position: static !important;
-    right: auto !important;
+    inset-inline-end: auto !important;
     top: auto !important;
     transform: none !important;
     /* Use grid positioning */
     grid-row: 1/3 !important;
     grid-column: 4 !important;
     padding: 14px !important;
-    font-size: 48px !important;
+    font-size: calc(48px * var(--wekan-ui-font-scale, 1)) !important;
     text-align: center !important;
   }
 
@@ -1109,7 +1157,7 @@ form.inlined-form .list-composer {
     grid-row: 1 !important;
     grid-column: 2 !important;
     align-self: end !important;
-    font-size: 20px !important;
+    font-size: calc(20px * var(--wekan-ui-font-scale, 1)) !important;
     font-weight: bold !important;
     line-height: 1.2 !important;
     padding-bottom: 2px !important;
@@ -1119,10 +1167,10 @@ form.inlined-form .list-composer {
     grid-row: 2 !important;
     grid-column: 2 !important;
     align-self: start !important;
-    text-align: left !important;
-    padding-left: 0 !important;
-    margin-left: 0 !important;
-    font-size: 16px !important;
+    text-align: start !important;
+    padding-inline-start: 0 !important;
+    margin-inline-start: 0 !important;
+    font-size: calc(16px * var(--wekan-ui-font-scale, 1)) !important;
     line-height: 1.2 !important;
   }
 
@@ -1145,28 +1193,28 @@ form.inlined-form .list-composer {
 .iphone-device .list.mobile-view .list-header .list-header-menu-icon {
   /* Remove absolute positioning for iPhone devices */
   position: static !important;
-  right: auto !important;
+  inset-inline-end: auto !important;
   top: auto !important;
   transform: none !important;
   /* Use grid positioning */
   grid-row: 1/3 !important;
   grid-column: 3 !important;
   padding: 14px !important;
-  font-size: 40px !important;
+  font-size: calc(40px * var(--wekan-ui-font-scale, 1)) !important;
   text-align: center !important;
 }
 
 .iphone-device .list.mobile-view .list-header .list-header-handle {
   /* Remove absolute positioning for iPhone devices */
   position: static !important;
-  right: auto !important;
+  inset-inline-end: auto !important;
   top: auto !important;
   transform: none !important;
   /* Use grid positioning */
   grid-row: 1/3 !important;
   grid-column: 4 !important;
   padding: 14px !important;
-  font-size: 48px !important;
+  font-size: calc(48px * var(--wekan-ui-font-scale, 1)) !important;
   text-align: center !important;
 }
 
@@ -1174,7 +1222,7 @@ form.inlined-form .list-composer {
   grid-row: 1 !important;
   grid-column: 2 !important;
   align-self: end !important;
-  font-size: 20px !important;
+  font-size: calc(20px * var(--wekan-ui-font-scale, 1)) !important;
   font-weight: bold !important;
   line-height: 1.2 !important;
   padding-bottom: 2px !important;
@@ -1184,7 +1232,7 @@ form.inlined-form .list-composer {
   grid-row: 2 !important;
   grid-column: 2 !important;
   align-self: start !important;
-  font-size: 16px !important;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1)) !important;
   line-height: 1.2 !important;
 }
 
@@ -1202,7 +1250,7 @@ form.inlined-form .list-composer {
 
 .list:not(.mobile-view):not(.list-collapsed) .list-header .list-header-name {
   /* Permit wrapping and full visibility */
-  white-space: normal !important;
+  white-space: pre-wrap !important;
   overflow: visible !important;
   text-overflow: clip !important;
   display: block !important;
@@ -1216,7 +1264,7 @@ form.inlined-form .list-composer {
   align-items: baseline;
 }
 .link-board-wrapper .js-link-board {
-  margin-left: 15px;
+  margin-inline-start: 15px;
 }
 .search-card-results {
   max-height: 250px;
@@ -1321,8 +1369,8 @@ form.inlined-form .list-composer {
 .list.list-collapsed:not(.mobile-view) .list-header .list-header-handle {
   position: relative !important;
   top: auto !important;
-  right: auto !important;
-  left: auto !important;
+  inset-inline-end: auto !important;
+  inset-inline-start: auto !important;
   transform: none !important;
   display: block !important;
   margin: 4px auto 2px auto !important;
@@ -1337,8 +1385,8 @@ form.inlined-form .list-composer {
 .list.list-collapsed:not(.mobile-view) .list-header .js-collapse {
   position: relative !important;
   top: auto !important;
-  left: auto !important;
-  right: auto !important;
+  inset-inline-start: auto !important;
+  inset-inline-end: auto !important;
   display: block !important;
   margin: 2px auto !important;
   z-index: 400 !important;
@@ -1365,16 +1413,30 @@ form.inlined-form .list-composer {
 .list.list-collapsed:not(.mobile-view) .list-header .list-rotated h2.list-header-name {
   display: block !important;
   width: 100% !important;
+  /* .list-header .list-header-name sets a generic min-width: 56px (for the
+     normal, non-collapsed heading). min-width is a separate property from
+     width, so it survives the cascade even when this more specific rule
+     wins on width, and clamps the box to 56px wide regardless - offsetting
+     the rotated title to the right of the caret above it (#6680 follow-up,
+     collapse3.png). Override it back to 0 so width: 100% (of the narrow
+     collapsed column) actually applies. */
+  min-width: 0 !important;
   height: auto !important;
   margin: 0 !important;
   max-height: 100% !important;
   padding: 2px 0 !important;
-  white-space: normal !important;
+  white-space: pre-wrap !important;
   overflow: hidden !important;
   transform: none !important;
   writing-mode: vertical-lr !important;
   text-orientation: mixed !important;
-  text-align: left !important;
+  /* The one real fix here (#6680 follow-up): this was "start" (flush to one
+     edge of the 30px column instead of centered across it). Everything else
+     in these two rules is deliberately back to how it shipped before -
+     near the collapse-toggle/drag-handle at the TOP of the column, not
+     centered down the whole (often much taller) column; see
+     tests/collapsedListTitleCentered.test.cjs for why. */
+  text-align: center !important;
   visibility: visible !important;
   opacity: 1 !important;
 }
@@ -1444,8 +1506,8 @@ form.inlined-form .list-composer {
   flex: 0 0 auto;
   position: static !important;
   top: auto !important;
-  left: auto !important;
-  right: auto !important;
+  inset-inline-start: auto !important;
+  inset-inline-end: auto !important;
   transform: none !important;
   margin: 2px 2px 0 0 !important;
   padding: 2px 4px !important;
@@ -1463,7 +1525,7 @@ form.inlined-form .list-composer {
   flex: 1 0 100%;
   min-width: 0;
   padding-top: 4px !important;
-  padding-right: 0 !important;
+  padding-inline-end: 0 !important;
 }
 
 /* Hide standalone duplicate drag handle outside the menu group */
@@ -1475,7 +1537,7 @@ form.inlined-form .list-composer {
 .list:not(.list-collapsed):not(.mobile-view) .list-header .list-header-watch-icon {
   order: 2;
   flex: 0 0 auto;
-  padding-left: 0;
+  padding-inline-start: 0;
   align-self: center;
 }
 
@@ -1486,7 +1548,7 @@ form.inlined-form .list-composer {
   display: inline-flex !important;
   align-items: center;
   gap: 4px;
-  margin-left: auto;
+  margin-inline-start: auto;
   margin-top: 2px;
   flex: 0 0 auto;
 }
@@ -1497,8 +1559,8 @@ form.inlined-form .list-composer {
 .list:not(.list-collapsed):not(.mobile-view) .list-header .list-header-menu .js-open-list-menu {
   position: static !important;
   top: auto !important;
-  right: auto !important;
-  left: auto !important;
+  inset-inline-end: auto !important;
+  inset-inline-start: auto !important;
   transform: none !important;
   display: inline-flex !important;
   align-items: center;
@@ -1521,7 +1583,7 @@ form.inlined-form .list-composer {
 .list.list-collapsed .list-header-name-collapsed {
   writing-mode: vertical-rl;
   text-align: center;
-  font-size: 12px;
+  font-size: calc(12px * var(--wekan-ui-font-scale, 1));
   color: #333;
   margin: 0;
   padding: 0;
@@ -1533,7 +1595,7 @@ form.inlined-form .list-composer {
 
 .list.list-collapsed .list-header .js-collapse {
   position: relative !important;
-  left: -10px !important;
+  inset-inline-start: -10px !important;
   color: #333;
   background: transparent;
   border: none;
@@ -1545,8 +1607,76 @@ form.inlined-form .list-composer {
   display: block !important;
   align-items: initial;
   justify-content: initial;
-  font-size: 16px !important;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1)) !important;
   box-shadow: none;
   margin: 5px auto;
   z-index: 10;
+}
+
+/* "Set width" popup (setListWidthPopup, listHeader.jade): "Same width for
+   all lists" was inline right after "Auto list width", both `a` tags with
+   no display of their own - the browser default (inline) put them side by
+   side on one crowded line instead of the toggle stack the rest of the
+   popup already reads as. Each is now its own row, in the same top-to-
+   bottom order the markup already had. */
+#js-list-width-edit .js-toggle-auto-width,
+#js-list-width-edit .js-toggle-fixed-list-width {
+  display: block;
+  margin-top: 8px;
+}
+
+/* List sync popup (listSyncPopup, listHeader.jade/.js,
+   docs/Features/Board-Sidebar/Board-Settings/Import-Export/Sync.md). Same success/error color convention
+   as the LDAP test-connection result (client/components/settings/settingBody.css
+   .ldap-test-success/.ldap-test-error) so an inline result reads the same way
+   everywhere it appears. */
+.list-sync-now-success {
+  color: #2e7d32;
+}
+
+.list-sync-now-error,
+.list-sync-error {
+  color: #c62828;
+}
+
+.list-sync-credential-status {
+  margin: 2px 0 6px;
+}
+
+.list-sync-preview,
+.list-sync-run-reports {
+  border-top: 1px solid var(--border-color, #ccc);
+  padding-block: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.list-sync-conflict {
+  border-top: 1px solid var(--border-color, #ccc);
+  padding-block: 0.75rem;
+}
+.list-sync-conflict pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 10rem;
+  overflow: auto;
+  font: inherit;
+}
+
+/* Hamburger-menu badge (listActionPopup) showing whether this list already
+   has a sync source configured, and whether it is enabled or paused. */
+.list-sync-active {
+  color: #2e7d32;
+}
+
+.list-sync-paused {
+  color: #999;
+}
+
+/* Preserve explicit title line breaks just like minicard titles. */
+.list .list-header .list-header-name,
+.list .list-header .list-header-name .viewer,
+.list .list-header .list-header-name .viewer p,
+.list.list-collapsed .list-header .list-rotated h2.list-header-name {
+  white-space: pre-wrap !important;
+  overflow-wrap: anywhere;
 }

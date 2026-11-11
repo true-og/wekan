@@ -1,3 +1,14 @@
+// Bootstrap the collection-prototype shim (.helpers / .attachSchema / hooks)
+// BEFORE any test pulls in a model. The normal server entry (server/main.js)
+// require()s this first; the `meteor test` entry does not, so without this the
+// first model that calls Collection.helpers({...}) — e.g. models/positionHistory.js
+// reached via utils.tests → models/boards — throws "helpers is not a function".
+// ES import statements evaluate in source order, so this must stay the first one.
+import '/imports/collectionHelpers';
+
+// i18n (TAPi18n) is isomorphic and used on the server too, so run its tests here
+// as the old tests/main.js did (top-level import, no block import for swc/Meteor 3).
+import '/imports/i18n/i18n.test.js';
 import './utils.tests';
 import './users.security.tests';
 import './boards.security.tests';
@@ -6,9 +17,142 @@ import './cards.methods.tests';
 import './attachmentApi.tests';
 import './attachmentApi.authContext.tests';
 import './headerLoginAuth.tests';
-import './cards.archive.tests';
-import './cards.move.tests';
 import './search.logic.tests';
 import './fileStoreStrategy.security.tests';
 import './clonebleed.security.tests';
 import './permissions.security.tests';
+import './dependencies.metadata.tests';
+import './dependencies.openapi.tests';
+import './cards.dependencies.move.tests';
+import './jiraCreator.dependencies.tests';
+import './attachmentActivity.tests';
+import './comments.permissions.tests';
+import './announcementDismiss.tests';
+import './boardSearch.comments.tests';
+import './dueDateEdits.tests';
+import './icsImport.tests';
+import './orgTeamRestriction.tests';
+import './cardsCopyDueFixes.tests';
+import './archivePermission.tests';
+import './selectAllSwimlane.tests';
+import './swimlaneCopyLabels.tests';
+import './attachmentDeleteActor.tests';
+import './titleChangeActivity.tests';
+import './removeMissingMember.tests';
+import './boardListFilter.tests';
+import './restCardFixes.tests';
+import './checklistHideToggle.tests';
+import './listColor.tests';
+import './customNumberFormat.tests';
+import './languageNames.tests';
+import './subtaskSettings.tests';
+import './subtaskCreation.tests';
+import './deleteWebhookActivity.tests';
+import './webhookNonBlocking.tests';
+import './apiResponseHelpers.tests';
+import './dnsbleed.security.tests';
+import './fileValidationBypass.security.tests';
+import './importExportSecurity.tests';
+import './impersonationReportQuery.tests';
+import './brokenCardsRepair.tests';
+
+// #6520: these three suites existed but were never imported here, so `meteor test`
+// silently skipped them - including two *bleed security regression suites, exactly
+// the kind of test whose absence lets a fixed vulnerability come back unnoticed.
+import './checklistbleed.security.tests';
+import './proxybleed.security.tests';
+import './filenameTruncation.tests';
+
+// Moved here from client/lib/tests in v10.72. It reads boardTriggers.jade and
+// boardTriggers.js off disk with fs/path, which are server-only: while the
+// client bundle still carried node-polyfill-webpack-plugin's browser shims it
+// bundled anyway, and when that plugin left with the @meteorjs/rspack 2.1.0
+// update the whole `meteor test` client build stopped with "Cannot find module
+// 'path' for matched aliased key 'path'" - one file's imports failing every
+// mocha suite there is. A test that reads the repository belongs on the side
+// that has a filesystem.
+import './boardTriggersClass.tests';
+
+import './syncHookedCards.tests';
+import './syncRuleArchiveEffects.tests';
+
+import './syncHookedActivities.tests';
+
+import './notificationAwaitedDelivery.tests';
+
+import './notificationPreparation.tests';
+
+import './storedNotificationDelivery.tests';
+import './webhookPreparation.tests';
+import './instanceFeatures.tests';
+import './storedWebhookHttp.tests';
+import './commentPrivateFields.tests';
+import './storedWebhooks.tests';
+import './smtpDeadline.tests';
+
+import './emailReceiptRetention.tests';
+
+import './activityNotificationIntent.tests';
+
+import './activityNotificationRecovery.tests';
+
+import './storedRulePlans.tests';
+
+import './storedHistoryChain.tests';
+import './undoRedoClaim.tests';
+
+import './scrumHistoryConfirmation.tests';
+import './scrumIncarnation.tests';
+import './scrumHistoryRecovery.tests';
+
+import "./cardListEntry.tests";
+import './autoArchiveCards.tests';
+import './cardParents.tests';
+import './inboundEmailRoute.tests';
+import './compatApi.tests';
+import './bots.tests';
+import './syncedCronIndex.tests';
+import './activityNotificationExpiry.tests';
+import './emailToCard.tests';
+import './emailSendReceive.tests';
+import './emailBounces.tests';
+import './customBoardRoles.tests';
+import './groupBoardMembership.tests';
+import './instanceEditing.tests';
+import './boardKeys.tests';
+import './sharedLabels.tests';
+import './listPermissions.tests';
+import './archiveListCards.tests';
+import './restoreListSwimlanes.tests';
+import './activityIncarnation.tests';
+import './listSyncDurable.tests';
+import './storedRuleChecklist.tests';
+import './storedRuleMove.tests';
+import './storedRuleChecklistLifecycle.tests';
+import './storedRuleCopyCard.tests';
+import './dependencyLayers.tests';
+import './cardMoveLabelActivities.tests';
+import './attachedCards.tests';
+import './storedRuleMoveBoard.tests';
+import './ruleEmailFollowedMove.tests';
+import './jiraScrumImport.tests';
+import './importAttachmentAuth.tests';
+import './externalScrumImport.tests';
+import './listSyncGitlabEstimate.tests';
+import './listSyncWriteBack.tests';
+import './chatViewChannels.tests';
+import './scrumScopeHistory.tests';
+import './scrumSnapshotRows.tests';
+import './scrumTransferMerge.tests';
+import './continuousBackup.tests';
+import './copySubtaskScope.tests';
+import './subtaskDone.tests';
+import './ruleTriggerScope.tests';
+import './scrumMovedReferences.tests';
+import './editableCardIds.tests';
+import './listSyncPlanning.tests';
+import './notificationDelivery.tests';
+import './customFieldLinks.tests';
+import './passkeys.tests';
+import './sqrl.tests';
+import './webPush.tests';

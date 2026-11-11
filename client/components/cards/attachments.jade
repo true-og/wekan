@@ -9,7 +9,7 @@ template(name="cardAttachmentsPopup")
           th.upload-speed-descr {{_ 'speed'}}
         each upload in uploads
           tr
-            td.upload-file-name-value {{upload.file.name}}
+            td.upload-file-name-value {{cleanFilename upload.file.name}}
             td.upload-progress-value {{upload.progress.get}}%
             td.upload-remaining-value {{getEstimateTime upload}}
             td.upload-speed-value {{getEstimateSpeed upload}}
@@ -20,62 +20,103 @@ template(name="cardAttachmentsPopup")
         a.js-computer-upload {{_ 'computer'}}
       li
         a.js-upload-clipboard-image {{_ 'clipboard'}}
+      //- #3257: a card attached to this card, as Trello's card attachments.
+      li
+        a.js-attach-card {{_ 'attach-card'}}
+      //- #6802: a new drawing, the whole window, saved as an SVG attachment.
+      li
+        a.js-attach-drawing
+          i.fa.fa-pencil
+          |  {{_ 'cardDrawingPopup-title'}}
+    //- #6796: the upload rules, where the upload is chosen - they used to be
+      body text above the opened card's attachment list.
+    .attachment-upload-help.quiet
+      if Meteor.settings.public.attachmentsUploadMaxSize
+        div {{_ 'max-upload-filesize'}} {{Meteor.settings.public.attachmentsUploadMaxSize}}
+      if Meteor.settings.public.attachmentsUploadMimeTypes
+        div {{_ 'allowed-upload-filetypes'}} {{Meteor.settings.public.attachmentsUploadMimeTypes}}
+      div {{_ 'invalid-file'}}
+
+//- #3257: attach a card - a pasted card link (Copy card link gives one), or one
+  of this board's cards found by its title.
+template(name="attachCardPopup")
+  form.js-attach-card-form
+    label(for="attach-card-input") {{_ 'attach-card-hint'}}
+    input.js-attach-card-input#attach-card-input(type="text" autocomplete="off" autofocus)
+    if attachCardError
+      p.warning.js-attach-card-error {{_ attachCardError}}
+    ul.pop-over-list.attach-card-matches
+      each attachCardMatches
+        li
+          a.js-attach-card-match(data-card-id="{{_id}}") {{title}}
+    button.primary.js-attach-card-submit(type="submit") {{_ 'attach-card'}}
 
 template(name="previewClipboardImagePopup")
   p <kbd>Ctrl</kbd>+<kbd>V</kbd> {{_ "paste-or-dragdrop"}}
-  img.preview-clipboard-image()
+  img.preview-clipboard-image(alt="{{_ 'preview'}}")
   button.primary.js-upload-pasted-image {{_ 'upload'}}
 
 template(name="attachmentDeletePopup")
-  p {{_ "attachment-delete-pop"}}
+  //- History.md §12.1: a soft delete, restorable from the card history - so
+  //- not the "permanent, no undo" text the hard delete had.
+  p {{_ "attachment-soft-delete-pop"}}
   button.js-confirm.negate.full(type="submit") {{_ 'delete'}}
 
 template(name="attachmentViewer")
-  #viewer-overlay.hidden
+  #viewer-overlay.hidden(role="dialog" aria-modal="true" aria-labelledby="attachment-name")
     #viewer-top-bar
       span#attachment-name
-      a#viewer-close
+      button#viewer-close(type="button" aria-label="{{_ 'close'}}")
         i.fa.fa-times-thin
 
     #viewer-container
-      i.fa.fa-caret-left#prev-attachment
+      button.fa.fa-caret-left#prev-attachment(type="button" aria-label="{{_ 'previous'}}")
       #viewer-content
-        img#image-viewer.hidden
+        img#image-viewer.hidden(alt="{{_ 'preview'}}")
         video#video-viewer.hidden(controls="true")
         audio#audio-viewer.hidden(controls="true")
         object#pdf-viewer.hidden(type="application/pdf")
           span.pdf-preview-error {{_ 'preview-pdf-not-supported' }}
         object#txt-viewer.hidden(type="text/plain")
-      i.fa.fa-caret-right#next-attachment
+        #zip-viewer.hidden(aria-live="polite")
+        #office-viewer.hidden
+      button.fa.fa-caret-right#next-attachment(type="button" aria-label="{{_ 'next'}}")
 
 template(name="attachmentGallery")
 
   .attachment-gallery
 
-    if canModifyCard
-      a.attachment-item.add-attachment.js-add-attachment
+    //- #6796: a small "+" like every other section's, not a full-width box.
+    if canAddAttachment
+      a.card-label.add-label.add-attachment.js-add-attachment(title="{{_ 'add-attachment'}}" aria-label="{{_ 'add-attachment'}}")
         i.fa.fa-plus
 
     each attachments
 
-      .attachment-item(class="{{#if isAttachmentMigrating _id}}migrating{{/if}}")
-        .attachment-thumbnail-container.open-preview(data-attachment-id="{{_id}}" data-card-id="{{ meta.cardId }}")
-          if link
+      //- #6796: Attachments: Preview, Show on Card (Board Settings / Card).
+        Off, the tile is a small file button that still opens the preview;
+        a file with nothing to preview (a .txt) always gets the small one.
+      .attachment-item(class="{{#if isAttachmentMigrating _id}}migrating{{/if}} {{#if attachmentTileCompact this}}attachment-item-compact{{/if}}")
+        button.attachment-thumbnail-container.open-preview(type="button" aria-label="{{_ 'preview'}}: {{cleanFilename name}}" data-attachment-id="{{_id}}" data-card-id="{{ meta.cardId }}" class="{{#if attachmentTileCompact this}}attachment-thumbnail-compact{{/if}}")
+          if attachmentTileCompact this
+            i.fa.fa-file-o(aria-hidden="true")
+            span.attachment-thumbnail-ext= extension
+          else if link
             if(isImage)
-              img.attachment-thumbnail(src="{{link}}" title="{{sanitize name}}")
+              img.attachment-thumbnail(src="{{attachmentPreviewUrl this}}" title="{{cleanFilename name}}" alt="{{cleanFilename name}}" loading="lazy")
             else if($eq extension 'svg')
-              img.attachment-thumbnail(src="{{link}}" title="{{sanitize name}}" type="image/svg+xml")
+              img.attachment-thumbnail(src="{{link}}" title="{{cleanFilename name}}" alt="{{cleanFilename name}}" type="image/svg+xml")
             else if($eq extension 'mp3')
-              video.attachment-thumbnail(title="{{sanitize name}}")
+              video.attachment-thumbnail(title="{{cleanFilename name}}")
                 source(src="{{link}}" type="audio/mpeg")
             else if($eq extension 'ogg')
-              video.attachment-thumbnail(title="{{sanitize name}}")
+              video.attachment-thumbnail(title="{{cleanFilename name}}")
                 source(src="{{link}}" type="video/ogg")
             else if($eq extension 'webm')
-              video.attachment-thumbnail(title="{{sanitize name}}")
+              video.attachment-thumbnail(title="{{cleanFilename name}}")
                 source(src="{{link}}" type="video/webm")
             else if($eq extension 'mp4')
-              video.attachment-thumbnail(title="{{sanitize name}}")
+              video.attachment-thumbnail(title="{{cleanFilename name}}")
                 source(src="{{link}}" type="video/mp4")
             else
               span.attachment-thumbnail-text= extension
@@ -83,15 +124,16 @@ template(name="attachmentGallery")
         .attachment-details-container
           .attachment-details
             div
-              b
-                = name
+              b {{ cleanFilename name }}
               span.file-size ({{fileSize size}})
-            if uploaderName
-              div.attachment-uploader {{uploaderName}}
-            if uploadedAt
-              div.attachment-uploaded-at {{uploadedAt}}
+            //- #6796: Attachments: Details, Show on Card - who and when.
+            unless $eq currentBoard.allowsAttachmentDetailsOnCard false
+              if uploaderName
+                div.attachment-uploader {{uploaderName}}
+              if uploadedAt
+                div.attachment-uploaded-at {{uploadedAt}}
             .attachment-actions
-              a.js-download(href="{{link}}?download=true", download="{{name}}", title="{{_ 'download'}}")
+              a.js-download(href="{{link}}?download=true", download="{{downloadFilename name}}", title="{{_ 'download'}}")
                 i.fa.fa-arrow-down
               if currentUser.isBoardMember
                 unless currentUser.isCommentOnly
@@ -107,7 +149,26 @@ template(name="attachmentGallery")
           .attachment-migration-overlay
             .migration-spinner
               i.fa.fa-cog.fa-spin
-            .migration-text {{_ 'migrating-attachment'}}
+            .migration-text {{_ 'attachment-migration'}}
+
+    //- #3257: the cards attached to this one. A card the viewer cannot read
+      shows only that one is there (server/models/attachedCards.js).
+    each attachedCards
+      .attachment-item.attached-card-item(data-card-id="{{cardId}}")
+        if unavailable
+          .attached-card-unavailable
+            i.fa.fa-clone
+            span {{_ 'attached-card-unavailable'}}
+        else
+          a.attached-card-link.js-open-attached-card(href="{{url}}" title="{{title}}")
+            i.fa.fa-clone
+            span.attached-card-title= title
+            span.attached-card-where {{boardTitle}} / {{listTitle}}
+            if archived
+              span.attached-card-archived {{_ 'archived'}}
+        if canModifyCard
+          a.js-detach-card(title="{{_ 'detach-card'}}" aria-label="{{_ 'detach-card'}}" data-card-id="{{cardId}}")
+            i.fa.fa-times-thin
 
 template(name="attachmentActionsPopup")
   ul.pop-over-list

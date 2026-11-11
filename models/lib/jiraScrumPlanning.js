@@ -1,0 +1,281 @@
+'use strict';
+// Jira sprints, fix versions, rank and epic links as WeKan Scrum planning data
+// (docs/Features/Board-Header/Board-Views/Scrum/Scrum-Design.md:
+// "Jira mappings use the supplied field schema and explicit user choices, not
+// hard-coded customfield_* numbers ... report those gaps; do not claim
+// complete Jira preservation").
+//
+// The planning fields are found by what the export says they are: the field
+// schema (search with expand=schema: `schema[id].custom`) or, failing that,
+// the field names (expand=names: `names[id]`). What the import makes:
+//
+//   * a FUTURE or ACTIVE Jira sprint becomes a planned WeKan sprint with its
+//     goal and dates. An active sprint is reported as a loss: WeKan's started
+//     sprint carries a commitment snapshot taken when it started, and issue
+//     search JSON has none, so it is not invented. A CLOSED sprint is
+//     reported and not imported, for the same reason (no close snapshot).
+//   * a fix version becomes a release: released (with its date) or planned.
+//     A card takes EVERY fix version as one of its releases (2026-10-08; it
+//     used to keep the first and report the rest). Fix versions still become
+//     version: labels too, as before.
+//   * the card's sprint is its open (future or active) sprint, the last one
+//     listed when there are several.
+//   * the rank (Jira's LexoRank string) orders the backlog: backlogRank 1..n
+//     in rank order.
+//   * a legacy Epic Link names the card's epic: it becomes the card's parent
+//     when the epic is imported too. Newer Jira uses `parent`, which the
+//     importer already follows.
+//
+// The result is a native Scrum transfer (models/lib/scrumTransfer.js) keyed by
+// Jira ids and issue keys, which the importer remaps and writes like a native
+// import (server/lib/scrumTransferImport.js). Pure: tested by
+// tests/jiraScrumPlanning.test.cjs.
+const { jiraScrumMetadata } = require('./jiraScrumMetadata');
+const { portableCardReleases } = require('./scrum');
+
+const SCHEMA = {
+  sprint: 'com.pyxis.greenhopper.jira:gh-sprint',
+  rank: 'com.pyxis.greenhopper.jira:gh-lexo-rank',
+  epicLink: 'com.pyxis.greenhopper.jira:gh-epic-link',
+};
+const NAMES = { sprint: ['sprint'], rank: ['rank'], epicLink: ['epic link'] };
+
+// The planning fields' ids: by schema first, by name otherwise.
+function jiraPlanningFields(data) {
+  const schema = (data && !Array.isArray(data) && data.schema) || {};
+  const names = (data && !Array.isArray(data) && data.names) || {};
+  const found = {};
+  for (const kind of Object.keys(SCHEMA)) {
+    const bySchema = Object.keys(schema).find(id => schema[id] && schema[id].custom === SCHEMA[kind]);
+    const byName = Object.keys(names).find(id => typeof names[id] === 'string' &&
+      NAMES[kind].includes(names[id].trim().toLowerCase()));
+    const id = bySchema || byName;
+    if (id && /^customfield_\d+$/.test(id)) found[kind] = id;
+  }
+  return found;
+}
+
+// A sprint as Jira gives it: an object (Cloud, Server 8+) or the legacy
+// toString form "com.atlassian.greenhopper.service.sprint.Sprint@1a2b[id=7,
+// rapidViewId=1,state=ACTIVE,name=Sprint 7,startDate=...,endDate=...,...]".
+function parseJiraSprint(value) {
+  let raw = value;
+  if (typeof value === 'string') {
+    const body = /\[(.*)\]\s*$/.exec(value);
+    if (!body) return null;
+    raw = {};
+    // Values may contain commas (names, goals): split on ",key=" only.
+    for (const part of body[1].split(/,(?=[a-zA-Z]+=)/)) {
+      const at = part.indexOf('=');
+      if (at > 0) raw[part.slice(0, at)] = part.slice(at + 1);
+    }
+  }
+  if (!raw || typeof raw !== 'object') return null;
+  const id = raw.id === undefined || raw.id === null ? '' : String(raw.id);
+  const name = typeof raw.name === 'string' ? raw.name.trim() : '';
+  const state = String(raw.state || '').toLowerCase();
+  if (!/^\d+$/.test(id) || !name || !['future', 'active', 'closed'].includes(state)) return null;
+  const when = text => {
+    if (typeof text !== 'string' || !text || text === '<null>') return null;
+    const date = new Date(text);
+    return Number.isFinite(date.getTime()) ? date : null;
+  };
+  const goal = typeof raw.goal === 'string' && raw.goal !== '<null>' ? raw.goal : '';
+  return { id, name: name.slice(0, 200), state, goal, startDate: when(raw.startDate), endDate: when(raw.endDate),
+    completeDate: when(raw.completeDate) };
+}
+
+// A Jira field's value at a moment, from the issue's change history
+// (search with expand=changelog - documented): start from the value now and
+// undo every change made after that moment, newest first. `undefined` when
+// the issue carries no change history.
+function jiraValueAt(issue, fieldName, at, current) {
+  const histories = issue && issue.changelog && Array.isArray(issue.changelog.histories) ? issue.changelog.histories : null;
+  if (!histories) return undefined;
+  let value = current;
+  const later = histories
+    .map(history => ({ created: new Date(history.created), items: Array.isArray(history.items) ? history.items : [] }))
+    .filter(history => Number.isFinite(history.created.getTime()) && history.created > at)
+    .sort((a, b) => b.created - a.created);
+  for (const history of later) {
+    for (const item of history.items) {
+      if (item && String(item.field).toLowerCase() === fieldName) value = { id: item.from, name: item.fromString };
+    }
+  }
+  return value;
+}
+// The sprint ids a changelog value names ("12, 14").
+const sprintIdsOf = value => new Set(String((value && value.id) || '').split(',').map(id => id.trim()).filter(id => /^\d+$/.test(id)));
+
+const sprintId = id => `jira-sprint-${id}`;
+const releaseId = id => `jira-version-${id}`;
+
+// `estimate` is { sourceId, unit } when the import maps an estimate field
+// (models/lib/jiraEstimateMapping.js), so the board's Scrum settings keep it.
+function jiraScrumPlanning(data, { estimate = null } = {}) {
+  const issues = (Array.isArray(data) ? data : (data && data.issues) || []).filter(issue => issue && issue.key);
+  const fields = jiraPlanningFields(data);
+  const keys = new Set(issues.map(issue => issue.key));
+  const sprints = new Map(), releases = new Map(), losses = [], cards = [], epicParents = {};
+  // Closed sprints, rebuilt from the issues (closedSprintRecords below).
+  const closed = new Map();
+  const lost = (path, reason) => losses.push({ path, reason });
+  const ranks = [];
+  issues.forEach((issue, index) => {
+    const f = issue.fields || {};
+    const at = `issues[${index}]`;
+    const scrum = { ...jiraScrumMetadata(f).card };
+    // Sprints.
+    const listed = fields.sprint ? (Array.isArray(f[fields.sprint]) ? f[fields.sprint] : f[fields.sprint] ? [f[fields.sprint]] : []) : [];
+    let open = null;
+    for (const value of listed) {
+      const sprint = parseJiraSprint(value);
+      if (!sprint) { lost(`${at}/${fields.sprint}`, 'a sprint value Jira gave in an unknown form'); continue; }
+      if (sprint.state === 'closed') {
+        if (!sprints.has(sprint.id)) sprints.set(sprint.id, null);
+        if (!closed.has(sprint.id)) closed.set(sprint.id, sprint);
+        if (!scrum.pastSprintIds) scrum.pastSprintIds = [];
+        scrum.pastSprintIds.push(sprintId(sprint.id));
+        continue;
+      }
+      if (!sprints.get(sprint.id)) {
+        sprints.set(sprint.id, sprint);
+        if (sprint.state === 'active') {
+          lost(`sprint/${sprint.id}`, `active sprint "${sprint.name}" is imported as planned: the export has no commitment snapshot; start it in WeKan to begin measuring`);
+        }
+      }
+      open = sprint;
+    }
+    if (open) scrum.sprintId = sprintId(open.id);
+    // Fix versions.
+    const versions = (Array.isArray(f.fixVersions) ? f.fixVersions : [])
+      .filter(version => version && version.id !== undefined && typeof version.name === 'string' && version.name.trim());
+    // Every fix version is one of the card's releases (2026-10-08; a card has
+    // several now, models/lib/scrum.js cardReleaseIds), in Jira's order, the
+    // same version listed twice counted once.
+    const cardReleases = [];
+    versions.forEach(version => {
+      const id = String(version.id);
+      if (!releases.has(id)) {
+        const date = typeof version.releaseDate === 'string' && Number.isFinite(new Date(version.releaseDate).getTime())
+          ? new Date(version.releaseDate) : null;
+        releases.set(id, { _id: releaseId(id), name: version.name.trim().slice(0, 200),
+          notes: typeof version.description === 'string' ? version.description : '',
+          state: version.released === true ? 'released' : 'planned',
+          ...(date ? { plannedEnd: date } : {}), ...(date && version.released === true ? { releasedAt: date } : {}),
+          provenance: { system: 'jira', recordId: id } });
+      }
+      cardReleases.push(releaseId(id));
+    });
+    // The file's portable form: one release as `releaseId` alone, several
+    // with `releaseIds` beside it.
+    Object.assign(scrum, portableCardReleases({ releaseIds: cardReleases }));
+    // Rank.
+    const rank = fields.rank ? f[fields.rank] : undefined;
+    if (typeof rank === 'string' && rank) ranks.push({ index, rank });
+    // Epic link.
+    const epic = fields.epicLink ? f[fields.epicLink] : undefined;
+    if (typeof epic === 'string' && epic) {
+      if (keys.has(epic) && epic !== issue.key) epicParents[issue.key] = epic;
+      else if (!keys.has(epic)) lost(`${at}/${fields.epicLink}`, `epic ${epic} is not part of this import`);
+    }
+    cards.push({ _id: issue.key, scrum });
+  });
+  // Rank: LexoRank strings order lexicographically.
+  ranks.sort((a, b) => (a.rank < b.rank ? -1 : a.rank > b.rank ? 1 : a.index - b.index))
+    .forEach(({ index }, i) => { cards[index].scrum.backlogRank = i + 1; });
+  const planned = [...sprints.values()].filter(Boolean).map(sprint => ({ _id: sprintId(sprint.id), name: sprint.name,
+    goal: sprint.goal, state: 'planned', ...(sprint.startDate ? { plannedStart: sprint.startDate } : {}),
+    ...(sprint.endDate && (!sprint.startDate || sprint.endDate >= sprint.startDate) ? { plannedEnd: sprint.endDate } : {}),
+    provenance: { system: 'jira', recordId: sprint.id } }));
+  const settings = { ...(planned.length || releases.size || closed.size ? { enabled: true } : {}),
+    ...(estimate ? { estimateSource: 'customField', estimateCustomFieldId: estimate.sourceId, estimateUnit: estimate.unit } : {}) };
+  const done = closedSprintRecords({ closed, issues, fields, settings, estimate, lost });
+  // A card names only the closed sprints that are imported: one without dates
+  // stays out (reported), and must not be named.
+  const importedClosed = new Set(done.map(sprint => sprint._id));
+  for (const card of cards) {
+    if (!card.scrum.pastSprintIds) continue;
+    card.scrum.pastSprintIds = card.scrum.pastSprintIds.filter(id => importedClosed.has(id));
+    if (!card.scrum.pastSprintIds.length) delete card.scrum.pastSprintIds;
+  }
+  const any = planned.length > 0 || done.length > 0 || releases.size > 0 || ranks.length > 0;
+  const transfer = any ? { format: 'wekan-scrum-2', settings, sprints: [...planned, ...done], releases: [...releases.values()],
+    events: [], cards: cards.filter(card => Object.keys(card.scrum).length), lists: [], swimlanes: [] } : null;
+  return { fields, transfer, losses, epicParents,
+    // The importer leaves these out of its generic custom fields: they are
+    // planning data now.
+    skipFields: [fields.sprint, fields.rank, fields.epicLink].filter(Boolean) };
+}
+
+// A closed Jira sprint as a closed WeKan sprint (2026-10-15). Jira's sprint
+// report - what was committed at the start - has no documented API, so the
+// snapshots are rebuilt from the issues themselves, from documented data:
+//   committed at the start  the issues whose Sprint field named the sprint
+//                           at its start date, from each issue's change
+//                           history; without one, the issues naming it now;
+//   at the close            the issues naming it at its completion, each
+//                           done when its status was in Jira's Done category
+//                           then (its change history), or - without one -
+//                           when it was resolved by then;
+//   the list                the issue's status at that moment, or its status
+//                           now when that status has no list on the board.
+// Every snapshot is marked `partial`: a rebuilt one cannot know an issue added
+// and removed again between two history entries, or an estimate as it was
+// then (the estimate now is used). A sprint with no start date stays out, as
+// before, and is reported.
+function closedSprintRecords({ closed, issues, fields, settings, estimate, lost }) {
+  const statusLists = new Set(issues.map(issue => issue.fields && issue.fields.status && issue.fields.status.name).filter(Boolean));
+  const doneStatuses = new Set(issues.filter(issue => issue.fields && issue.fields.status
+    && issue.fields.status.statusCategory && issue.fields.status.statusCategory.key === 'done').map(issue => issue.fields.status.name));
+  // The estimate as the import reads it (models/lib/jiraEstimateMapping.js).
+  const estimateOf = issue => {
+    if (!estimate || !estimate.mapping) return null;
+    const value = require('./jiraEstimateMapping').jiraEstimateValue(issue.fields || {}, estimate.mapping);
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+  };
+  const records = [];
+  for (const sprint of closed.values()) {
+    const startedAt = sprint.startDate;
+    const completedAt = sprint.completeDate || sprint.endDate;
+    if (!startedAt || !completedAt || completedAt < startedAt) {
+      lost(`sprint/${sprint.id}`, `closed sprint "${sprint.name}" is not imported: Jira gives no start and completion date for it`);
+      continue;
+    }
+    const inSprintAt = (issue, at) => {
+      const now = (fields.sprint ? [].concat(issue.fields[fields.sprint] || []) : []).map(parseJiraSprint).filter(Boolean);
+      const value = jiraValueAt(issue, 'sprint', at, { id: now.map(s => s.id).join(',') });
+      return value === undefined ? now.some(s => s.id === sprint.id) : sprintIdsOf(value).has(sprint.id);
+    };
+    const row = (issue, at) => {
+      const current = (issue.fields.status && issue.fields.status.name) || 'Imported';
+      const then = jiraValueAt(issue, 'status', at, { name: current });
+      const status = then && statusLists.has(then.name) ? then.name : current;
+      let isDone;
+      if (then && then.name && doneStatuses.has(then.name)) isDone = true;
+      else if (then) isDone = false;
+      else isDone = !!(issue.fields.resolutiondate && new Date(issue.fields.resolutiondate) <= at);
+      return { cardId: issue.key, listId: status, estimate: estimateOf(issue), done: isDone, archived: false };
+    };
+    const snapshot = (at, members) => {
+      const cards = members.map(issue => row(issue, at));
+      return { at, unit: estimate ? estimate.unit : settings.estimateUnit || 'points',
+        estimateSource: estimate ? 'customField' : 'poker', estimateCustomFieldId: estimate ? estimate.sourceId : null,
+        completionPolicy: 'dueComplete', cards, missingEstimates: cards.filter(c => c.estimate === null).length,
+        totalEstimate: cards.reduce((sum, c) => sum + (c.estimate ?? 0), 0), partial: true };
+    };
+    const named = issues.filter(issue => issue.fields && fields.sprint
+      && [].concat(issue.fields[fields.sprint] || []).map(parseJiraSprint).some(s => s && s.id === sprint.id));
+    const candidates = issues.filter(issue => issue.fields && (named.includes(issue) || jiraValueAt(issue, 'sprint', startedAt, { id: '' }) !== undefined));
+    records.push({ _id: sprintId(sprint.id), name: sprint.name, goal: sprint.goal, state: 'closed',
+      plannedStart: startedAt, ...(sprint.endDate && sprint.endDate >= startedAt ? { plannedEnd: sprint.endDate } : {}),
+      startedAt, completedAt,
+      startSnapshot: snapshot(startedAt, candidates.filter(issue => inSprintAt(issue, startedAt))),
+      closeSnapshot: snapshot(completedAt, candidates.filter(issue => inSprintAt(issue, completedAt))),
+      provenance: { system: 'jira', recordId: sprint.id } });
+    lost(`sprint/${sprint.id}`, `closed sprint "${sprint.name}" is imported with its commitment and close rebuilt from the issues (partial): Jira's sprint report has no documented API`);
+  }
+  return records;
+}
+
+module.exports = { jiraPlanningFields, parseJiraSprint, jiraScrumPlanning, jiraValueAt, closedSprintRecords, JIRA_PLANNING_SCHEMA: SCHEMA };

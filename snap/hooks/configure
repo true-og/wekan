@@ -15,6 +15,10 @@ if [ "$value" = "true" ]; then
     # update caddy file
     bind_port=$(snapctl get caddy-bind-port)
     port=$(snapctl get port)
+    # A Caddy 2 Caddyfile reads both ports from the environment caddy-control
+    # gives it ({$CADDY_PORT}, {$CADDY_BIND_PORT}; see snap-src/Caddyfile), so
+    # the restart below applies them. These two lines rewrite only a Caddy v1
+    # file (`proxy / localhost:...`, `http://:...`) that is not migrated yet.
     [ "x" != "x${bind_port}" ] && sed -i 's|proxy / localhost:.* {|proxy / localhost:'"${bind_port}"' {|g' $SNAP_COMMON/Caddyfile
     [ "x" != "x$port" ] && sed -i 's|http://:.*|http://:'"${port}"'|g' $SNAP_COMMON/Caddyfile
     snapctl start --enable ${SNAP_NAME}.caddy 2>&1 || true
@@ -23,12 +27,38 @@ else
     snapctl stop --disable ${SNAP_NAME}.caddy 2>&1 || true
 fi
 
-value=$(snapctl get disable-mongodb)
-if [ "$value" = "true" ]; then
+# Which database service runs. There is no `database` setting to read any more:
+# WeKan runs on FerretDB, MongoDB is here to be READ while a migration is owed,
+# and bin/database-role answers which of those is true from the data on disk.
+# Only one runs at a time; both bind the same port, so WeKan's MONGO_URL is
+# unchanged either way.
+#
+# An old install may still have `database` set from before it was removed. Say
+# that it is ignored rather than silently doing something else - somebody who set
+# it to mongodb meant it, and deserves to know their site is migrating.
+legacy_database=$(snapctl get database 2>/dev/null || true)
+if [ -n "$legacy_database" ]; then
+    echo "The 'database' setting has been removed (it was '$legacy_database'). WeKan runs on"
+    echo "FerretDB, and everything in MongoDB - text data, and CollectionFS and Meteor-Files"
+    echo "attachments - is migrated to it automatically. Nothing to do."
+    snapctl unset database 2>&1 || true
+fi
+disable_mongodb=$(snapctl get disable-mongodb)
+if [ "$(bash $SNAP/bin/database-role)" = "ferretdb" ]; then
     snapctl stop --disable ${SNAP_NAME}.mongodb 2>&1 || true
+    snapctl start --enable ${SNAP_NAME}.ferretdb 2>&1 || true
+    snapctl restart ${SNAP_NAME}.ferretdb 2>&1 || true
 else
-    snapctl start --enable ${SNAP_NAME}.mongodb 2>&1 || true
-    snapctl restart ${SNAP_NAME}.mongodb 2>&1 || true
+    # A migration is still owed: mongod holds the data and the port until it is
+    # done. disable-mongodb is for an EXTERNAL database, where there is nothing
+    # of ours to migrate, so it still wins.
+    snapctl stop --disable ${SNAP_NAME}.ferretdb 2>&1 || true
+    if [ "$disable_mongodb" = "true" ]; then
+        snapctl stop --disable ${SNAP_NAME}.mongodb 2>&1 || true
+    else
+        snapctl start --enable ${SNAP_NAME}.mongodb 2>&1 || true
+        snapctl restart ${SNAP_NAME}.mongodb 2>&1 || true
+    fi
 fi
 
 # restart all services

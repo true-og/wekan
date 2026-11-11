@@ -1,0 +1,120 @@
+'use strict';
+
+// Pure, Meteor-free helpers for the Admin Panel / Attachments / Backup feature.
+// Unit-tested in tests/backupPaths.test.cjs. Used by server/methods/backup.js.
+
+const path = require('path');
+const { isFilesRoot } = require('./filesRoot');
+
+// Resolve the files root from a writable-path base. WeKan's WRITABLE_PATH is
+// either the parent of "files" (docker/dev: /data -> /data/files) or already
+// ends in "files" (snap: $SNAP_COMMON/files -> unchanged). Handles both the '/'
+// and '\\' separator so a Windows path is not double-suffixed.
+function filesRootFrom(base) {
+  const b = base || '';
+  return isFilesRoot(b) ? b : path.join(b, 'files');
+}
+
+// Build the synced-cron schedule text for a saved backup schedule.
+//   daily   -> "at HH:MM" (Later rejects "every day at ...")
+//   weekly  -> "on <Day> at HH:MM"          (default Sunday)
+//   monthly -> "on the <N> day of the month at HH:MM"   (default 1)
+// Any other/absent frequency falls back to the daily form.
+function scheduleText(s) {
+  const settings = s || {};
+  const [hh, mm] = (settings.time || '04:00').split(':');
+  const at = `at ${hh}:${mm}`;
+  if (settings.frequency === 'weekly') return `on ${settings.dayOfWeek || 'Sunday'} ${at}`;
+  if (settings.frequency === 'monthly') return `on the ${settings.dayOfMonth || 1} day of the month ${at}`;
+  return at;
+}
+
+// ZipBleed: resolve a path for ONE entry of a restored backup archive, and refuse
+// any that escapes the directory it is supposed to land in.
+//
+// A zip entry carries its own path, chosen by whoever made the archive, and
+// `path.join()` RESOLVES `..` segments rather than rejecting them. So an entry named
+//
+//   2026-07-25_12-00-00/attachments/../../../../etc/cron.d/x
+//
+// passed the "is this under attachments/" check - its first segment really is
+// `attachments` - and then joined its way clean out of the files directory, writing
+// wherever the WeKan process could write. That is the classic zip-slip
+// (CWE-22 path traversal), and restoring a backup is exactly when you are least
+// inclined to inspect the file you were handed.
+//
+// The rule is the only one that holds: resolve the candidate to an absolute path and
+// require it to be the base directory itself or something beneath it. Comparing
+// against `base + sep` matters - a plain `startsWith(base)` also accepts a sibling
+// directory whose name merely begins with the same letters (`/data/files-evil`).
+//
+// Returns the absolute destination, or null when the entry must be skipped.
+function safeEntryPath(baseDir, segments) {
+  if (!baseDir) return null;
+  const parts = (Array.isArray(segments) ? segments : []).filter(
+    s => typeof s === 'string' && s !== '');
+  if (!parts.length) return null;
+  const base = path.resolve(baseDir);
+  // path.resolve also swallows an ABSOLUTE segment ('/etc/passwd' would discard the
+  // base entirely), which the containment check below catches as well.
+  const dest = path.resolve(base, ...parts);
+  if (dest === base) return null;
+  return dest.startsWith(base + path.sep) ? dest : null;
+}
+
+// The same problem for the data half of an archive: the entry names the Mongo
+// collection to restore into. Anything but a plain name is refused - `system.*`
+// collections are internal to the database and are excluded from backups in the
+// first place, and a name with a separator or a `$` in it is not a collection
+// WeKan ever writes.
+function safeCollectionName(name) {
+  return typeof name === 'string'
+    && /^[A-Za-z0-9_-]+$/.test(name)
+    && !name.startsWith('system')
+    ? name
+    : null;
+}
+
+const BACKUP_STORAGES = ['filesystem', 's3', 'azure', 'gcs'];
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+function validateBackupOptions(options, storage, allowEmpty = false) {
+  if (!options || ['attachments', 'avatars', 'data'].some(k => typeof options[k] !== 'boolean')) {
+    throw new Error('Backup selections must be booleans');
+  }
+  if (!allowEmpty && !options.attachments && !options.avatars && !options.data) throw new Error('Select backup content');
+  if (!BACKUP_STORAGES.includes(storage)) throw new Error('Unknown backup storage');
+}
+function validateBackupSchedule(schedule) {
+  if (!schedule || typeof schedule.enabled !== 'boolean'
+      || !['off', 'daily', 'weekly', 'monthly'].includes(schedule.frequency)
+      || !/^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/.test(schedule.time)
+      || !WEEKDAYS.includes(schedule.dayOfWeek)
+      || !Number.isInteger(schedule.dayOfMonth) || schedule.dayOfMonth < 1 || schedule.dayOfMonth > 28) {
+    throw new Error('Invalid backup schedule');
+  }
+  validateBackupOptions(schedule, schedule.storage, !schedule.enabled);
+  if (schedule.enabled === (schedule.frequency === 'off')) throw new Error('Inconsistent backup schedule');
+}
+
+// Is any existing path component between baseDir (exclusive) and dest
+// (inclusive) a symbolic link? safeEntryPath checks the NAME stays inside
+// baseDir, but a write through a symlink already there lands wherever it
+// points. server/lib/fullBackup.js refuses those; the attachment restore does
+// too. `fsImpl` is injectable for tests.
+function symlinkOnRestorePath(baseDir, dest, fsImpl = require('fs')) {
+  const base = path.resolve(baseDir);
+  const relative = path.relative(base, path.resolve(dest));
+  let current = base;
+  for (const segment of relative.split(path.sep)) {
+    current = path.join(current, segment);
+    try {
+      if (fsImpl.lstatSync(current).isSymbolicLink()) return true;
+    } catch (e) {
+      if (e.code === 'ENOENT') return false;
+      throw e;
+    }
+  }
+  return false;
+}
+
+module.exports = { filesRootFrom, scheduleText, safeEntryPath, symlinkOnRestorePath, safeCollectionName, validateBackupOptions, validateBackupSchedule };

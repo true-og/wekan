@@ -1,47 +1,73 @@
 'use strict';
+const { FIELD_KEYS: CARD_SHOWN_FIELD_KEYS } = require(require('path').join(__dirname, '../../../models/lib/cardShownFields'));
 
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
-const fs = require('fs');
 const path = require('path');
+const { EJSON } = require('bson');
 
 const MONGO_URL = process.env.WEKAN_MONGO_URL || 'mongodb://127.0.0.1:3001/meteor';
+const RUNNER = path.join(__dirname, 'mongo-runner.js');
 
-function mongoEval(script) {
-  const repoRoot = path.resolve(__dirname, '../../..');
-  const toolsDir = path.join(repoRoot, '.tools');
-  const playwrightBinDir = path.resolve(__dirname, '../node_modules/.bin');
-
-  const extraPaths = [
-    playwrightBinDir,
-    '/opt/homebrew/bin',
-    '/usr/local/bin',
-    toolsDir,
-  ];
-
-  // Flatpak sandbox uses repo-local toolchain, including mongosh under .tools.
-  if (fs.existsSync(toolsDir)) {
-    const toolsEntries = fs.readdirSync(toolsDir, { withFileTypes: true });
-    toolsEntries
-      .filter(entry => entry.isDirectory() && /^mongosh-/.test(entry.name))
-      .forEach(entry => {
-        extraPaths.push(path.join(toolsDir, entry.name, 'bin'));
-      });
-  }
-
-  const PATH = [...extraPaths, process.env.PATH || ''].join(':');
-  return execFileSync('mongosh', ['--quiet', MONGO_URL, '--eval', script], {
+// Run a list of structured MongoDB ops synchronously via the driver-based
+// subprocess runner (helpers/mongo-runner.js), returning the LAST op's result.
+// This replaces the old `mongosh --eval <shell script>` approach; the public
+// helper API stays synchronous so call sites need no `await`.
+function runOps(ops) {
+  const out = execFileSync(process.execPath, [RUNNER], {
+    // EJSON preserves Date / BSON types in the ops across the subprocess
+    // boundary; the runner writes them as real BSON Dates.
+    input: EJSON.stringify({ url: MONGO_URL, ops }),
     encoding: 'utf8',
-    env: { ...process.env, PATH },
+    maxBuffer: 64 * 1024 * 1024,
   }).trim();
+  // Results come back as plain JSON (Dates as ISO strings), matching the prior
+  // `mongosh --eval JSON.stringify(...)` round-trip the specs were written for.
+  return out ? JSON.parse(out) : null;
 }
 
-function literal(value) {
-  return JSON.stringify(value);
+// --- Generic collection helpers (used by specs for ad-hoc reads/writes) -------
+function findOne(collection, filter, projection) {
+  return runOps([{ collection, method: 'findOne', filter, projection }]);
+}
+function find(collection, filter, projection) {
+  return runOps([{ collection, method: 'find', filter, projection }]) || [];
+}
+function insertOne(collection, doc) {
+  return runOps([{ collection, method: 'insertOne', doc }]);
+}
+function insertMany(collection, docs) {
+  return runOps([{ collection, method: 'insertMany', docs }]);
+}
+function updateOne(collection, filter, update) {
+  return runOps([{ collection, method: 'updateOne', filter, update }]);
+}
+function updateMany(collection, filter, update) {
+  return runOps([{ collection, method: 'updateMany', filter, update }]);
+}
+function deleteOne(collection, filter) {
+  return runOps([{ collection, method: 'deleteOne', filter }]);
+}
+function deleteMany(collection, filter) {
+  return runOps([{ collection, method: 'deleteMany', filter }]);
+}
+function countDocuments(collection, filter) {
+  return runOps([{ collection, method: 'countDocuments', filter }]);
+}
+function collectionNames() {
+  return runOps([{ method: 'collectionNames' }]) || [];
 }
 
 function uid(prefix = 'e2e') {
   return `${prefix}${crypto.randomBytes(6).toString('hex')}`;
+}
+
+// A collision-resistant printable suffix for test usernames, emails and
+// markers. Keeping this in the database helper prevents every spec from
+// inventing a predictable Math.random-based identifier that security scanners
+// cannot distinguish from an authentication token.
+function uniqueSuffix() {
+  return `${Date.now()}${crypto.randomBytes(8).toString('hex')}`;
 }
 
 function createResumeToken() {
@@ -60,33 +86,62 @@ function seedUser(overrides = {}) {
   const email = `${username}@wekan-test.invalid`;
   const { raw, hashed } = createResumeToken();
   const isAdmin = overrides.isAdmin || false;
+  const now = new Date();
 
-  mongoEval(`
-    const now = new Date();
-    db.users.deleteOne({ _id: ${literal(id)} });
-    db.users.insertOne({
-      _id: ${literal(id)},
-      createdAt: now,
-      username: ${literal(username)},
-      emails: [{ address: ${literal(email)}, verified: true }],
-      isAdmin: ${isAdmin},
-      authenticationMethod: 'password',
-      profile: {
-        boardView: 'board-view-swimlanes',
-        fullname: 'E2E Test User',
-        listWidths: {}, listConstraints: {}, autoWidthBoards: {},
-        swimlaneHeights: {}, collapsedLists: {}, collapsedSwimlanes: {},
-        keyboardShortcuts: false, verticalScrollbars: true,
-        showWeekOfYear: true, dateFormat: 'YYYY-MM-DD',
-        zoomLevel: 1, mobileMode: false, cardZoom: 1, starredBoards: [],
+  runOps([
+    { collection: 'users', method: 'deleteOne', filter: { _id: id } },
+    {
+      collection: 'users',
+      method: 'insertOne',
+      doc: {
+        _id: id,
+        createdAt: now,
+        username,
+        emails: [{ address: email, verified: true }],
+        isAdmin,
+        authenticationMethod: 'password',
+        profile: {
+          boardView: 'board-view-swimlanes',
+          fullname: 'E2E Test User',
+          listWidths: {}, listConstraints: {}, autoWidthBoards: {},
+          swimlaneHeights: {}, collapsedLists: {}, collapsedSwimlanes: {},
+          keyboardShortcuts: false, verticalScrollbars: true,
+          showWeekOfYear: true, dateFormat: 'YYYY-MM-DD',
+          zoomLevel: 1, mobileMode: false, cardZoom: 1, starredBoards: [],
+        },
+        services: {
+          resume: { loginTokens: [{ when: now, hashedToken: hashed }] },
+        },
       },
-      services: {
-        resume: { loginTokens: [{ when: now, hashedToken: ${literal(hashed)} }] },
-      },
-    });
-  `);
+    },
+  ]);
 
   return { id, username, email, token: raw };
+}
+
+/**
+ * Add ANOTHER resume token to an existing user, and return the raw token.
+ *
+ * A seeded user has one token, and a browser session that logs out deletes it
+ * for every session that shares it - which is what Meteor's logout does, and
+ * what stranded the second page of the copy-link test:
+ *
+ *   Token login failed: You've been logged out by the server.
+ *
+ * A test that logs a SECOND page (or a second browser context) in takes its own
+ * token from here, the way two real browsers would each have their own.
+ */
+function addResumeToken(userId) {
+  const { raw, hashed } = createResumeToken();
+  runOps([
+    {
+      collection: 'users',
+      method: 'updateOne',
+      filter: { _id: userId },
+      update: { $push: { 'services.resume.loginTokens': { when: new Date(), hashedToken: hashed } } },
+    },
+  ]);
+  return raw;
 }
 
 /**
@@ -98,8 +153,9 @@ function seedBoard({ ownerId, title, listCount = 3, cardTitlesPerList = [] } = {
   const slug = `e2e-board-${boardId}`;
   const swimlaneId = uid('swim');
   const listIds = Array.from({ length: listCount }, () => uid('list'));
+  const now = new Date();
 
-  const listsJson = listIds.map((lid, i) => ({
+  const lists = listIds.map((lid, i) => ({
     _id: lid,
     title: `List ${String.fromCharCode(65 + i)}`,
     boardId,
@@ -110,6 +166,7 @@ function seedBoard({ ownerId, title, listCount = 3, cardTitlesPerList = [] } = {
     archived: false,
     wipLimit: { value: 1, enabled: false, soft: false },
     width: 272,
+    createdAt: now, updatedAt: now, modifiedAt: now,
   }));
 
   const cardDocs = [];
@@ -142,110 +199,343 @@ function seedBoard({ ownerId, title, listCount = 3, cardTitlesPerList = [] } = {
         vote: { question: '', positive: [], negative: [], end: null, public: false, allowNonBoardMembers: false },
         targetId_gantt: [], linkType_gantt: [], linkId_gantt: [],
         showActivities: false, showListOnMinicard: false, showChecklistAtMinicard: false,
+        // docs/Features/Cards/Card-Fields.md: an opened card shows only the
+        // fields it has data in. The specs written before open an empty card
+        // and fill in its date, members and labels, so a seeded card shows
+        // every field, as if each were ticked in "+ Add";
+        // card-add-fields.e2e.js clears this for the empty-card behaviour.
+        shownFields: CARD_SHOWN_FIELD_KEYS.slice(),
+        createdAt: now, modifiedAt: now, dateLastActivity: now,
       });
     });
   });
 
-  mongoEval(`
-    const now = new Date();
-    db.boards.deleteOne({ _id: ${literal(boardId)} });
-    db.swimlanes.deleteMany({ boardId: ${literal(boardId)} });
-    db.lists.deleteMany({ boardId: ${literal(boardId)} });
-    db.cards.deleteMany({ boardId: ${literal(boardId)} });
-
-    db.boards.insertOne({
-      _id: ${literal(boardId)},
-      title: ${literal(title || `E2E Board ${boardId}`)},
-      permission: 'private',
-      migrationVersion: 1,
-      slug: ${literal(slug)},
-      archived: false,
-      createdAt: now, modifiedAt: now,
-      stars: 0,
-      members: [{
-        userId: ${literal(ownerId)},
-        isAdmin: true, isActive: true, isNoComments: false,
-        isCommentOnly: false, isWorker: false, isReadOnly: false,
-        isReadAssignedOnly: false,
-      }],
-      color: 'belize',
-      allowsCardCounterList: false, allowsBoardMemberList: false,
-      subtasksDefaultBoardId: null, subtasksDefaultListId: null,
-      dateSettingsDefaultBoardId: null, dateSettingsDefaultListId: null,
-      allowsSubtasks: true, allowsAttachments: true, allowsChecklists: true,
-      allowsComments: true, allowsDescriptionTitle: true,
-      allowsDescriptionText: true, allowsDescriptionTextOnMinicard: false,
-      allowsCoverAttachmentOnMinicard: true, allowsBadgeAttachmentOnMinicard: false,
-      allowsCardSortingByNumberOnMinicard: false, allowsCardNumber: false,
-      allowsActivities: true, allowsLabels: true, allowsCreator: true,
-      allowsCreatorOnMinicard: false, allowsAssignee: true,
-      allowsMembers: true, allowsRequestedBy: true,
-      allowsCardSortingByNumber: true, allowsShowLists: true,
-      allowsAssignedBy: true, allowsShowListsOnMinicard: false,
-      allowsChecklistAtMinicard: false, allowsReceivedDate: true,
-      allowsStartDate: true, allowsEndDate: true, allowsDueDate: true,
-      presentParentTask: 'no-parent', isOvertime: false,
-      type: 'board', sort: -1, showActivities: false,
-    });
-
-    db.swimlanes.insertOne({
-      _id: ${literal(swimlaneId)},
-      title: 'Default', boardId: ${literal(boardId)},
-      archived: false, createdAt: now, updatedAt: now, modifiedAt: now,
-      type: 'swimlane', height: -1, sort: 0,
-    });
-
-    const _seedLists = ${JSON.stringify(listsJson)}.map(l => Object.assign(l, { createdAt: now, updatedAt: now, modifiedAt: now }));
-    if (_seedLists.length > 0) {
-      db.lists.insertMany(_seedLists);
-    }
-
-    ${cardDocs.length ? `db.cards.insertMany(${JSON.stringify(cardDocs)}.map(c => Object.assign(c, { createdAt: now, modifiedAt: now, dateLastActivity: now })));` : ''}
-  `);
+  runOps([
+    { collection: 'boards', method: 'deleteOne', filter: { _id: boardId } },
+    { collection: 'swimlanes', method: 'deleteMany', filter: { boardId } },
+    { collection: 'lists', method: 'deleteMany', filter: { boardId } },
+    { collection: 'cards', method: 'deleteMany', filter: { boardId } },
+    {
+      collection: 'boards',
+      method: 'insertOne',
+      doc: {
+        _id: boardId,
+        title: title || `E2E Board ${boardId}`,
+        permission: 'private',
+        migrationVersion: 1,
+        slug,
+        archived: false,
+        createdAt: now, modifiedAt: now,
+        stars: 0,
+        members: [{
+          userId: ownerId,
+          isAdmin: true, isActive: true, isNoComments: false,
+          isCommentOnly: false, isWorker: false, isReadOnly: false,
+          isReadAssignedOnly: false,
+        }],
+        color: 'belize',
+        allowsCardCounterList: false, allowsBoardMemberList: false,
+        subtasksDefaultBoardId: null, subtasksDefaultListId: null,
+        dateSettingsDefaultBoardId: null, dateSettingsDefaultListId: null,
+        allowsSubtasks: true, allowsAttachments: true, allowsChecklists: true,
+        // Direct Mongo inserts bypass schema defaults. Match the enabled
+        // card sections of a board created through the application.
+        allowsStickers: true, allowsStickersOnMinicard: true,
+        allowsLocation: true, allowsDependencies: true,
+        allowsDependenciesOnMinicard: true,
+        allowsVote: true, allowsVoteOnMinicard: true,
+        allowsPoker: true, allowsPokerOnMinicard: true,
+        allowsFlowtime: true, allowsPomodoro: true, allowsTextNotes: true,
+        allowsCommentCountOnMinicard: true,
+        allowsComments: true, allowsDescriptionTitle: true,
+        allowsDescriptionText: true, allowsDescriptionTextOnMinicard: false,
+        allowsCoverAttachmentOnMinicard: true, allowsBadgeAttachmentOnMinicard: false,
+        allowsCardSortingByNumberOnMinicard: false, allowsCardNumber: false,
+        allowsActivities: true, allowsLabels: true, allowsCreator: true,
+        allowsCreatorOnMinicard: false, allowsAssignee: true,
+        allowsMembers: true, allowsRequestedBy: true,
+        allowsCardSortingByNumber: true, allowsShowLists: true,
+        allowsAssignedBy: true, allowsShowListsOnMinicard: false,
+        allowsChecklistAtMinicard: false, allowsReceivedDate: true,
+        allowsStartDate: true, allowsEndDate: true, allowsDueDate: true,
+        presentParentTask: 'no-parent', isOvertime: false,
+        type: 'board', sort: -1, showActivities: false,
+        // (No "Show empty fields" any more: since 2026-10-28 every opened card
+        // shows every field its board shows, empty or not -
+        // docs/Features/Cards/Card-Fields.md.)
+      },
+    },
+    {
+      collection: 'swimlanes',
+      method: 'insertOne',
+      doc: {
+        _id: swimlaneId,
+        title: 'Default', boardId,
+        archived: false, createdAt: now, updatedAt: now, modifiedAt: now,
+        type: 'swimlane', height: -1, sort: 0,
+      },
+    },
+    { collection: 'lists', method: 'insertMany', docs: lists },
+    { collection: 'cards', method: 'insertMany', docs: cardDocs },
+  ]);
 
   return { boardId, slug, swimlaneId, listIds };
 }
 
+/**
+ * Set a seeded user's orgs / teams / email address so they can be grouped in
+ * the Admin Panel "Shared templates" tab. Each org is { orgId, orgDisplayName },
+ * each team is { teamId, teamDisplayName }. If `email` is given it replaces the
+ * user's first email address (the domain is the part after '@').
+ */
+function setUserGroups({ userId, orgs = [], teams = [], email } = {}) {
+  const ops = [
+    { collection: 'users', method: 'updateOne', filter: { _id: userId }, update: { $set: { orgs, teams } } },
+  ];
+  if (email) {
+    ops.push({
+      collection: 'users', method: 'updateOne', filter: { _id: userId },
+      update: { $set: { 'emails.0.address': email, 'emails.0.verified': true } },
+    });
+  }
+  runOps(ops);
+}
+
+/**
+ * Seed a user's Templates container board (type 'template-container') with a
+ * "Board Templates" swimlane, and optionally one or more shared template boards.
+ *
+ * Mirrors how the app stores template boards (see server/models/users.js
+ * Users.after.insert and client/components/lists/listBody.js):
+ *   - The container board (type 'template-container') id is stored on the user
+ *     at profile.templatesBoardId.
+ *   - The "Board Templates" swimlane id is stored at
+ *     profile.boardTemplatesSwimlaneId.
+ *   - Each shared template board is a card (type 'cardType-linkedBoard') in that
+ *     swimlane whose linkedId points at an actual board (type 'template-board').
+ *
+ * `templateTitles` is an array of strings (one per shared template board).
+ * Pass [] to create an EMPTY Templates board (no shared templates).
+ * Returns the ids created.
+ */
+function seedTemplatesBoard({ ownerId, templateTitles = [] } = {}) {
+  const containerId = uid('tmplcontainer');
+  const swimlaneId = uid('tmplswim');
+  const listId = uid('tmpllist');
+  const now = new Date();
+
+  const templateBoards = templateTitles.map(title => ({
+    cardId: uid('tmplcard'),
+    linkedBoardId: uid('tmplboard'),
+    title,
+    slug: `e2e-tmpl-${uid('s')}`,
+  }));
+
+  const member = {
+    isAdmin: true, isActive: true, isNoComments: false,
+    isCommentOnly: false, isWorker: false, isReadOnly: false,
+    isReadAssignedOnly: false,
+  };
+
+  const ops = [
+    { collection: 'boards', method: 'deleteOne', filter: { _id: containerId } },
+    { collection: 'swimlanes', method: 'deleteMany', filter: { boardId: containerId } },
+    { collection: 'lists', method: 'deleteMany', filter: { boardId: containerId } },
+    { collection: 'cards', method: 'deleteMany', filter: { boardId: containerId } },
+    {
+      collection: 'boards', method: 'insertOne',
+      doc: {
+        _id: containerId,
+        title: 'Templates',
+        permission: 'private',
+        type: 'template-container',
+        slug: `templates-${containerId}`,
+        archived: false,
+        createdAt: now, modifiedAt: now,
+        stars: 0,
+        members: [{ userId: ownerId, ...member }],
+        color: 'belize', sort: -1,
+      },
+    },
+    {
+      collection: 'swimlanes', method: 'insertOne',
+      doc: {
+        _id: swimlaneId,
+        title: 'Board Templates', boardId: containerId,
+        type: 'template-container',
+        archived: false, createdAt: now, updatedAt: now, modifiedAt: now,
+        height: -1, sort: 3,
+      },
+    },
+    {
+      collection: 'lists', method: 'insertOne',
+      doc: {
+        _id: listId,
+        title: 'Templates', boardId: containerId,
+        type: 'list', swimlaneId,
+        archived: false, sort: 1, createdAt: now, updatedAt: now, modifiedAt: now,
+        starred: false, width: 272, wipLimit: { value: 1, enabled: false, soft: false },
+      },
+    },
+    {
+      collection: 'users', method: 'updateOne', filter: { _id: ownerId },
+      update: { $set: {
+        'profile.templatesBoardId': containerId,
+        'profile.boardTemplatesSwimlaneId': swimlaneId,
+      } },
+    },
+  ];
+
+  if (templateBoards.length > 0) {
+    ops.push({
+      collection: 'boards', method: 'insertMany',
+      docs: templateBoards.map((t, i) => ({
+        _id: t.linkedBoardId,
+        title: t.title,
+        permission: 'private',
+        type: 'template-board',
+        slug: t.slug,
+        archived: false,
+        createdAt: now, modifiedAt: now, stars: 0,
+        members: [{ userId: ownerId, ...member }],
+        color: 'belize', sort: i,
+      })),
+    });
+    ops.push({
+      collection: 'cards', method: 'insertMany',
+      docs: templateBoards.map((t, i) => ({
+        _id: t.cardId,
+        title: t.title,
+        type: 'cardType-linkedBoard',
+        linkedId: t.linkedBoardId,
+        boardId: containerId,
+        swimlaneId,
+        listId,
+        members: [], assignees: [], labelIds: [], customFields: [],
+        cardNumber: i + 1, archived: false, parentId: '', coverId: '',
+        description: '', sort: i, subtaskSort: -1,
+        userId: ownerId,
+        createdAt: now, modifiedAt: now, dateLastActivity: now,
+      })),
+    });
+  }
+
+  runOps(ops);
+
+  return { containerId, swimlaneId, listId, templateBoards };
+}
+
+/** Return the _id of the first non-archived card on a board with the given title. */
+function findCardIdByTitle({ boardId, title } = {}) {
+  const c = findOne('cards', { boardId, title, archived: false }, { _id: 1 });
+  return (c && c._id) || null;
+}
+
+/**
+ * Set a card's cardDependencies (#3392 "Red Strings"). `dependsOn` is an array
+ * of either target card ids (strings) or { cardId, type, color, icon } objects;
+ * strings are expanded to objects with default type/color/icon.
+ */
+function setCardDependencies({ cardId, dependsOn = [] } = {}) {
+  const deps = dependsOn.map(dep =>
+    typeof dep === 'string'
+      ? { cardId: dep, type: 'related-to', color: '#eb144c', icon: 'link' }
+      : {
+          cardId: dep.cardId,
+          type: dep.type || 'related-to',
+          color: dep.color || '#eb144c',
+          icon: dep.icon || 'link',
+        },
+  );
+  updateOne('cards', { _id: cardId }, { $set: { cardDependencies: deps } });
+}
+
+/**
+ * #6732: showing dependencies is each user's own choice. Set the Show Board /
+ * Show My Dependencies switches for the given users, or for every member of
+ * `boardId`. A switch left undefined is not changed.
+ */
+function setShowDependencies({ userIds, boardId, board, mine } = {}) {
+  const ids = userIds || (findOne('boards', { _id: boardId }, { members: 1 }).members || []).map(m => m.userId);
+  const set = {};
+  if (board !== undefined) set['profile.showBoardDependencies'] = !!board;
+  if (mine !== undefined) set['profile.showMyDependencies'] = !!mine;
+  for (const _id of ids) updateOne('users', { _id }, { $set: set });
+}
+
 /** Add a second user as a member of an existing board. */
 function addBoardMember({ boardId, userId, isAdmin = false }) {
-  mongoEval(`
-    db.boards.updateOne(
-      { _id: ${literal(boardId)} },
-      { $push: { members: {
-        userId: ${literal(userId)},
-        isAdmin: ${isAdmin}, isActive: true, isNoComments: false,
-        isCommentOnly: false, isWorker: false, isReadOnly: false, isReadAssignedOnly: false,
-      } } }
-    );
-  `);
+  updateOne('boards', { _id: boardId }, { $push: { members: {
+    userId,
+    isAdmin, isActive: true, isNoComments: false,
+    isCommentOnly: false, isWorker: false, isReadOnly: false, isReadAssignedOnly: false,
+  } } });
 }
 
 /** Delete all data for the given board and user IDs. */
 function cleanup({ boardIds = [], userIds = [] } = {}) {
   for (const boardId of boardIds) {
-    mongoEval(`
-      db.cards.deleteMany({ boardId: ${literal(boardId)} });
-      db.lists.deleteMany({ boardId: ${literal(boardId)} });
-      db.swimlanes.deleteMany({ boardId: ${literal(boardId)} });
-      db.boards.deleteOne({ _id: ${literal(boardId)} });
-      db.activities.deleteMany({ boardId: ${literal(boardId)} });
-    `);
+    runOps([
+      { collection: 'attachments', method: 'deleteMany', filter: { 'meta.boardId': boardId } },
+      { collection: 'cards', method: 'deleteMany', filter: { boardId } },
+      { collection: 'savedCardFilters', method: 'deleteMany', filter: { boardId } },
+      { collection: 'lists', method: 'deleteMany', filter: { boardId } },
+      { collection: 'swimlanes', method: 'deleteMany', filter: { boardId } },
+      { collection: 'boards', method: 'deleteOne', filter: { _id: boardId } },
+      { collection: 'activities', method: 'deleteMany', filter: { boardId } },
+      { collection: 'rules', method: 'deleteMany', filter: { boardId } },
+      { collection: 'triggers', method: 'deleteMany', filter: { boardId } },
+      { collection: 'actions', method: 'deleteMany', filter: { boardId } },
+    ]);
   }
   for (const userId of userIds) {
-    mongoEval(`db.users.deleteOne({ _id: ${literal(userId)} });`);
+    // Also remove any Templates container board (and its template boards/cards)
+    // that may have been seeded for this user via seedTemplatesBoard.
+    const u = findOne('users', { _id: userId }, { 'profile.templatesBoardId': 1 });
+    const tb = u && u.profile && u.profile.templatesBoardId;
+    if (tb) {
+      const linked = find('cards', { boardId: tb, type: 'cardType-linkedBoard' }, { linkedId: 1 });
+      const linkedIds = linked.map(c => c.linkedId).filter(Boolean);
+      const ops = [];
+      if (linkedIds.length) ops.push({ collection: 'boards', method: 'deleteMany', filter: { _id: { $in: linkedIds } } });
+      ops.push({ collection: 'cards', method: 'deleteMany', filter: { boardId: tb } });
+      ops.push({ collection: 'lists', method: 'deleteMany', filter: { boardId: tb } });
+      ops.push({ collection: 'swimlanes', method: 'deleteMany', filter: { boardId: tb } });
+      ops.push({ collection: 'boards', method: 'deleteOne', filter: { _id: tb } });
+      runOps(ops);
+    }
+    deleteOne('users', { _id: userId });
   }
 }
 
 /** Look up a card document directly from MongoDB. */
 function getCard(cardId) {
-  const raw = mongoEval(`JSON.stringify(db.cards.findOne({ _id: ${literal(cardId)} }))`);
-  try { return JSON.parse(raw); } catch { return null; }
+  return findOne('cards', { _id: cardId });
 }
 
 /** Look up a board document directly from MongoDB. */
 function getBoard(boardId) {
-  const raw = mongoEval(`JSON.stringify(db.boards.findOne({ _id: ${literal(boardId)} }))`);
-  try { return JSON.parse(raw); } catch { return null; }
+  return findOne('boards', { _id: boardId });
 }
 
-module.exports = { seedUser, seedBoard, addBoardMember, cleanup, getCard, getBoard, mongoEval, literal };
+// A Scrum snapshot's rows, wherever they are kept: inline in an older
+// snapshot, or in scrumSnapshotRows chunks (server/lib/scrumSnapshotStore.js).
+// `kind` is 'start', 'close' or 'daily'.
+function scrumSnapshotCards(snapshot, sprintId, kind) {
+  if (!snapshot) return [];
+  if (snapshot.stored !== 'rows') return snapshot.cards || [];
+  const at = new Date(snapshot.at).getTime();
+  return find('scrumSnapshotRows', { sprintId, kind }).filter(chunk => new Date(chunk.at).getTime() === at)
+    .sort((a, b) => a.chunk - b.chunk).flatMap(chunk => chunk.rows);
+}
+
+module.exports = {
+  scrumSnapshotCards,
+  seedUser, seedBoard, addBoardMember, setUserGroups, seedTemplatesBoard,
+  findCardIdByTitle, setCardDependencies, setShowDependencies, cleanup,
+  addResumeToken,
+  getCard, getBoard, uid, uniqueSuffix,
+  // generic collection helpers (replace ad-hoc mongosh `mongoEval` scripts)
+  find, findOne, insertOne, insertMany, updateOne, updateMany, deleteOne,
+  deleteMany, countDocuments, collectionNames, runOps,
+};

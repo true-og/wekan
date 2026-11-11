@@ -1,9 +1,12 @@
+import { membersMode, membersMappingFor } from '/models/lib/importMembersMode';
+const { trelloCardShortLink, resolveTrelloCardAttachments } = require('/models/lib/attachedCards');
 import { Meteor } from 'meteor/meteor';
 import { ReactiveCache } from '/imports/reactiveCache';
 import { TAPi18n } from '/imports/i18n';
 import Activities from '/models/activities';
 import Attachments from '/models/attachments';
 import Boards from '/models/boards';
+import { boardPermissionUnderPolicy } from '/server/lib/boardVisibilityPolicy';
 import Users from '/models/users';
 import { generateUniversalAttachmentUrl } from '/models/lib/universalUrlGenerator';
 import { BOARD_COLORS, CARD_COLORS } from '/models/metadata/colors';
@@ -15,6 +18,7 @@ import Checklists from '/models/checklists';
 import CustomFields from './customFields';
 import Lists from '/models/lists';
 import Swimlanes from '/models/swimlanes';
+const { swimlaneFromLabelName, swimlanesFromTrelloBoard } = require('/models/lib/trelloExportPlan');
 import {
   formatDateTime,
   formatDate,
@@ -36,7 +40,10 @@ import {
   calendar
 } from '/imports/lib/dateUtils';
 import getSlug from 'limax';
-import { validateAttachmentUrl } from './lib/attachmentUrlValidation';
+import { fetchImportedAttachment } from './lib/importAttachmentDownload';
+import { recordImportLosses } from '/models/lib/importedCardChildren';
+const { trelloScrumLosses } = require('./lib/externalScrumPlanning');
+import { plannedBoardFields, runImportPipeline, writeImportedEntity } from './lib/importPipeline';
 
 const DateString = Match.Where(function(dateAsString) {
   check(dateAsString, String);
@@ -65,10 +72,18 @@ export class TrelloCreator {
     this.labels = {};
     // Default swimlane
     this.swimlane = null;
+    // Trello labels that stand for a WeKan swimlane (a board exported by
+    // server/trelloApiExport.js, or one arranged the same way by hand): Trello
+    // label id -> swimlane title, and swimlane title -> WeKan swimlane id.
+    this.swimlaneLabels = {};
+    this.swimlanesByTitle = {};
     // Map of lists Trello ID => Wekan ID
     this.lists = {};
     // Map of cards Trello ID => Wekan ID
     this.cards = {};
+    // #3257: Trello card attachments - a card attached to a card - waiting for
+    // every card to exist: [{ cardId (WeKan), shortLink, url }].
+    this.pendingCardAttachments = [];
     // Map of attachments Wekan ID => Wekan ID
     this.attachmentIds = {};
     // Map of checklists Wekan ID => Wekan ID
@@ -76,7 +91,10 @@ export class TrelloCreator {
     // The comments, indexed by Trello card id (to map when importing cards)
     this.comments = {};
     // the members, indexed by Trello member id => Wekan user ID
-    this.members = data.membersMapping ? data.membersMapping : {};
+    // Who the file's people become - chosen users, placeholders, or the
+    // person importing - the same for every source (models/lib/importMembersMode.js).
+    this.membersMode = membersMode(data);
+    this.members = membersMappingFor(data, () => Meteor.userId());
 
     // maps a trelloCardId to an array of trelloAttachments
     this.attachments = {};
@@ -203,6 +221,7 @@ export class TrelloCreator {
     }
 
     const boardToCreate = {
+      ...plannedBoardFields(this),
       archived: trelloBoard.closed,
       color: color,
       // very old boards won't have a creation activity so no creation date
@@ -270,6 +289,12 @@ export class TrelloCreator {
     }
     if (trelloBoard.labels) {
       trelloBoard.labels.forEach(label => {
+        // A marked label is a swimlane, not a label (createSwimlanes).
+        const swimlaneTitle = swimlaneFromLabelName(label.name);
+        if (swimlaneTitle) {
+          this.swimlaneLabels[label.id] = swimlaneTitle;
+          return;
+        }
         const labelToCreate = {
           _id: Random.id(6),
           color: this.mapToWekanColor(label.color) || 'black',
@@ -281,9 +306,20 @@ export class TrelloCreator {
         boardToCreate.labels.push(labelToCreate);
       });
     }
-    const boardId = await Boards.direct.insertAsync(boardToCreate);
+    boardToCreate.permission = await boardPermissionUnderPolicy(boardToCreate.permission);
+    const boardId = await writeImportedEntity(Boards, boardToCreate);
     await Boards.direct.updateAsync(boardId, { $set: { modifiedAt: this._now() } });
     // log activity
+    if (trelloBoard.url && !/^https?:\/\//i.test(String(trelloBoard.url))) {
+      // SourceBleed: an export whose board URL is not http(s) - javascript:
+      // and the like - is what that attack imports. Dropped below; noted here.
+      try {
+        require('/server/lib/securityLog').record({
+          key: 'xss.source', action: 'detected', source: 'import:trello-source-url',
+          detail: `Imported Trello board URL with scheme ${String(trelloBoard.url).slice(0, 12)}... dropped.`,
+        });
+      } catch (e) { /* logging must never break the guard */ }
+    }
     await Activities.direct.insertAsync({
       activityType: 'importBoard',
       boardId,
@@ -291,7 +327,12 @@ export class TrelloCreator {
       source: {
         id: trelloBoard.id,
         system: 'Trello',
-        url: trelloBoard.url,
+        // XSS fix (reported by meifukun): only persist an http(s) source URL.
+        // trelloBoard.url is attacker-controlled (a javascript: URL in the
+        // imported board), and the activity sidebar renders it as a link — so a
+        // hostile scheme must never reach the database (defence in depth with the
+        // render-time scheme check in activities.js).
+        url: /^https?:\/\//i.test(String(trelloBoard.url || '')) ? trelloBoard.url : undefined,
       },
       // We attribute the import to current user,
       // not the author from the original object.
@@ -371,7 +412,7 @@ export class TrelloCreator {
   }
 
   /**
-   * Create the Wekan cards corresponding to the supplied Trello cards,
+   * Create the WeKan cards corresponding to the supplied Trello cards,
    * as well as all linked data: activities, comments, and attachments
    * @param trelloCards
    * @param boardId
@@ -394,7 +435,7 @@ export class TrelloCreator {
         dateLastActivity: this._now(),
         description: card.desc,
         listId: this.lists[card.idList],
-        swimlaneId: this.swimlane,
+        swimlaneId: this.cardSwimlane(card),
         sort: card.pos,
         title: card.name,
         // we attribute the card to its creator if available
@@ -445,9 +486,10 @@ export class TrelloCreator {
       }
       // add labels
       if (card.idLabels) {
-        cardToCreate.labelIds = card.idLabels.map(trelloId => {
-          return this.labels[trelloId];
-        });
+        // Swimlane labels are not WeKan labels and have no mapping here.
+        cardToCreate.labelIds = card.idLabels
+          .map(trelloId => this.labels[trelloId])
+          .filter(Boolean);
       }
       // add members {
       if (card.idMembers) {
@@ -514,7 +556,7 @@ export class TrelloCreator {
       }
 
       // insert card
-      const cardId = await Cards.direct.insertAsync(cardToCreate);
+      const cardId = await writeImportedEntity(Cards, cardToCreate);
       // keep track of Trello id => Wekan id
       this.cards[card.id] = cardId;
       // log activity
@@ -547,7 +589,7 @@ export class TrelloCreator {
           };
           // dateLastActivity will be set from activity insert, no need to
           // update it ourselves
-          const commentId = await CardComments.direct.insertAsync(commentToCreate);
+          const commentId = await writeImportedEntity(CardComments, commentToCreate);
           // We need to keep adding comment activities this way with Trello
           // because it doesn't provide a comment ID
           await Activities.direct.insertAsync({
@@ -580,6 +622,12 @@ export class TrelloCreator {
           type: raw.mimeType || raw.type || undefined,
           userId: raw.idMemberCreator || raw.userId,
           file: raw.file,
+          // A .zip import points the attachment at its zip entry, and gives its
+          // size, on the raw object (server/routes/importTrelloZip.js); leaving
+          // them out here made every zip attachment fall back to downloading
+          // its Trello URL, which needs Trello's own login, so none arrived.
+          zipEntryKey: raw.zipEntryKey,
+          bytes: raw.bytes,
         };
         const existing = attachmentsById.get(id);
         if (existing) {
@@ -588,6 +636,8 @@ export class TrelloCreator {
           if (!existing.file && norm.file) existing.file = norm.file;
           if (!existing.url && norm.url) existing.url = norm.url;
           if (!existing.type && norm.type) existing.type = norm.type;
+          if (!existing.zipEntryKey && norm.zipEntryKey) existing.zipEntryKey = norm.zipEntryKey;
+          if (!existing.bytes && norm.bytes) existing.bytes = norm.bytes;
           return;
         }
         attachmentsById.set(id, norm);
@@ -605,6 +655,15 @@ export class TrelloCreator {
         // card description below, instead of trying to download them.
         const links = [];
         for (const att of mergedAttachments) {
+          // #3257: a card attached to this card is a link to a Trello card.
+          // It becomes the WeKan card made from the same export once every
+          // card exists (end of createCards); one of another board stays a
+          // link in the description.
+          const shortLink = !att.file && !att.zipEntryKey ? trelloCardShortLink(att.url) : null;
+          if (shortLink) {
+            this.pendingCardAttachments.push({ cardId, shortLink, url: att.url });
+            continue;
+          }
           // attached link, not a file
           if (att.name && att.name === att.url) {
             links.push(att.url);
@@ -621,7 +680,21 @@ export class TrelloCreator {
             }
           };
           try {
-            if (att.file) {
+            // The uploaded .zip's files are streamed into storage as they are
+            // read (server/routes/importTrelloZip.js sets attachmentStream),
+            // whatever their size, within only the Admin Panel's upload limit.
+            const stream = !att.file && this.attachmentStream ? this.attachmentStream(att) : null;
+            if (stream) {
+              const { writeImportedAttachment } = require('/server/lib/importAttachmentStream');
+              const fileRef = await writeImportedAttachment(stream, {
+                fileName: att.fileName || att.name || 'attachment',
+                type: att.type,
+                userId: this._user(att.userId),
+                meta,
+                declaredSize: att.bytes,
+              });
+              await setCover(fileRef && fileRef._id);
+            } else if (att.file) {
               // Bytes already provided from the uploaded attachments ZIP.
               // Insert them directly instead of downloading the
               // OAuth-protected Trello URL. writeAsync is the server-side
@@ -639,12 +712,24 @@ export class TrelloCreator {
               );
               await setCover(fileRef && fileRef._id);
             } else if (att.url) {
-              const validation = await validateAttachmentUrl(att.url);
-              if (!validation.valid) {
+              // Best effort: works for publicly reachable URLs. Trello-hosted
+              // uploads require OAuth and should instead be supplied via the
+              // attachments ZIP (offline) or downloaded server-side in the
+              // live Trello API import.
+              //
+              // FollowBleed (GHSA-j9p2-jm73-p549): the download is NOT
+              // Attachments.loadAsync() any more. Meteor-Files fetches with the
+              // platform fetch(), which follows redirects, so validating att.url
+              // and then handing it to loadAsync let a public URL 302 the
+              // download to 127.0.0.1 and stored that body as the attachment.
+              // fetchImportedAttachment validates every hop and hands back the
+              // bytes, which are stored exactly like inline ones above.
+              const downloaded = await fetchImportedAttachment(att.url);
+              if (downloaded.blocked) {
                 if (process.env.DEBUG === 'true') {
                   console.warn(
                     'Blocked attachment URL during Trello import:',
-                    validation.reason,
+                    downloaded.reason,
                     att.url,
                   );
                 }
@@ -652,13 +737,14 @@ export class TrelloCreator {
                 // whole import.
                 continue;
               }
-              // Best effort: works for publicly reachable URLs. Trello-hosted
-              // uploads require OAuth and should instead be supplied via the
-              // attachments ZIP (offline) or downloaded server-side in the
-              // live Trello API import.
-              const fileRef = await Attachments.loadAsync(
-                att.url,
-                { meta, fileName: att.fileName || att.name },
+              const fileRef = await Attachments.writeAsync(
+                downloaded.buffer,
+                {
+                  fileName: att.fileName || att.name || 'attachment',
+                  type: att.type || downloaded.type || 'application/octet-stream',
+                  userId: this._user(att.userId),
+                  meta,
+                },
                 true,
               );
               await setCover(fileRef && fileRef._id);
@@ -693,7 +779,31 @@ export class TrelloCreator {
       }
       result.push(cardId);
     }
+    await this.attachImportedCards(trelloCards);
     return result;
+  }
+
+  // #3257: each Trello card attachment to a card of this export becomes an
+  // attached card; any other stays a link in the card's description, as an
+  // attached link always did.
+  async attachImportedCards(trelloCards) {
+    const { attach, unresolved } = resolveTrelloCardAttachments(trelloCards, this.cards, this.pendingCardAttachments);
+    for (const [cardId, ids] of Object.entries(attach)) {
+      await Cards.direct.updateAsync(cardId, { $set: { attachedCardIds: ids } });
+    }
+    const byCard = new Map();
+    for (const { cardId, url } of unresolved) byCard.set(cardId, [...(byCard.get(cardId) || []), url]);
+    for (const [cardId, urls] of byCard) {
+      const card = await Cards.findOneAsync(cardId, { fields: { description: 1 } });
+      const heading = `## ${TAPi18n.__('links-heading')}`;
+      let desc = ((card && card.description) || '').trim();
+      // Under the card's links heading when its other links made one.
+      if (desc.includes(heading)) desc += '\n';
+      else desc += `${desc ? '\n\n' : ''}${heading}\n`;
+      desc += urls.map(url => `* ${url}\n`).join('');
+      await Cards.direct.updateAsync(cardId, { $set: { description: desc } });
+    }
+    this.pendingCardAttachments = [];
   }
 
   // Create labels if they do not exist and load this.labels.
@@ -719,8 +829,10 @@ export class TrelloCreator {
         // Attach the list to the imported board's default swimlane so it shows
         // in Swimlane View (a list appears under a swimlane only when its
         // swimlaneId matches that swimlane or is empty). createSwimlanes runs
-        // before createLists, so this.swimlane is set.
-        swimlaneId: this.swimlane,
+        // before createLists, so this.swimlane is set. With swimlanes from
+        // marked labels the list is in EVERY swimlane, which an empty
+        // swimlaneId means.
+        swimlaneId: this.multipleSwimlanes ? '' : this.swimlane,
         // We are being defensing here by providing a default date (now) if the
         // creation date wasn't found on the action log. This happen on old
         // Trello boards (eg from 2013) that didn't log the 'createList' action
@@ -729,41 +841,45 @@ export class TrelloCreator {
         title: list.name,
         sort: list.pos,
       };
-      const listId = await Lists.direct.insertAsync(listToCreate);
-      await Lists.direct.updateAsync(listId, { $set: { updatedAt: this._now() } });
-      this.lists[list.id] = listId;
-      // log activity
-      // Activities.direct.insert({
-      //   activityType: 'importList',
-      //   boardId,
-      //   createdAt: this._now(),
-      //   listId,
-      //   source: {
-      //     id: list.id,
-      //     system: 'Trello',
-      //   },
-      //   // We attribute the import to current user,
-      //   // not the creator of the original object
-      //   userId: this._user(),
-      // });
+      await writeImportedEntity(Lists, listToCreate, {
+        ids: this.lists,
+        sourceId: list.id,
+        touch: { updatedAt: this._now() },
+      });
     }
   }
 
-  async createSwimlanes(boardId) {
-    const swimlaneToCreate = {
-      archived: false,
-      boardId,
-      // We are being defensing here by providing a default date (now) if the
-      // creation date wasn't found on the action log. This happen on old
-      // Wekan boards (eg from 2013) that didn't log the 'createList' action
-      // we require.
-      createdAt: this._now(),
-      title: 'Default',
-      sort: 1,
-    };
-    const swimlaneId = await Swimlanes.direct.insertAsync(swimlaneToCreate);
-    await Swimlanes.direct.updateAsync(swimlaneId, { $set: { updatedAt: this._now() } });
-    this.swimlane = swimlaneId;
+  // One swimlane per marked label, in the labels' order, so a board exported
+  // to Trello comes back with its swimlanes; plus 'Default' for cards with no
+  // such label, as before. models/lib/trelloExportPlan.js
+  // swimlanesFromTrelloBoard decides; this only writes them.
+  async createSwimlanes(board, boardId) {
+    const plan = swimlanesFromTrelloBoard(board);
+    this.swimlanePlan = plan;
+    this.multipleSwimlanes = plan.titles.length > 1;
+    for (const [index, title] of plan.titles.entries()) {
+      const swimlaneToCreate = {
+        archived: false,
+        boardId,
+        // We are being defensing here by providing a default date (now) if the
+        // creation date wasn't found on the action log. This happen on old
+        // Wekan boards (eg from 2013) that didn't log the 'createList' action
+        // we require.
+        createdAt: this._now(),
+        title,
+        sort: index + 1,
+      };
+      const swimlaneId = await writeImportedEntity(Swimlanes, swimlaneToCreate, {
+        touch: { updatedAt: this._now() },
+      });
+      this.swimlanesByTitle[title] = swimlaneId;
+      if (index === 0) this.swimlane = swimlaneId;
+    }
+  }
+
+  cardSwimlane(card) {
+    const title = this.swimlanePlan ? this.swimlanePlan.titleForCard(card) : 'Default';
+    return this.swimlanesByTitle[title] || this.swimlane;
   }
 
   async createChecklists(trelloChecklists, boardId) {
@@ -779,9 +895,10 @@ export class TrelloCreator {
           createdAt: this._now(),
           sort: checklist.pos,
         };
-        const checklistId = await Checklists.direct.insertAsync(checklistToCreate);
-        // keep track of Trello id => Wekan id
-        this.checklists[checklist.id] = checklistId;
+        const checklistId = await writeImportedEntity(Checklists, checklistToCreate, {
+          ids: this.checklists,
+          sourceId: checklist.id,
+        });
         // Now add the items to the checklistItems
         let counter = 0;
         for (const item of checklist.checkItems) {
@@ -1021,19 +1138,107 @@ export class TrelloCreator {
       const currentBoard = await ReactiveCache.getBoard(currentBoardId);
       await currentBoard.archive();
     }
-    this.parseActions(board.actions);
-    const boardId = await this.createBoardAndLabels(board);
-    // Create the default swimlane first so lists can be attached to it (see
-    // createLists): a list shows under a swimlane in Swimlane View only when its
-    // swimlaneId matches that swimlane (or is empty).
-    await this.createSwimlanes(boardId);
-    await this.createLists(board.lists, boardId);
-    await this.createCards(board.cards, boardId);
-    await this.createChecklists(board.checklists, boardId);
-    await this.importActions(board.actions, boardId);
-    await this.recordImportedUsernames(board, boardId);
-    // XXX add members
-    return boardId;
+    // #6506: bring every imported member in as its own user (mapped to an existing
+    // account or a virtual placeholder) BEFORE creating the board, so board members,
+    // card authors, comments and activities keep the original person instead of
+    // collapsing onto the importer.
+    return runImportPipeline(this, board, [
+      { method: 'createPlaceholderUsers' },
+      { method: 'parseActions', source: 'actions' },
+      { method: 'createBoardAndLabels', createsBoard: true },
+      // Trello has no swimlanes, so its adapter creates one before its lists.
+      { method: 'createSwimlanes' },
+      { method: 'createLists', source: 'lists' },
+      { method: 'createCards', source: 'cards' },
+      { method: 'createChecklists', source: 'checklists' },
+      { method: 'importActions', source: 'actions' },
+      { method: 'recordImportedUsernames' },
+      { method: 'recordScrumLosses' },
+    ]);
+  }
+
+  // Trello has no sprints or releases; Scrum Power-Ups keep theirs in
+  // pluginData, which has no published schema. Counted in the import loss
+  // report rather than dropped silently (models/lib/externalScrumPlanning.js).
+  async recordScrumLosses(board, boardId) {
+    if (!Meteor.isServer) return;
+    const unsupported = trelloScrumLosses(board);
+    if (!unsupported.length) return;
+    await recordImportLosses({ source: 'trello', unsupported, boardId,
+      boardTitle: board.name || undefined, userId: Meteor.userId() });
+  }
+
+  // Pick a free username: keep the original if it is not taken, else suffix it so we
+  // never rename/steal a different existing account's username.
+  async _uniquePlaceholderUsername(base) {
+    const name = (String(base || '').trim()) || 'imported';
+    let candidate = name;
+    let n = 0;
+    // eslint-disable-next-line no-await-in-loop
+    while (await Meteor.users.findOneAsync({ username: candidate }, { fields: { _id: 1 } })) {
+      n += 1;
+      candidate = `${name}-${n}`;
+    }
+    return candidate;
+  }
+
+  // #6506: for every Trello member NOT already mapped (by the map-members step or the
+  // API importer's buildMembersMapping), either map it to an EXISTING WeKan user with
+  // the same username / recorded importUsername, or create an inert virtual
+  // (placeholder) user carrying the original username / full name. This keeps imported
+  // authorship on the original person instead of the importing user, for BOTH the
+  // Trello JSON import and the Trello API (all-boards) import. Placeholders cannot log
+  // in (loginDisabled), are inactive until reconciled (isActive:false) and carry no
+  // secrets. Server-only; best-effort so one bad member never fails the import.
+  async createPlaceholderUsers(board) {
+    if (!Meteor.isServer) return;
+    for (const member of board.members || []) {
+      if (!member || !member.id) continue;
+      if (this.members[member.id]) continue; // already mapped to an existing user
+
+      if (member.username) {
+        const existing =
+          (await ReactiveCache.getUser({ username: member.username })) ||
+          (await ReactiveCache.getUser({ importUsernames: member.username }));
+        if (existing) {
+          this.members[member.id] = existing._id;
+          continue;
+        }
+      }
+
+      // Reuse the Trello member id as the WeKan user _id so every reference resolves.
+      const existingById = await ReactiveCache.getUser(member.id);
+      if (!existingById) {
+        const username = await this._uniquePlaceholderUsername(
+          member.username || member.fullName || `imported-${member.id}`,
+        );
+        try {
+          // .direct bypasses the after.insert hooks (Sandstorm identity sync, the
+          // registration/invitation gate) that would reject a non-account placeholder.
+          await Users.direct.insertAsync({
+            _id: member.id,
+            username,
+            profile: {
+              fullname: member.fullName || '',
+              initials: String(member.initials || '').slice(0, 4),
+            },
+            authenticationMethod: 'imported',
+            loginDisabled: true,
+            isActive: false,
+            importUsernames: member.username ? [member.username] : [],
+            importedFromBoardId: board.id || null,
+            importedAt: new Date(),
+            createdAt: new Date(),
+            services: {},
+          });
+        } catch (e) {
+          if (process.env.DEBUG === 'true') {
+            console.warn('trello placeholder user insert:', member.id, e && e.message);
+          }
+        }
+      }
+      this.members[member.id] = member.id;
+    }
   }
 
   // Keep the original Trello usernames so user mapping can happen later:

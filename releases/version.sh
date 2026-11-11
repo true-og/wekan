@@ -5,6 +5,7 @@
 # =================================================================
 
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/tools-env.sh"   # temporary files and downloads go to .tools/tmp
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -12,7 +13,9 @@ cd "$REPO_ROOT"
 
 # Local copy of dependency artifacts, used only for the optional
 # USE_LOCAL_DEP_VERSIONS offline mode. Builds themselves fetch from upstream.
-DOWNLOAD_DIR="${DOWNLOAD_DIR:-$HOME/Lataukset}"
+# Downloads and release zips stay in .tools/tmp (releases/tools-env.sh), not
+# in ~/Downloads or ~/Lataukset.
+DOWNLOAD_DIR="${DOWNLOAD_DIR:-$WEKAN_DOWNLOADS}"
 
 # Portable sedi function for macOS/Linux compatibility
 sedi() {
@@ -200,7 +203,9 @@ update_releases_node_versions() {
   local files=()
 
   # Only touch files that clearly contain Node.js release references.
-  mapfile -t files < <(grep -RIlE 'nodejs\.org/dist|node-v24\.[0-9]+\.[0-9]+-linux-|npm-node-version: 24\.' releases || true)
+  # Portable read loop instead of `mapfile` (bash 4+ only; macOS ships bash 3.2).
+  files=()
+  while IFS= read -r f; do files+=("$f"); done < <(grep -RIlE 'nodejs\.org/dist|node-v26\.[0-9]+\.[0-9]+-linux-|npm-node-version: 26\.' releases || true)
   if [ ${#files[@]} -eq 0 ]; then
     echo "[DEBUG] No Node.js references found under releases/."
     return 0
@@ -209,34 +214,43 @@ update_releases_node_versions() {
   echo "[DEBUG] Updating Node.js references in ${#files[@]} releases files..."
   local f
   for f in "${files[@]}"; do
-    sedi -E "s#nodejs.org/dist/v24\.[0-9]+\.[0-9]+#nodejs.org/dist/v${new_node}#g" "$f"
-    sedi -E "s#latest-v24\.x/node-v24\.[0-9]+\.[0-9]+-linux-(x64|arm64)\.tar\.xz#latest-v24.x/node-v${new_node}-linux-\1.tar.xz#g" "$f"
-    sedi -E "s#node-v24\.[0-9]+\.[0-9]+-linux-(x64|arm64|armv7l|s390x|ppc64le)\.tar\.(xz|gz)#node-v${new_node}-linux-\1.tar.\2#g" "$f"
-    sedi -E "s#npm-node-version: 24\.[0-9]+\.[0-9]+#npm-node-version: ${new_node}#g" "$f"
-    sedi -E "s#NODE_TAR=\"node-v24\.[0-9]+\.[0-9]+-linux-\$\{NODE_ARCH\}\.tar\.xz\"#NODE_TAR=\"node-v${new_node}-linux-\${NODE_ARCH}.tar.xz\"#g" "$f"
-    sedi -E "s#node-v24\.[0-9]+\.[0-9]+-linux-\$\{NODE_ARCH\}/bin/node#node-v${new_node}-linux-\${NODE_ARCH}/bin/node#g" "$f"
+    # Update the explicit, stable Node.js dist path (e.g. nodejs.org/dist/v26.13.0).
+    # The old floating `latest-v26.x/` path is intentionally NOT handled here: it
+    # only ever holds the single newest v26 release, so a pinned filename under it
+    # 404s once upstream advances — that is what broke the snap build. snapcraft.yaml
+    # and the Dockerfile now use the explicit version path only.
+    # WeKan is pinned to Node.js 26.x, so the major is intentionally hard-coded:
+    # this bumps any older 26.x reference to the newest 26.x (${new_node}) and
+    # never rewrites a reference to a different major. The Node-specific anchors
+    # ('nodejs.org/dist/v', 'node-v...-linux-', 'npm-node-version:', 'NODE_TAR=')
+    # also keep this from touching MongoDB/WeKan or other version numbers.
+    sedi -E "s#nodejs.org/dist/v26\.[0-9]+\.[0-9]+#nodejs.org/dist/v${new_node}#g" "$f"
+    sedi -E "s#node-v26\.[0-9]+\.[0-9]+-linux-(x64|arm64|armv7l|s390x|ppc64le)\.tar\.(xz|gz)#node-v${new_node}-linux-\1.tar.\2#g" "$f"
+    sedi -E "s#npm-node-version: 26\.[0-9]+\.[0-9]+#npm-node-version: ${new_node}#g" "$f"
+    sedi -E "s#NODE_TAR=\"node-v26\.[0-9]+\.[0-9]+-linux-[$]\{NODE_ARCH\}\.tar\.xz\"#NODE_TAR=\"node-v${new_node}-linux-\${NODE_ARCH}.tar.xz\"#g" "$f"
+    sedi -E "s#node-v26\.[0-9]+\.[0-9]+-linux-[$]\{NODE_ARCH\}/bin/node#node-v${new_node}-linux-\${NODE_ARCH}/bin/node#g" "$f"
   done
 }
 
 update_releases_mongo_versions() {
   local mongo_ver="$1"
-  local mongosh_ver="$2"
-  local tools_ver="$3"
   local files=()
 
-  # Update only explicit MongoDB/mongosh/database-tools artifact references.
-  mapfile -t files < <(grep -RIlE 'mongodb-linux-|mongosh-[0-9]+\.[0-9]+\.[0-9]+-linux-|mongodb-database-tools-ubuntu(2204|2404)-' releases || true)
+  # Only the MongoDB 7 server (mongod) is version-managed now: mongosh is no longer
+  # bundled, and the MongoDB Database Tools come unversioned from the newest
+  # wekan/mongo-tools-patches release, so neither is pinned in any releases/ file.
+  # Portable read loop instead of `mapfile` (bash 4+ only; macOS ships bash 3.2).
+  files=()
+  while IFS= read -r f; do files+=("$f"); done < <(grep -RIlE 'mongodb-linux-' releases || true)
   if [ ${#files[@]} -eq 0 ]; then
-    echo "[DEBUG] No MongoDB artifact references found under releases/."
+    echo "[DEBUG] No MongoDB server artifact references found under releases/."
     return 0
   fi
 
-  echo "[DEBUG] Updating MongoDB artifact references in ${#files[@]} releases files..."
+  echo "[DEBUG] Updating MongoDB server references in ${#files[@]} releases files..."
   local f
   for f in "${files[@]}"; do
-    sedi -E "s#(mongodb-linux-(x86_64|aarch64|\$\{MONGO_ARCH\})-ubuntu2204-)[0-9]+\.[0-9]+\.[0-9]+(\.tgz)#\1${mongo_ver}\3#g" "$f"
-    sedi -E "s#(mongosh-)[0-9]+\.[0-9]+\.[0-9]+(-linux-(x64|arm64|\$\{MONGOSH_ARCH\})\.tgz)#\1${mongosh_ver}\2#g" "$f"
-    sedi -E "s#(mongodb-database-tools-ubuntu(2204|2404)-(x86_64|arm64|\$\{TOOLS_ARCH\})-)[0-9]+\.[0-9]+\.[0-9]+(\.tgz)#\1${tools_ver}\4#g" "$f"
+    sedi -E "s#(mongodb-linux-(x86_64|aarch64|[$]\{MONGO_ARCH\})-ubuntu2204-)[0-9]+\.[0-9]+\.[0-9]+(\.tgz)#\1${mongo_ver}\3#g" "$f"
   done
 }
 
@@ -250,112 +264,47 @@ version_bump_logic() {
 
     NEW_NODE=$(latest_cached_version_by_pattern 'node-v*-linux-x64.tar.xz' 'node-v([0-9]+\.[0-9]+\.[0-9]+)-linux-x64\.tar\.xz') || true
     MONGO_VER=$(latest_cached_version_by_pattern 'mongodb-linux-x86_64-ubuntu2204-*.tgz' 'mongodb-linux-x86_64-ubuntu2204-([0-9]+\.[0-9]+\.[0-9]+)\.tgz') || true
-    MONGOSH_VER=$(latest_cached_version_by_pattern 'mongosh-*-linux-x64.tgz' 'mongosh-([0-9]+\.[0-9]+\.[0-9]+)-linux-x64\.tgz') || true
-    TOOLS_VER=$(latest_cached_version_by_pattern 'mongodb-database-tools-ubuntu2204-x86_64-*.tgz' 'mongodb-database-tools-ubuntu2204-x86_64-([0-9]+\.[0-9]+\.[0-9]+)\.tgz') || true
 
-    if [ -z "${NEW_NODE:-}" ] || [ -z "${MONGO_VER:-}" ] || [ -z "${MONGOSH_VER:-}" ] || [ -z "${TOOLS_VER:-}" ]; then
+    if [ -z "${NEW_NODE:-}" ] || [ -z "${MONGO_VER:-}" ]; then
       echo "Error: Missing one or more local dependency versions in $DOWNLOAD_DIR." >&2
       exit 1
     fi
 
     echo "Local Node.js detected: $NEW_NODE"
     echo "Local MongoDB detected: $MONGO_VER"
-    echo "Local mongosh detected: $MONGOSH_VER"
-    echo "Local mongodb-database-tools detected: $TOOLS_VER"
   else
-    # 1. Fetch latest Node.js 24.x (shared by amd64+arm64)
-    echo "[DEBUG] Fetching latest Node.js 24.x with amd64+arm64 availability..."
-    NODE_HTML=$(curl -fsSL https://nodejs.org/dist/latest-v24.x/)
-    FIRST_MATCH=$(echo "$NODE_HTML" | grep -oE 'node-v24\.[0-9]+\.[0-9]+-linux-x64\.tar\.xz' | head -1)
-    NEW_NODE=$(echo "$FIRST_MATCH" | sed -E 's/node-v([0-9]+\.[0-9]+\.[0-9]+)-linux-x64\.tar\.xz/\1/')
-
-    if [[ -z "$NEW_NODE" ]]; then
-      echo "Error: Could not determine latest Node.js 24.x version." >&2
-      exit 1
-    fi
-
-    if ! http_ok "https://nodejs.org/dist/v${NEW_NODE}/node-v${NEW_NODE}-linux-arm64.tar.xz"; then
-      echo "Error: Node.js v${NEW_NODE} does not have linux-arm64 tar.xz." >&2
-      exit 1
-    fi
-    echo "Latest Node.js detected: $NEW_NODE"
-
-    # 2. Detect latest MongoDB 7.x available for both amd64 and arm64
-    echo "[DEBUG] Detecting latest MongoDB 7.x for ubuntu2204 on amd64+arm64..."
-    CURRENT_MONGO_VER=$(get_current_version_from_file snapcraft.yaml 'mongodb-linux-\$\{MONGO_ARCH\}-ubuntu2204-[0-9]+\.[0-9]+\.[0-9]+' | sed -E 's/.*-ubuntu2204-//')
-    MONGO_VER=$(latest_common_semver_by_probe \
-      "$CURRENT_MONGO_VER" \
-      3 \
-      80 \
+    # Resolve published stable releases, not guessed version URLs. Fail before
+    # editing any files if metadata is unavailable or has no supported pair.
+    DEPENDENCY_VERSIONS=$(python3 "$SCRIPT_DIR/dependency-versions.py")
+    read -r NEW_NODE MONGO_VER NEW_NPM <<< "$DEPENDENCY_VERSIONS"
+    version_pair_exists "$NEW_NODE" \
+      "https://nodejs.org/dist/v%s/node-v${NEW_NODE}-linux-x64.tar.xz" \
+      "https://nodejs.org/dist/v%s/node-v${NEW_NODE}-linux-arm64.tar.xz" || {
+      echo 'Error: selected Node.js artifacts are unavailable.' >&2; exit 1;
+    }
+    version_pair_exists "$MONGO_VER" \
       'https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-ubuntu2204-%s.tgz' \
-      'https://fastdl.mongodb.org/linux/mongodb-linux-aarch64-ubuntu2204-%s.tgz') || true
+      'https://fastdl.mongodb.org/linux/mongodb-linux-aarch64-ubuntu2204-%s.tgz' || {
+      echo 'Error: selected MongoDB artifacts are unavailable.' >&2; exit 1;
+    }
+    echo "Latest supported versions: Node.js $NEW_NODE, MongoDB $MONGO_VER, npm $NEW_NPM"
 
-    if [ -z "${MONGO_VER:-}" ]; then
-      echo "[WARN] Could not probe newer MongoDB version. Using current value from snapcraft.yaml." >&2
-      MONGO_VER="$CURRENT_MONGO_VER"
-    fi
+  fi
 
-    if [ -z "$MONGO_VER" ]; then
-      echo "Error: Could not determine latest/common MongoDB version." >&2
-      exit 1
-    fi
-    echo "Latest common MongoDB detected: $MONGO_VER"
-
-    # 3. Detect latest mongosh available for both amd64 and arm64
-    echo "[DEBUG] Detecting latest mongosh for amd64+arm64..."
-    CURRENT_MONGOSH_VER=$(get_current_version_from_file snapcraft.yaml 'mongosh-[0-9]+\.[0-9]+\.[0-9]+-linux-\$\{MONGOSH_ARCH\}\.tgz' | sed -E 's/mongosh-([0-9]+\.[0-9]+\.[0-9]+)-.*/\1/')
-    MONGOSH_VER=$(latest_common_semver_by_probe \
-      "$CURRENT_MONGOSH_VER" \
-      6 \
-      120 \
-      'https://downloads.mongodb.com/compass/mongosh-%s-linux-x64.tgz' \
-      'https://downloads.mongodb.com/compass/mongosh-%s-linux-arm64.tgz') || true
-
-    if [ -z "${MONGOSH_VER:-}" ]; then
-      echo "[WARN] Could not probe newer mongosh version. Using current value from snapcraft.yaml." >&2
-      MONGOSH_VER="$CURRENT_MONGOSH_VER"
-    fi
-
-    if [ -z "$MONGOSH_VER" ]; then
-      echo "Error: Could not determine latest/common mongosh version." >&2
-      exit 1
-    fi
-    echo "Latest common mongosh detected: $MONGOSH_VER"
-
-    # 4. Detect latest mongodb-database-tools available for both amd64 and arm64
-    echo "[DEBUG] Detecting latest mongodb-database-tools for ubuntu2204 on amd64+arm64..."
-    CURRENT_TOOLS_VER=$(get_current_version_from_file snapcraft.yaml 'mongodb-database-tools-ubuntu2204-\$\{TOOLS_ARCH\}-[0-9]+\.[0-9]+\.[0-9]+' | sed -E 's/.*-ubuntu2204-\$\{TOOLS_ARCH\}-//')
-    TOOLS_VER=$(latest_common_semver_by_probe \
-      "$CURRENT_TOOLS_VER" \
-      8 \
-      180 \
-      'https://fastdl.mongodb.org/tools/db/mongodb-database-tools-ubuntu2204-x86_64-%s.tgz' \
-      'https://fastdl.mongodb.org/tools/db/mongodb-database-tools-ubuntu2204-arm64-%s.tgz') || true
-
-    if [ -z "${TOOLS_VER:-}" ]; then
-      echo "[WARN] Could not probe newer mongodb-database-tools version. Using current value from snapcraft.yaml." >&2
-      TOOLS_VER="$CURRENT_TOOLS_VER"
-    fi
-
-    if [ -z "$TOOLS_VER" ]; then
-      echo "Error: Could not determine latest/common mongodb-database-tools version." >&2
-      exit 1
-    fi
-    echo "Latest common mongodb-database-tools detected: $TOOLS_VER"
+  if [ -n "${NEW_NPM:-}" ]; then
+    sedi -E "s#NPM_VERSION=[0-9]+\.[0-9]+\.[0-9]+#NPM_VERSION=${NEW_NPM}#g" Dockerfile
   fi
 
   # 5. Update dependency versions in snap files and Dockerfile
   echo "[DEBUG] Updating dependency versions in files..."
-  sedi -E "s|NODE_VERSION=v24\.[0-9]+\.[0-9]+|NODE_VERSION=v${NEW_NODE}|g" Dockerfile
-  sedi -E "s|npm-node-version: 24\.[0-9]+\.[0-9]+|npm-node-version: ${NEW_NODE}|g" snapcraft.yaml
-  sedi -E "s|NODE_TAR=\"node-v24\.[0-9]+\.[0-9]+-linux-\$\{NODE_ARCH\}\.tar\.xz\"|NODE_TAR=\"node-v${NEW_NODE}-linux-\${NODE_ARCH}.tar.xz\"|g" snapcraft.yaml
-  sedi -E "s|node-v24\.[0-9]+\.[0-9]+-linux-\$\{NODE_ARCH\}/bin/node|node-v${NEW_NODE}-linux-\${NODE_ARCH}/bin/node|g" snapcraft.yaml
+  sedi -E "s|NODE_VERSION=v26\.[0-9]+\.[0-9]+|NODE_VERSION=v${NEW_NODE}|g" Dockerfile
+  sedi -E "s|npm-node-version: 26\.[0-9]+\.[0-9]+|npm-node-version: ${NEW_NODE}|g" snapcraft.yaml
+  sedi -E "s|NODE_TAR=\"node-v26\.[0-9]+\.[0-9]+-linux-[$]\{NODE_ARCH\}\.tar\.xz\"|NODE_TAR=\"node-v${NEW_NODE}-linux-\${NODE_ARCH}.tar.xz\"|g" snapcraft.yaml
+  sedi -E "s|node-v26\.[0-9]+\.[0-9]+-linux-[$]\{NODE_ARCH\}/bin/node|node-v${NEW_NODE}-linux-\${NODE_ARCH}/bin/node|g" snapcraft.yaml
   update_releases_node_versions "$NEW_NODE"
 
-  sedi -E "s|mongodb-linux-\$\{MONGO_ARCH\}-ubuntu2204-7\.[0-9]+\.[0-9]+\.tgz|mongodb-linux-\${MONGO_ARCH}-ubuntu2204-${MONGO_VER}.tgz|g" snapcraft.yaml
-  sedi -E "s|mongosh-[0-9]+\.[0-9]+\.[0-9]+-linux-\$\{MONGOSH_ARCH\}\.tgz|mongosh-${MONGOSH_VER}-linux-\${MONGOSH_ARCH}.tgz|g" snapcraft.yaml
-  sedi -E "s|mongodb-database-tools-ubuntu2204-\$\{TOOLS_ARCH\}-[0-9]+\.[0-9]+\.[0-9]+\.tgz|mongodb-database-tools-ubuntu2204-\${TOOLS_ARCH}-${TOOLS_VER}.tgz|g" snapcraft.yaml
-  update_releases_mongo_versions "$MONGO_VER" "$MONGOSH_VER" "$TOOLS_VER"
+  sedi -E "s|mongodb-linux-[$]\{MONGO_ARCH\}-ubuntu2204-7\.[0-9]+\.[0-9]+\.tgz|mongodb-linux-\${MONGO_ARCH}-ubuntu2204-${MONGO_VER}.tgz|g" snapcraft.yaml
+  update_releases_mongo_versions "$MONGO_VER"
 
   # 6. Update application versions (existing logic retained)
   NEW_NO_DOTS=$(echo "$NEW_VERSION" | tr -d '.')
@@ -368,20 +317,100 @@ version_bump_logic() {
     PKG_VER="v${NEW_VERSION}"
   fi
 
-  sedi "0,/\"version\": \"[^\"]*\"/s//\"version\": \"${PKG_VER}\"/" package.json
-  sedi "0,/\"version\": \"[^\"]*\"/s//\"version\": \"${PKG_VER}\"/" package-lock.json
-  sedi "0,/appVersion: \"[^\"]*\"/s/appVersion: \"[^\"]*\"/appVersion: \"${PKG_VER}\"/" Stackerfile.yml
-  sedi "2s/^version: '[^']*'/version: '${NEW_VERSION}'/" snapcraft.yaml
-  sedi "s|v$OLD_VERSION/|v$NEW_VERSION/|g" snapcraft.yaml
-  sedi "s|wekan-$OLD_VERSION-|wekan-$NEW_VERSION-|g" snapcraft.yaml
+  # Update ONLY the WeKan application version, never any dependency versions.
+  # The WeKan version is the only "version" value carrying a leading 'v'
+  # (e.g. "v9.57.0"); every dependency version in these files is plain semver
+  # ("5.2.0"), so anchoring on "v[0-9]" is what keeps this from touching them.
+  #
+  # package-lock.json (lockfileVersion 3) stores the root version TWICE: the
+  # top-level "version" and the nested packages."".version. Both must be bumped,
+  # so this is a global (/g) replace, not the first-match-only "0,/re/" form --
+  # otherwise the remote release-all.yml bump job (which commits version.sh's
+  # output directly, with no intervening `npm install` to re-sync the lock)
+  # would push a package-lock.json whose packages."".version stays stale.
+  sedi -E "s/\"version\": \"v[0-9][^\"]*\"/\"version\": \"${PKG_VER}\"/g" package.json
+  sedi -E "s/\"version\": \"v[0-9][^\"]*\"/\"version\": \"${PKG_VER}\"/g" package-lock.json
+  sedi -E "s/appVersion: \"[^\"]*\"/appVersion: \"${PKG_VER}\"/" Stackerfile.yml
+  # Set the snap version (the `version: '<x>'` line). Match by `^version:`
+  # instead of a hard-coded line number, and tolerate any quoting, so this can
+  # never silently miss if the line moves or the quotes change — a stale snap
+  # version breaks the release (the snap is named wekan_<old>_<arch>.snap and the
+  # upload/attach globs in release-all.yml then match nothing). Only line 2
+  # starts with `version:` (npm-node-version: is indented), so this is safe.
+  sedi -E "s/^version:.*/version: '${NEW_VERSION}'/" snapcraft.yaml
+  if ! grep -qxF "version: '${NEW_VERSION}'" snapcraft.yaml; then
+    echo "Error: failed to set snap version to '${NEW_VERSION}' in snapcraft.yaml." >&2
+    exit 1
+  fi
+  # Re-point the bundle the snap downloads to v$NEW_VERSION. Anchor on the stable
+  # "wekan-<v>-" and "releases/download/v<v>/" shapes, NOT on $OLD_VERSION: the
+  # snap is RELEASE-CRITICAL exactly like the Docker image — it downloads
+  # wekan-<v>-<arch>.zip here, so if these stayed at an old version (which the
+  # $OLD_VERSION-anchored form did whenever $OLD did not match) the snap would be
+  # NAMED v$NEW_VERSION (via the version: line above) but SHIP the old bundle and
+  # report the old version. Self-healing + assert so any miss fails the release.
+  sedi -E "s#wekan-[0-9]+\.[0-9]+(\.[0-9]+)?-#wekan-${NEW_VERSION}-#g" snapcraft.yaml
+  sedi -E "s#(releases/download/)v[0-9]+\.[0-9]+(\.[0-9]+)?/#\1v${NEW_VERSION}/#g" snapcraft.yaml
+  if grep -qE "wekan-[0-9]+\.[0-9]+(\.[0-9]+)?-" snapcraft.yaml \
+     && ! grep -qF "wekan-${NEW_VERSION}-" snapcraft.yaml; then
+    echo "Error: failed to set the WeKan bundle version to ${NEW_VERSION} in snapcraft.yaml." >&2
+    exit 1
+  fi
+  if grep -qE "releases/download/v[0-9]" snapcraft.yaml \
+     && ! grep -qF "releases/download/v${NEW_VERSION}/" snapcraft.yaml; then
+    echo "Error: failed to set the release-download URL to v${NEW_VERSION} in snapcraft.yaml." >&2
+    exit 1
+  fi
 
-  sedi "0,/appVersion = [0-9]\+/s/appVersion = [0-9]\+/appVersion = ${NEW_NO_DOTS}/" sandstorm-pkgdef.capnp
-  sedi "0,/appMarketingVersion = (defaultText = \"[^\"]*\")/s/appMarketingVersion = (defaultText = \"[^\"]*\")/appMarketingVersion = (defaultText = \"${NEW_VERSION}~${TODAY}\")/" sandstorm-pkgdef.capnp
-  sedi "s|appVersion = $OLD_NO_DOTS,|appVersion = $NEW_NO_DOTS,|g" sandstorm-pkgdef.capnp
+  # Both anchor on the field name and re-normalize whatever value is there to the
+  # new version (NOT on the old value), so they self-heal from any stale state.
+  # Global, not first-match, and the old separate "appVersion = $OLD_NO_DOTS,"
+  # fixup is dropped — that $OLD-anchored line silently no-op'd on a mismatch and
+  # is redundant now that this rewrites every appVersion occurrence.
+  sedi -E "s/appVersion = [0-9]+/appVersion = ${NEW_NO_DOTS}/g" sandstorm-pkgdef.capnp
+  sedi -E "s/appMarketingVersion = \(defaultText = \"[^\"]*\"\)/appMarketingVersion = (defaultText = \"${NEW_VERSION}~${TODAY}\")/g" sandstorm-pkgdef.capnp
+  if ! grep -qF "appVersion = ${NEW_NO_DOTS}" sandstorm-pkgdef.capnp; then
+    echo "Error: failed to set 'appVersion = ${NEW_NO_DOTS}' in sandstorm-pkgdef.capnp." >&2
+    exit 1
+  fi
 
-  sedi "s|ARG VERSION=$OLD_VERSION|ARG VERSION=$NEW_VERSION|g" Dockerfile
-  sedi "s|wekan-$OLD_VERSION|wekan-$NEW_VERSION|g" docs/Platforms/Propietary/Windows/Offline.md
-  sedi "s|/v$OLD_VERSION/|/v$NEW_VERSION/|g" docs/Platforms/Propietary/Windows/Offline.md
+  # Anchor on the `ARG VERSION=` prefix, NOT on the old version number, so this
+  # always rewrites the default to the new version even if OLD_VERSION was passed
+  # wrong (e.g. a skipped point release). A stale default here means every Docker
+  # image downloads that version's wekan-<v>-<arch>.zip and reports the wrong
+  # version in the Admin Panel. release-all.yml also passes --build-arg VERSION,
+  # but keep this in sync so manual `docker build .` produces the right image too.
+  sedi -E "s|^ARG VERSION=.*|ARG VERSION=$NEW_VERSION|g" Dockerfile
+  if ! grep -qxF "ARG VERSION=$NEW_VERSION" Dockerfile; then
+    echo "Error: failed to set 'ARG VERSION=$NEW_VERSION' in Dockerfile." >&2
+    exit 1
+  fi
+  # .meteor/release is the framework version the build really uses. Keep the
+  # Docker runtime metadata synchronized from that canonical pin on every
+  # release, including prereleases such as 3.5.2-rc.0. The website manifest also
+  # reads the canonical file directly, so a stale duplicate cannot be published.
+  METEOR_RELEASE=$(tr -d '\r' < .meteor/release | head -1)
+  if ! printf '%s' "$METEOR_RELEASE" \
+      | grep -Eq '^METEOR@[0-9]+\.[0-9]+(\.[0-9]+)?([-+][0-9A-Za-z.-]+)?$'; then
+    echo "Error: invalid Meteor release in .meteor/release: $METEOR_RELEASE" >&2
+    exit 1
+  fi
+  sedi -E "s|METEOR_RELEASE=METEOR@[^ \\\\]+|METEOR_RELEASE=${METEOR_RELEASE}|g" Dockerfile
+  if ! grep -qF "METEOR_RELEASE=${METEOR_RELEASE}" Dockerfile; then
+    echo "Error: failed to synchronize Dockerfile with $METEOR_RELEASE." >&2
+    exit 1
+  fi
+  # Documentation (Windows offline-install guide): same self-healing anchors as
+  # snapcraft.yaml so the doc's download links re-point to v$NEW_VERSION from any
+  # stale value. Only warn (don't fail the release) on a miss — a stale doc link
+  # is cosmetic, unlike the snap/Docker bundles above.
+  OFFLINE_DOC="docs/Platforms/Propietary/OS/Windows/Offline.md"
+  sedi -E "s#wekan-[0-9]+\.[0-9]+(\.[0-9]+)?-#wekan-${NEW_VERSION}-#g" "$OFFLINE_DOC"
+  sedi -E "s#(releases/download/)v[0-9]+\.[0-9]+(\.[0-9]+)?/#\1v${NEW_VERSION}/#g" "$OFFLINE_DOC"
+  if grep -qE "wekan-[0-9]+\.[0-9]+(\.[0-9]+)?-" "$OFFLINE_DOC" \
+     && ! grep -qF "wekan-${NEW_VERSION}-" "$OFFLINE_DOC"; then
+    echo "[WARN] $OFFLINE_DOC still references an old wekan-<version> bundle; expected ${NEW_VERSION}." >&2
+  fi
 
   # 7. Download dependency artifacts from upstream to ~/Lataukset for the optional
   # USE_LOCAL_DEP_VERSIONS offline mode. The builds themselves fetch from upstream too.
@@ -399,29 +428,39 @@ version_bump_logic() {
     ensure_cache_or_download "mongodb-linux-x86_64-ubuntu2204-${MONGO_VER}.tgz" "https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-ubuntu2204-${MONGO_VER}.tgz"
     ensure_cache_or_download "mongodb-linux-aarch64-ubuntu2204-${MONGO_VER}.tgz" "https://fastdl.mongodb.org/linux/mongodb-linux-aarch64-ubuntu2204-${MONGO_VER}.tgz"
 
-    ensure_cache_or_download "mongosh-${MONGOSH_VER}-linux-x64.tgz" "https://downloads.mongodb.com/compass/mongosh-${MONGOSH_VER}-linux-x64.tgz"
-    ensure_cache_or_download "mongosh-${MONGOSH_VER}-linux-arm64.tgz" "https://downloads.mongodb.com/compass/mongosh-${MONGOSH_VER}-linux-arm64.tgz"
-
-    ensure_cache_or_download "mongodb-database-tools-ubuntu2204-x86_64-${TOOLS_VER}.tgz" "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-ubuntu2204-x86_64-${TOOLS_VER}.tgz"
-    ensure_cache_or_download "mongodb-database-tools-ubuntu2204-arm64-${TOOLS_VER}.tgz" "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-ubuntu2204-arm64-${TOOLS_VER}.tgz"
+    # mongosh is no longer bundled; the MongoDB Database Tools come from the
+    # wekan/mongo-tools-patches release, so nothing is fetched from mongodb.com for them.
   fi
 
   # 8. Update Wekan website (manual/local flow only; the remote flow handles the
   # wekan.fi and charts repos in dedicated parallel GitHub Actions jobs). These
   # blocks no-op in CI because the sibling repos are not checked out there.
-  if [ -d "../w/wekan.fi" ]; then
-    INSTALL_PAGE="../w/wekan.fi/install/index.html"
+  if [ -d ".tools/w/wekan.fi" ]; then
+    INSTALL_PAGE=".tools/w/wekan.fi/install/index.html"
     METEOR_VER=$(grep -o 'METEOR@[^ "\\]*' .meteor/release | head -1 | sed 's/.*@//')
     NPM_VER=$(grep -o 'NPM_VERSION=[^ "\\]*' Dockerfile | head -1 | cut -d= -f2 | tr -d '"')
+    NODE_VER=$(grep -o 'NODE_VERSION=[^ "\\]*' Dockerfile | head -1 | cut -d= -f2 | tr -d '"')
 
-    (cd ../w/wekan.fi && git pull)
+    (cd .tools/w/wekan.fi && git pull)
+    bash releases/update-website-version-info.sh \
+      ".tools/w/wekan.fi" "$PWD" "$NEW_VERSION"
     sedi "s|<span id=\"meteor-version\">[^<]*</span>|<span id=\"meteor-version\">$METEOR_VER</span>|g" "$INSTALL_PAGE"
-    sedi "s|<span class=\"version-number\">v${OLD_VERSION}</span>|<span class=\"version-number\">v${NEW_VERSION}</span>|g" "$INSTALL_PAGE"
+    sedi "s|<span id=\"node-version\">[^<]*</span>|<span id=\"node-version\">$NODE_VER</span>|g" "$INSTALL_PAGE"
+    sedi "s|<span id=\"npm-version\">[^<]*</span>|<span id=\"npm-version\">$NPM_VER</span>|g" "$INSTALL_PAGE"
+    # Node.js download URL paths: OFFICIAL nodejs.org (amd64/arm64/s390x/ppc64le)
+    # and UNOFFICIAL unofficial-builds.nodejs.org (riscv64). Keep them in sync with
+    # release-website.sh so the install links never go stale after a Node.js bump.
+    sedi -E "s#(nodejs\.org/dist/)v[0-9]+\.[0-9]+\.[0-9]+#\1${NODE_VER}#g" "$INSTALL_PAGE"
+    sedi -E "s#(unofficial-builds\.nodejs\.org/download/release/)v[0-9]+\.[0-9]+\.[0-9]+#\1${NODE_VER}#g" "$INSTALL_PAGE"
+    sedi -E "s#node-v[0-9]+\.[0-9]+\.[0-9]+-linux-#node-${NODE_VER}-linux-#g" "$INSTALL_PAGE"
+    # Anchor on the version-number class, not on $OLD_VERSION, so a stale value on
+    # the page still gets re-normalized to v$NEW_VERSION (see release-website.sh).
+    sedi -E "s#(<span class=\"version-number\">)v[0-9][^<]*(</span>)#\1v${NEW_VERSION}\2#g" "$INSTALL_PAGE"
     (
-      cd ../w/wekan.fi
+      cd .tools/w/wekan.fi
       git add --all
       if git diff --cached --quiet; then
-        echo "[INFO] No website changes to commit in ../w/wekan.fi."
+        echo "[INFO] No website changes to commit in .tools/w/wekan.fi."
       else
         git commit -m "Updates"
         git push
@@ -433,9 +472,9 @@ version_bump_logic() {
   fi
 
   # 9. Update and publish the WeKan Helm chart in the separate wekan/charts repo
-  # at ../w/charts. release-charts.sh bumps only the WeKan version numbers in the
+  # at .tools/w/charts. release-charts.sh bumps only the WeKan version numbers in the
   # chart, packages it, and publishes it to the gh-pages Helm repo index.
-  if [ -d "../w/charts/wekan" ]; then
+  if [ -d ".tools/w/charts/wekan" ]; then
     ./releases/release-charts.sh "${NEW_VERSION}"
   fi
 
@@ -443,16 +482,16 @@ version_bump_logic() {
   echo "Detected dependency versions:"
   echo "  Node.js:                $NEW_NODE"
   echo "  MongoDB (ubuntu2204):   $MONGO_VER"
-  echo "  mongosh:                $MONGOSH_VER"
-  echo "  mongodb-database-tools: $TOOLS_VER"
 }
 
 # --- MAIN BLOCK ---
 
-# If manual arguments are missing, parse CHANGELOG.md
+# If manual arguments are missing, parse CHANGELOG-big.md
 if [ -z "${1:-}" ] || [ -z "${2:-}" ]; then
-  echo "No arguments. Detecting versions from CHANGELOG.md..."
-  mapfile -t RELEASE_LINES < <(grep -E '^# v[0-9]+\.[0-9]+(\.[0-9]+)?[ -]+[0-9]{4}-[0-9]{2}-[0-9]{2}' CHANGELOG.md | head -2)
+  echo "No arguments. Detecting versions from CHANGELOG-big.md..."
+  # Portable read loop instead of `mapfile` (bash 4+ only; macOS ships bash 3.2).
+  RELEASE_LINES=()
+  while IFS= read -r line; do RELEASE_LINES+=("$line"); done < <(grep -E '^# v[0-9]+\.[0-9]+(\.[0-9]+)?[ -]+[0-9]{4}-[0-9]{2}-[0-9]{2}' CHANGELOG-big.md | head -2)
   NEW_VERSION=$(echo "${RELEASE_LINES[0]:-}" | grep -oE 'v[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 | sed 's/^v//')
   OLD_VERSION=$(echo "${RELEASE_LINES[1]:-}" | grep -oE 'v[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 | sed 's/^v//')
   if [ -z "${NEW_VERSION:-}" ] || [ -z "${OLD_VERSION:-}" ]; then

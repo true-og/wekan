@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""Probe the packaged app, then stop its entire process group within a deadline."""
+import argparse
+from collections import deque
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+
+def live_group_members_darwin(pgid):
+    """The live (not zombie) members of a process group, from libproc.
+
+    Asked of the kernel directly rather than by running `ps`, which a sandboxed
+    or locked-down Mac may refuse to start ("Operation not permitted": the
+    smoke test then failed a correct app). A member whose BSD info cannot be
+    read is a zombie or already gone."""
+    import ctypes
+
+    lib = ctypes.CDLL('/usr/lib/libproc.dylib')
+    proc_pgrp_only, proc_pidtbsdinfo, szomb = 2, 3, 5
+
+    class BSDInfo(ctypes.Structure):
+        _fields_ = [('pbi_flags', ctypes.c_uint32), ('pbi_status', ctypes.c_uint32),
+                    ('rest', ctypes.c_byte * 128)]
+
+    size = lib.proc_listpids(proc_pgrp_only, pgid, None, 0)
+    pids = (ctypes.c_int * (max(size, 0) // 4 + 64))()
+    size = lib.proc_listpids(proc_pgrp_only, pgid, pids, ctypes.sizeof(pids))
+    live = []
+    for member in pids[:max(size, 0) // 4]:
+        if not member:
+            continue
+        info = BSDInfo()
+        got = lib.proc_pidinfo(member, proc_pidtbsdinfo, 0, ctypes.byref(info), ctypes.sizeof(info))
+        if got > 0 and info.pbi_status != szomb:
+            live.append(member)
+    return live
+
+
+def group_has_live_member_ps(pgid):
+    listing = subprocess.check_output(
+        ['ps', '-axo', 'pgid=,stat='], text=True, timeout=3)
+    for line in listing.splitlines():
+        group, state = line.split()
+        if int(group) == pgid and not state.startswith('Z'):
+            return True
+    return False
+
+
+def signal_group(pid, sig):
+    try:
+        os.killpg(pid, sig)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Darwin can return EPERM for a group containing only zombies. Verify
+        # that no live member remains before treating it as a stopped group;
+        # a real permission failure must still fail the smoke test.
+        if sys.platform == 'darwin':
+            live = bool(live_group_members_darwin(pid))
+        else:
+            live = group_has_live_member_ps(pid)
+        if live:
+            raise
+        return False
+
+
+def stop_app(process, grace=5):
+    signal_group(process.pid, signal.SIGTERM)
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        process.poll()  # Reap the launcher, but also wait for its descendants.
+        if not signal_group(process.pid, 0):
+            break
+        time.sleep(0.05)
+    signal_group(process.pid, signal.SIGKILL)
+    process.wait(timeout=5)
+
+
+def smoke(command, url, log, timeout=180, grace=5):
+    log = Path(log)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open('wb') as output:
+        process = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT,
+                                   start_new_session=True)
+        try:
+            deadline = time.monotonic() + timeout
+            while process.poll() is None and time.monotonic() < deadline:
+                remaining = deadline - time.monotonic()
+                limit = max(0.01, min(3, remaining))
+                result = subprocess.run(
+                    ['curl', '-fsS', '--connect-timeout', '1', '--max-time', str(limit),
+                     '-o', os.devnull, url], stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, timeout=limit + 1)
+                if result.returncode == 0:
+                    print('WeKan answered through bundled Node.js and FerretDB.', flush=True)
+                    return True
+                time.sleep(min(0.2, max(0, deadline - time.monotonic())))
+            print('::error::The bundled Mac app did not start WeKan with FerretDB.', flush=True)
+            return False
+        finally:
+            try:
+                stop_app(process, grace)
+            finally:
+                with log.open(encoding='utf-8', errors='replace') as lines:
+                    print(''.join(deque(lines, maxlen=100)), end='', flush=True)
+
+
+def interrupted(signum, frame):
+    # Let smoke's finally stop Node and FerretDB on workflow cancellation too.
+    raise SystemExit(128 + signum)
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('command')
+    parser.add_argument('url')
+    parser.add_argument('log')
+    args = parser.parse_args()
+    signal.signal(signal.SIGTERM, interrupted)
+    signal.signal(signal.SIGINT, interrupted)
+    raise SystemExit(0 if smoke([args.command], args.url, args.log) else 1)

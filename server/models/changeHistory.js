@@ -1,0 +1,724 @@
+import { scrumHistorySnapshot, applyScrumHistory, pendingScrumHistoryRow } from '/server/lib/scrumHistory';
+import { filterReadableHistoryRows, requireHistoryRowAccess } from '/server/lib/historyReadScope';
+import { ruleSnapshot, applyRuleHistory } from '/server/lib/ruleHistory';
+import { requireBoardMutation } from '/models/lib/boardMutationGuard';
+import { Meteor } from 'meteor/meteor';
+import { check, Match } from 'meteor/check';
+import { DDPRateLimiter } from 'meteor/ddp-rate-limiter';
+import ScrumHistoryPending, { ScrumHistoryRequests, ScrumHistoryCompletions } from '/server/lib/scrumHistoryPending';
+import { ReactiveCache } from '/imports/reactiveCache';
+import Boards from '/models/boards';
+import Cards from '/models/cards';
+import CardComments from '/models/cardComments';
+import Checklists from '/models/checklists';
+import ChecklistItems from '/models/checklistItems';
+import Lists from '/models/lists';
+import Swimlanes from '/models/swimlanes';
+import Attachments from '/models/attachments';
+import ChangeHistory from '/models/changeHistory';
+import { attachmentContentAction } from '/models/lib/attachmentSoftDelete';
+import { listLifecyclePlan } from '/models/lib/listLifecycleRestore';
+import {
+  softDeleteAttachment,
+  restoreAttachment,
+} from '/server/attachmentSoftDelete';
+import { ensureIndex } from '/server/lib/mongoStartup';
+import { pickUndo, pickRedo } from '/models/lib/undoRedoSelection';
+import {
+  scopeSelector,
+  matchesSearch,
+  selectionToIds,
+} from '/models/lib/changeHistoryQuery';
+import {
+  valueFromContent,
+  contentForField,
+  contentForDirection,
+} from '/models/lib/changeHistoryGroups';
+import { pageInfo } from '/models/lib/tablePage';
+const { scanHistoryPage } = require('/server/lib/historyPageScan');
+import { withoutRecording } from '/server/lib/historyRecordingScope';
+import RecoveryEvents from '/models/recoveryEvents';
+import SecurityLog from '/server/lib/securityLog';
+const { rowHashIsValid, canonical, sha256 } = require('/models/lib/changeHistoryIntegrity');
+const { prepareScrumHistoryRequest } = require('/server/lib/scrumHistoryRequest');
+import { setBatchStepper, startBatchJob, assertNoBatchJob } from '/server/lib/scrumBatchJobs';
+
+DDPRateLimiter.addRule({ type: 'method',
+  name: name => ['changeHistory.undoLast', 'changeHistory.redoLast'].includes(name),
+  userId: userId => Boolean(userId) }, 120, 60000);
+
+// The next row of a Scrum History batch recorded in several rows
+// (server/lib/scrumHistory.js recordBatch): undo and redo take the whole
+// batch, one row at a time, so one key press still reverses one logical change.
+const isBatchPart = row => row && row.entityType === 'scrum' && !!row.batchId && !row.isCheckpoint;
+async function nextBatchRow(userId, boardId, direction, batchId) {
+  const rows = await ChangeHistory.find({ userId, boardId, batchId, entityType: 'scrum',
+    undone: direction === 'redo', isCheckpoint: { $ne: true } },
+  { sort: direction === 'undo' ? { createdAt: -1 } : { undoneAt: -1 }, limit: 50 }).fetchAsync();
+  return (direction === 'undo' ? pickUndo : pickRedo)(rows);
+}
+// A request ID for each further row of a batch, derived from the caller's, so
+// a retry of the caller's request resumes the same rows.
+const batchRequestId = (requestId, index) => `batch-${sha256(canonical([requestId, index])).slice(0, 48)}`;
+// A batch with more rows than this left continues as a background job
+// (server/lib/scrumBatchJobs.js); a small one finishes in the call.
+const INLINE_BATCH_ROWS = 4;
+const remainingBatchRows = (userId, boardId, direction, batchId) => ChangeHistory.find({ userId, boardId, batchId,
+  entityType: 'scrum', undone: direction === 'redo', isCheckpoint: { $ne: true }, superseded: { $ne: true } }).countAsync();
+async function requestedScrumReversal(context, boardId, direction, requestId) {
+  const resultKey = direction === 'undo' ? 'undone' : 'redone';
+  await assertNoBatchJob(boardId);
+  const { result, row } = await requestedScrumRow(context, boardId, direction, requestId);
+  if (!isBatchPart(row)) return result;
+  const left = await remainingBatchRows(context.userId, boardId, direction, row.batchId);
+  if (left > INLINE_BATCH_ROWS) {
+    await startBatchJob({ boardId, userId: context.userId, direction, batchId: row.batchId, requestId, total: left + 1 });
+    return { ...result, continuing: true };
+  }
+  for (let index = 1; ; index += 1) {
+    const next = await requestedScrumRow(context, boardId, direction, batchRequestId(requestId, index), row.batchId);
+    if (!next.result[resultKey]) return result;
+  }
+}
+// One row of a background batch job, as the user who asked: true while a
+// row was applied, false when the batch is done.
+setBatchStepper(async (context, job) => {
+  if (job.requestId) {
+    const next = await requestedScrumRow(context, job.boardId, job.direction, batchRequestId(job.requestId, job.index), job.batchId);
+    return !!next.result[job.direction === 'undo' ? 'undone' : 'redone'];
+  }
+  const next = await nextBatchRow(context.userId, job.boardId, job.direction, job.batchId);
+  if (!next) return false;
+  await requireHistoryIntegrity(next, context);
+  return !!await applyClaimed(next, job.direction, null);
+});
+async function requestedScrumRow(context, boardId, direction, requestId, batchId = null) {
+  const assertAccess = async () => {
+    const board = await Boards.findOneAsync(boardId);
+    requireBoardMutation(context.userId, board, 'changeHistory:write', Meteor);
+  };
+  try {
+    const request = await prepareScrumHistoryRequest({ requests: ScrumHistoryRequests,
+      context: { userId: context.userId, boardId, direction, requestId }, assertAccess,
+      assertUnused: async operationId => {
+        if (await ScrumHistoryCompletions.findOneAsync(operationId) ||
+            await ScrumHistoryPending.findOneAsync({ _id: boardId, operationId })) {
+          throw new Meteor.Error('scrum-history-request-conflict',
+            'The original request record is missing. Its recovery evidence was retained.');
+        }
+      },
+      select: async () => {
+        const pending = await pendingScrumHistoryRow(boardId, context.userId, direction);
+        if (pending) return pending;
+        if (batchId) return nextBatchRow(context.userId, boardId, direction, batchId);
+        const rows = await ChangeHistory.find({ userId: context.userId, boardId,
+          undone: direction === 'redo', isCheckpoint: { $ne: true } },
+        { sort: direction === 'undo' ? { createdAt: -1 } : { undoneAt: -1 }, limit: 50 }).fetchAsync();
+        return (direction === 'undo' ? pickUndo : pickRedo)(rows);
+      } });
+    const resultKey = direction === 'undo' ? 'undone' : 'redone';
+    if (request.selection.kind === 'empty') return { result: { [resultKey]: false } };
+    if (request.selection.kind === 'unsupported') {
+      throw new Meteor.Error('scrum-history-request-unsupported',
+        'Request IDs currently support Scrum History only. This request changed nothing.');
+    }
+    const row = await ChangeHistory.findOneAsync(request.selection.rowId);
+    if (!row || row.boardId !== boardId || row.userId !== context.userId ||
+        row.integrityHash !== request.selection.sourceHash || row.entityType !== 'scrum') {
+      throw new Meteor.Error('scrum-history-request-conflict', 'The saved History source is missing or changed.');
+    }
+    await requireHistoryIntegrity(row, context);
+    await requireHistoryRowAccess(row, context.userId);
+    await assertAccess();
+    await applyScrumHistory(row, contentForDirection(row, direction), direction, request);
+    await assertAccess();
+    await requireHistoryRowAccess(row, context.userId);
+    return { row, result: { [resultKey]: true, entityType: row.entityType, entityId: row.entityId, group: row.group } };
+  } catch (error) {
+    if (error instanceof Meteor.Error) throw error;
+    throw new Meteor.Error('scrum-history-request-conflict',
+      'The request could not be confirmed. Keep its ID when retrying; do not select a new operation.');
+  }
+}
+
+// Server side of the universal change history
+// (docs/Features/General/History/History.md): the read method, the restore, and
+// the undo/redo stack that generalises #6478 from position moves to every
+// recorded change.
+//
+// This file may import every model it needs BECAUSE NOTHING IMPORTS IT. The
+// collection itself (models/changeHistory.js) imports none of them, so the
+// mutation paths can import the collection normally - which is the whole reason
+// the position history before it recorded nothing.
+
+Meteor.startup(async () => {
+  // The columns the scopes filter on, newest first, which is every query the
+  // read method makes.
+  await ensureIndex(ChangeHistory, { boardId: 1, createdAt: -1 });
+  await ensureIndex(ChangeHistory, { cardId: 1, group: 1, createdAt: -1 });
+  await ensureIndex(ChangeHistory, { listId: 1, createdAt: -1 });
+  await ensureIndex(ChangeHistory, { swimlaneId: 1, createdAt: -1 });
+  await ensureIndex(ChangeHistory, { userId: 1, createdAt: -1 });
+  // The undo/redo stack: this user, this board, not yet undone / most recently
+  // undone.
+  await ensureIndex(ChangeHistory, { userId: 1, boardId: 1, undone: 1, createdAt: -1 });
+  await ensureIndex(ChangeHistory, { userId: 1, boardId: 1, undone: 1, undoneAt: -1 });
+  // Finding a row's successor: the legacy Sync append walks to the chain tip
+  // (server/lib/storedHistoryChain.js appendSyncHistoryRow).
+  await ensureIndex(ChangeHistory, { boardId: 1, previousHash: 1 });
+});
+
+const requireBoardVisible = async (userId, boardId) => {
+  if (!boardId) return;
+  const board = await ReactiveCache.getBoard(boardId);
+  if (!board || !board.isVisibleBy({ _id: userId })) {
+    throw new Meteor.Error('not-authorized', 'You do not have access to this board.');
+  }
+};
+
+const requireBoardWrite = async (userId, boardId) => {
+  const board = await ReactiveCache.getBoard(boardId);
+  requireBoardMutation(userId, board, 'changeHistory:write', Meteor);
+};
+
+async function requireHistoryIntegrity(row, context) {
+  // Rows written before the integrity fields existed remain usable but cannot be
+  // retroactively authenticated. Every new row is checked before it can write.
+  if (!row || !row.integrityHash) return;
+  let valid = rowHashIsValid(row);
+  if (valid && row.previousHash) {
+    valid = Boolean(await ChangeHistory.findOneAsync({
+      boardId: row.boardId,
+      integrityHash: row.previousHash,
+    }));
+  }
+  if (valid && !row.previousHash) {
+    valid = await ChangeHistory.find({
+      boardId: row.boardId,
+      previousHash: null,
+      integrityHash: { $nin: [null, ''] },
+    }).countAsync() === 1;
+  }
+  if (valid && row.previousHash) {
+    valid = await ChangeHistory.find({
+      boardId: row.boardId,
+      previousHash: row.previousHash,
+    }).countAsync() === 1;
+  }
+  if (valid) return;
+  const userId = context && context.userId;
+  const user = userId && await Meteor.users.findOneAsync(userId, { fields: { username: 1 } });
+  SecurityLog.record({
+    key: 'integrity.history', userId, username: user && user.username,
+    ip: context && context.connection && context.connection.clientAddress,
+    detail: `history row=${row._id || 'unknown'} board=${row.boardId || 'unknown'} ` +
+      `expected=${row.integrityHash || 'missing'} observed=${rowHashIsValid(row) ? 'row-valid' : 'row-changed'} ` +
+      `previous=${row.previousHash || 'genesis'}; restore/undo/redo refused`,
+  });
+  await RecoveryEvents.record(RecoveryEvents.types.HISTORY_INTEGRITY_FAILED, {
+    severity: 'error', source: 'server', userId,
+    detail: `Change history integrity failed for ${row._id || 'unknown row'}; operation refused`,
+  });
+  throw new Meteor.Error('history-integrity-failed',
+    'Change history verification failed; the operation was refused.');
+}
+
+// ---- appliers: how each kind of change is put back ---------------------------
+//
+// History.md §8.2: a restore re-applies content through the SAME setters an
+// ordinary edit uses, so validation, hooks and Activities all still run. An
+// applier therefore never writes a raw selector; it calls the model.
+//
+// Each returns true when it applied something. Anything it cannot apply - the
+// entity is gone, the content is not the shape it expects - returns false, and
+// the caller reports that rather than pretending the undo worked.
+
+/*
+ * The generic case: a row recorded by the field-diffing hook carries
+ * `{ field, value }`, so putting it back is writing that field. This goes
+ * through the collection rather than a per-field setter, which History.md §8.2
+ * asks for and which is satisfied here because WeKan's Activities are generated
+ * by `after.update` collection hooks - a collection update runs exactly the
+ * same hooks, validation and activity logging an ordinary edit does. `.direct`
+ * would be the thing that skipped them, and is not used.
+ */
+async function applyFieldContent(collection, row, content) {
+  if (!content || typeof content.field !== 'string') return false;
+  const value = valueFromContent(content);
+  if (value === undefined) return false;
+  const existing = await collection.findOneAsync(row.entityId);
+  if (!existing) return false;
+  await collection.updateAsync(row.entityId, { $set: { [content.field]: value } });
+  return true;
+}
+
+async function applyCardContent(row, content) {
+  const card = await ReactiveCache.getCard(row.entityId);
+  if (!card) return false;
+  // A move is the one card change that is not a single field: it is four of
+  // them that only mean anything together, so it goes back through Card.move
+  // rather than as four writes.
+  if (row.group === 'position') {
+    if (!content) return false;
+    await card.move(
+      content.boardId || card.boardId,
+      content.swimlaneId,
+      content.listId,
+      content.sort,
+      content.lastMoveReason || '',
+    );
+    return true;
+  }
+  if (content?.field === 'cardDependencies') {
+    // History can outlive a target or a move to another board. Undo must not
+    // resurrect a dangling/cross-board edge that the ordinary editor rejects.
+    const { validDependencyRestore } = require('/models/lib/flowHistory');
+    const current = await Cards.findOneAsync(row.entityId);
+    const ids = Array.isArray(content.value) ? content.value.map(dep => dep?.cardId).filter(Boolean) : [];
+    const targets = ids.length ? await Cards.find({ _id: { $in: ids }, boardId: current.boardId }).fetchAsync() : [];
+    if (!validDependencyRestore(current, content.value, targets)) {
+      throw new Meteor.Error('invalid-dependency', 'A dependency target is no longer on this board');
+    }
+  }
+  return applyFieldContent(Cards, row, content);
+}
+
+async function applyListContent(row, content) {
+  const list = await ReactiveCache.getList(row.entityId);
+  if (!list) return false;
+  if (row.group === 'position') {
+    if (!content) return false;
+    const set = {};
+    if (content.sort !== undefined) set.sort = content.sort;
+    if (content.swimlaneId !== undefined) set.swimlaneId = content.swimlaneId;
+    if (Object.keys(set).length === 0) return false;
+    await Lists.updateAsync(list._id, { $set: set });
+    return true;
+  }
+  if (row.group === 'lifecycle' && content && content.deleted !== undefined) {
+    const plan = listLifecyclePlan(list, row, content);
+    if (!plan) return false;
+    if (plan.cards) {
+      await Cards.updateAsync(plan.cards, structuredClone(plan.modifier), { multi: true });
+    }
+    await Lists.updateAsync(list._id, plan.modifier);
+    return true;
+  }
+  return applyFieldContent(Lists, row, content);
+}
+
+async function applySwimlaneContent(row, content) {
+  const swimlane = await ReactiveCache.getSwimlane(row.entityId);
+  if (!swimlane) return false;
+  if (row.group === 'position' && content && content.sort !== undefined) {
+    await Swimlanes.updateAsync(swimlane._id, { $set: { sort: content.sort } });
+    return true;
+  }
+  return applyFieldContent(Swimlanes, row, content);
+}
+
+/*
+ * An attachment row (History.md §12.2). A lifecycle row's content says whether
+ * the attachment is deleted; a removal is written with previousContent only, so
+ * Restore on the "Removed" row (contentForDirection's fallback) makes it live
+ * again, and Restore on the "Added" row of an earlier restore does the same.
+ * Both go through the same soft-delete/restore the card's own Delete uses, so
+ * the activity and the mirror history row are written the same way - and the
+ * cover is never touched: §12.1, only a live attachment on a card can be one.
+ * A rename row ({ field: 'name' }) is the generic field write.
+ */
+async function applyAttachmentContent(row, content) {
+  const attachment = await Attachments.collection.findOneAsync({ _id: row.entityId });
+  if (!attachment) return false;
+  if (row.group === 'lifecycle') {
+    const action = attachmentContentAction(content);
+    if (action === 'restore') {
+      await restoreAttachment({ userId: row.restoredByUserId || row.userId, attachment });
+      return true;
+    }
+    if (action === 'delete') {
+      await softDeleteAttachment({ userId: row.userId, attachment });
+      return true;
+    }
+    return false;
+  }
+  return applyFieldContent(Attachments.collection, row, content);
+}
+
+const APPLIERS = {
+  card: applyCardContent,
+  list: applyListContent,
+  swimlane: applySwimlaneContent,
+  checklist: (row, content) => applyFieldContent(Checklists, row, content),
+  checklistItem: (row, content) => applyFieldContent(ChecklistItems, row, content),
+  comment: (row, content) => applyFieldContent(CardComments, row, content),
+  attachment: applyAttachmentContent,
+};
+
+/* Which collection each entity type lives in, for reading a value back. */
+const COLLECTIONS = {
+  card: Cards,
+  list: Lists,
+  swimlane: Swimlanes,
+  checklist: Checklists,
+  checklistItem: ChecklistItems,
+  comment: CardComments,
+  attachment: Attachments.collection,
+};
+
+/*
+ * What the entity holds RIGHT NOW for the thing this row is about, in the same
+ * shape the row's own content uses.
+ *
+ * A restore needs it so the rows it appends say what actually happened: the
+ * description went from whatever was on the card to the one that was restored.
+ * Without it the appended row repeats the restored row's own before/after,
+ * which is a different change and, when several restores are done in a row, a
+ * false one.
+ */
+async function currentContentOf(row) {
+  if (row.entityType === 'scrum') return scrumHistorySnapshot(row);
+  if (row.entityType === 'rule') return ruleSnapshot(row.entityId);
+  const collection = COLLECTIONS[row.entityType];
+  if (!collection) return null;
+  const doc = await collection.findOneAsync(row.entityId);
+  if (!doc) return null;
+
+  if (row.entityType === 'list' && row.group === 'lifecycle') {
+    return {
+      deleted: Boolean(doc.deletedAt),
+      deletedAt: doc.deletedAt || null,
+      deleteBatchId: doc.deleteBatchId || row.newContent?.deleteBatchId ||
+        row.previousContent?.deleteBatchId || row.batchId || null,
+    };
+  }
+
+  if (row.group === 'position') {
+    const position = {};
+    for (const key of ['boardId', 'swimlaneId', 'listId', 'sort', 'lastMoveReason']) {
+      if (doc[key] !== undefined) position[key] = doc[key];
+    }
+    return Object.keys(position).length ? position : null;
+  }
+
+  const field = (row.newContent && row.newContent.field)
+    || (row.previousContent && row.previousContent.field);
+  if (!field) return null;
+  return contentForField(field, doc[field]);
+}
+
+/*
+ * Apply one row in a direction.
+ *
+ *   'undo'    puts previousContent back - the state before this change.
+ *   'redo'    puts newContent back.
+ *   'restore' makes THIS ROW'S content current, which is newContent: the value
+ *             the row shows in the table.
+ *
+ * That last distinction is the whole of #restore-shows-what-it-does. History.md
+ * §7 says the content column holds "the new text", and §8 says Restore
+ * "restores the selected change" - so the row a reader picks and the value they
+ * get have to be the same thing. Restore used to run 'undo', so choosing the
+ * row that displayed the description you wanted gave you the one BEFORE it, and
+ * the report was exactly that: "it restores wrong history, that I did not
+ * select."
+ *
+ * A row with no newContent is a removal; restoring one means putting back what
+ * it removed, so it falls back to previousContent.
+ *
+ * Undo (Ctrl+Z) is unchanged and still means 'undo': undo reverses your last
+ * change, restore reinstates a chosen one. They are different operations and
+ * only look alike when the chosen row happens to be the last one.
+ */
+async function applyRow(row, direction) {
+  await requireHistoryRowAccess(row, Meteor.userId());
+  if (row.entityType === 'scrum') {
+    return applyScrumHistory(row, contentForDirection(row, direction), direction);
+  }
+  if (row.entityType === 'rule') {
+    return withoutRecording(() => applyRuleHistory(row, contentForDirection(row, direction), direction));
+  }
+  const applier = APPLIERS[row.entityType];
+  if (!applier) return false;
+  const content = contentForDirection(row, direction);
+  if (content === null || content === undefined) return false;
+  try {
+    // The applier's own writes must not be recorded again: the caller writes the
+    // `restored` row itself, and without this a restore left an `edited` row
+    // beside it describing the same write.
+    return await withoutRecording(() => applier(row, content));
+  } catch (error) {
+    console.warn('changeHistory: could not apply a row:', error && error.message);
+    return false;
+  }
+}
+
+// ---- the read method ---------------------------------------------------------
+
+const MAX_PAGE_SIZE = 200;
+
+// Undo/redo are real timestamped transitions too. Checkpoints preserve the
+// report timeline while staying out of the undo stack and preserving redo.
+async function recordReversal(row, userId, before) {
+  await ChangeHistory.record({
+    boardId: row.boardId, swimlaneId: row.swimlaneId, listId: row.listId, cardId: row.cardId,
+    entityType: row.entityType, entityId: row.entityId, group: row.group,
+    changeType: 'restored', previousContent: before, newContent: await currentContentOf(row),
+    userId, restoredFromId: row._id, restoredByUserId: userId, isCheckpoint: true,
+  });
+}
+
+// Claim an ordinary row for one undo or redo BEFORE applying it. Two calls
+// that picked the same row (two tabs, a repeating key) used to both apply it,
+// both flip its flag and both record a reversal. The flag is now flipped
+// conditionally first, so only one caller proceeds; the other is told it lost.
+// When the apply then does nothing, or throws, the claim is released exactly as
+// taken. A crash between claim and apply leaves the row flagged but its value
+// unchanged: redoing or undoing it again re-applies the value it already has.
+async function claimReversal(row, direction) {
+  const at = new Date();
+  const [selector, taken, released] = direction === 'undo'
+    ? [{ _id: row._id, undone: false, superseded: { $ne: true } }, { undone: true, undoneAt: at }, { undone: false, undoneAt: null }]
+    : [{ _id: row._id, undone: true, superseded: { $ne: true } }, { undone: false, undoneAt: null }, { undone: true, undoneAt: row.undoneAt }];
+  const claimed = await ChangeHistory.updateAsync(selector, { $set: taken });
+  if (!claimed) return null;
+  return { release: () => ChangeHistory.updateAsync({ _id: row._id, ...taken }, { $set: released }) };
+}
+
+// Apply a claimed row; any outcome but "applied" gives the claim back.
+async function applyClaimed(row, direction, claim) {
+  let applied;
+  try { applied = await applyRow(row, direction); } catch (error) { if (claim) await claim.release(); throw error; }
+  if (!applied && claim) await claim.release();
+  return applied;
+}
+
+Meteor.methods({
+  /*
+   * One paginated, searchable read for every History view (History.md §6). The
+   * card-group popup, the whole-card view, Member settings, Board settings and
+   * the swimlane/list menus are all this method with a different scope.
+   */
+  async 'changeHistory.page'(request) {
+    check(request, Match.ObjectIncluding({
+      scope: Match.Optional(Match.OneOf(String, null)),
+      scopeId: Match.Optional(Match.OneOf(String, null)),
+      group: Match.Optional(Match.OneOf(String, null)),
+      userId: Match.Optional(Match.OneOf(String, null)),
+      entityType: Match.Optional(Match.OneOf(String, null)),
+      entityId: Match.Optional(Match.OneOf(String, null)),
+      search: Match.Optional(Match.OneOf(String, null)),
+      page: Match.Optional(Number),
+      pageSize: Match.Optional(Number),
+    }));
+    if (!this.userId) {
+      throw new Meteor.Error('not-authorized', 'You must be logged in.');
+    }
+
+    let selector;
+    try {
+      selector = scopeSelector(request);
+    } catch (error) {
+      throw new Meteor.Error('bad-scope', error.message);
+    }
+
+    /*
+     * Permission. A board scope is checked directly. Any other scope is
+     * resolved to its board first, because "can you see this list's history"
+     * is the same question as "can you see its board" - and a caller who names
+     * a swimlane on a board they cannot see must not learn anything from the
+     * answer, not even how many rows there are.
+     */
+    if (request.scope === 'board') {
+      await requireBoardVisible(this.userId, request.scopeId);
+    } else if (request.scope) {
+      const owner = request.scope === 'card'
+        ? await ReactiveCache.getCard(request.scopeId)
+        : request.scope === 'list'
+          ? await ReactiveCache.getList(request.scopeId)
+          : await ReactiveCache.getSwimlane(request.scopeId);
+      if (!owner) throw new Meteor.Error('not-found', 'No such scope.');
+      await requireBoardVisible(this.userId, owner.boardId);
+    } else if (request.userId && request.userId !== this.userId) {
+      // The Member view of somebody else. Restrict it to the boards this caller
+      // can see, so it can never become "show me everything that person did".
+      const boardIds = await Boards.userBoardIds(this.userId);
+      selector.boardId = { $in: boardIds };
+    } else if (!request.userId) {
+      throw new Meteor.Error('bad-scope', 'Ask for a scope or a user.');
+    }
+
+    const pageSize = Math.max(1, Math.min(MAX_PAGE_SIZE, request.pageSize || 25));
+    const search = request.search || '';
+
+    // Search is applied in JS because it spans a blackbox field: the content of
+    // a change has no fixed shape, so there is nothing to index and nothing a
+    // Mongo regex could reliably look inside. The scope selector above has
+    // already narrowed this to one card / list / swimlane / board.
+    const cursor = ChangeHistory.rawCollection().find(selector)
+      .sort({ createdAt: -1 }).batchSize(100);
+    return scanHistoryPage({ cursor,
+      readable: async rows => require('/server/lib/adminOnlyCustomFields').redactFields(
+        await filterReadableHistoryRows(rows, this.userId), this.userId),
+      matches: row => !search || matchesSearch(row, search),
+      paginate: total => pageInfo(total, request.page || 1, pageSize),
+    });
+  },
+
+  /*
+   * Restore selected rows (History.md §8). Multiple rows apply oldest to newest
+   * under one batchId, so a multi-select restore undoes as the single logical
+   * change the user made.
+   */
+  async 'changeHistory.restore'(selected) {
+    check(selected, Match.OneOf(String, [String], Object));
+    if (!this.userId) {
+      throw new Meteor.Error('not-authorized', 'You must be logged in.');
+    }
+    const ids = selectionToIds(selected);
+    if (ids.length === 0) return { restored: 0, skipped: 0 };
+
+    const rows = await ChangeHistory.find({ _id: { $in: ids } }).fetchAsync();
+    rows.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+
+    const batchId = `restore-${Date.now()}-${this.userId}`;
+    let restored = 0;
+    let skipped = 0;
+    for (const row of rows) {
+      await requireBoardWrite(this.userId, row.boardId);
+      await requireHistoryIntegrity(row, this);
+
+      // Read the live value BEFORE applying, so the rows appended below say what
+      // this restore actually did rather than repeating the restored row's own
+      // before/after - which is a different change, and after two restores in a
+      // row, a false one.
+      const displaced = await currentContentOf(row);
+      const applied = await applyRow(row, 'restore');
+      if (!applied) { skipped++; continue; }
+      restored++;
+      if (row.entityType === 'scrum') continue;
+
+      // Two rows, per §8.3: one attributed to whoever made the change being
+      // restored, one to whoever pressed Restore. Both carry restoredFromId, so
+      // the provenance survives even after the row scrolls out of the page.
+      const restoredContent = contentForDirection(row, 'restore');
+      const common = {
+        boardId: row.boardId,
+        swimlaneId: row.swimlaneId,
+        listId: row.listId,
+        cardId: row.cardId,
+        entityType: row.entityType,
+        entityId: row.entityId,
+        group: row.group,
+        changeType: 'restored',
+        previousContent: displaced,
+        newContent: restoredContent,
+        batchId,
+        restoredFromId: row._id,
+        restoredByUserId: this.userId,
+      };
+      await ChangeHistory.record({ ...common, userId: row.userId });
+      if (row.userId !== this.userId) {
+        await ChangeHistory.record({ ...common, userId: this.userId });
+      }
+    }
+    return { restored, skipped };
+  },
+
+  /*
+   * Undo / redo (History.md §7c). These REPLACE
+   * userPositionHistory.undoLast/redoLast: same keyboard shortcuts, same
+   * selection rule (the pure pickUndo/pickRedo), but over every recorded change
+   * rather than positions only.
+   */
+  async 'changeHistory.undoLast'(boardId, requestId) {
+    check(boardId, String);
+    check(requestId, Match.Maybe(String));
+    if (!this.userId) {
+      throw new Meteor.Error('not-authorized', 'You must be logged in.');
+    }
+    await requireBoardWrite(this.userId, boardId);
+    if (requestId !== undefined) return requestedScrumReversal(this, boardId, 'undo', requestId);
+    await assertNoBatchJob(boardId);
+
+    const candidates = await ChangeHistory.find(
+      { userId: this.userId, boardId, undone: false, isCheckpoint: { $ne: true } },
+      { sort: { createdAt: -1 }, limit: 50 },
+    ).fetchAsync();
+    const row = await pendingScrumHistoryRow(boardId, this.userId, 'undo') || pickUndo(candidates);
+    if (!row) return { undone: false };
+    await requireHistoryIntegrity(row, this);
+
+    const before = await currentContentOf(row);
+    // Scrum rows are flagged by their own finalizer (scrumHistoryFinalizer.js).
+    const claim = row.entityType === 'scrum' ? null : await claimReversal(row, 'undo');
+    if (row.entityType !== 'scrum' && !claim) return { undone: false, reason: 'conflict' };
+    const applied = await applyClaimed(row, 'undo', claim);
+    if (!applied) return { undone: false, reason: 'not-applicable' };
+    if (claim) await recordReversal(row, this.userId, before);
+    if (isBatchPart(row)) {
+      const left = await remainingBatchRows(this.userId, boardId, 'undo', row.batchId);
+      if (left > INLINE_BATCH_ROWS) {
+        await startBatchJob({ boardId, userId: this.userId, direction: 'undo', batchId: row.batchId, requestId: null, total: left + 1 });
+        return { undone: true, entityType: row.entityType, entityId: row.entityId, group: row.group, continuing: true };
+      }
+      for (let next = await nextBatchRow(this.userId, boardId, 'undo', row.batchId); next;
+        next = await nextBatchRow(this.userId, boardId, 'undo', row.batchId)) {
+        await requireHistoryIntegrity(next, this);
+        if (!await applyClaimed(next, 'undo', null)) break;
+      }
+    }
+    return {
+      undone: true,
+      entityType: row.entityType,
+      entityId: row.entityId,
+      group: row.group,
+    };
+  },
+
+  async 'changeHistory.redoLast'(boardId, requestId) {
+    check(boardId, String);
+    check(requestId, Match.Maybe(String));
+    if (!this.userId) {
+      throw new Meteor.Error('not-authorized', 'You must be logged in.');
+    }
+    await requireBoardWrite(this.userId, boardId);
+    if (requestId !== undefined) return requestedScrumReversal(this, boardId, 'redo', requestId);
+    await assertNoBatchJob(boardId);
+
+    const candidates = await ChangeHistory.find(
+      { userId: this.userId, boardId, undone: true, isCheckpoint: { $ne: true } },
+      { sort: { undoneAt: -1 }, limit: 50 },
+    ).fetchAsync();
+    const row = await pendingScrumHistoryRow(boardId, this.userId, 'redo') || pickRedo(candidates);
+    if (!row) return { redone: false };
+    await requireHistoryIntegrity(row, this);
+
+    const before = await currentContentOf(row);
+    const claim = row.entityType === 'scrum' ? null : await claimReversal(row, 'redo');
+    if (row.entityType !== 'scrum' && !claim) return { redone: false, reason: 'conflict' };
+    const applied = await applyClaimed(row, 'redo', claim);
+    if (!applied) return { redone: false, reason: 'not-applicable' };
+    if (claim) await recordReversal(row, this.userId, before);
+    if (isBatchPart(row)) {
+      const left = await remainingBatchRows(this.userId, boardId, 'redo', row.batchId);
+      if (left > INLINE_BATCH_ROWS) {
+        await startBatchJob({ boardId, userId: this.userId, direction: 'redo', batchId: row.batchId, requestId: null, total: left + 1 });
+        return { redone: true, entityType: row.entityType, entityId: row.entityId, group: row.group, continuing: true };
+      }
+      for (let next = await nextBatchRow(this.userId, boardId, 'redo', row.batchId); next;
+        next = await nextBatchRow(this.userId, boardId, 'redo', row.batchId)) {
+        await requireHistoryIntegrity(next, this);
+        if (!await applyClaimed(next, 'redo', null)) break;
+      }
+    }
+    return {
+      redone: true,
+      entityType: row.entityType,
+      entityId: row.entityId,
+      group: row.group,
+    };
+  },
+});
+
+export default ChangeHistory;

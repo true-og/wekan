@@ -1,8 +1,24 @@
 import Users from '/models/users';
 import { ReactiveCache } from '/imports/reactiveCache';
+import escapeForRegex from 'escape-string-regexp';
+import { DDPRateLimiter } from 'meteor/ddp-rate-limiter';
+import { tripCanary } from '/server/lib/canary';
+
+DDPRateLimiter.addRule(
+  { type: 'subscription', name: 'user-search' },
+  20,
+  10 * 1000,
+);
 
 Meteor.publish('user-miniprofile', async function (usernames) {
   check(usernames, Array);
+
+  if (!this.userId) {
+    tripCanary('user.miniprofile-without-login', {
+      ip: this.connection && this.connection.clientAddress,
+    });
+    return this.ready();
+  }
 
   // eslint-disable-next-line no-console
   // console.log('usernames:', usernames);
@@ -31,6 +47,8 @@ Meteor.publish('user-admin', function () {
       teams: 1,
       orgs: 1,
       authenticationMethod: 1,
+      // #6736: whether this user previews disabled features. Own document only.
+      featurePreview: 1,
     },
   });
   return ret;
@@ -38,8 +56,23 @@ Meteor.publish('user-admin', function () {
 
 Meteor.publish('user-authenticationMethod', async function (match) {
   check(match, String);
+  if (!this.userId) {
+    try {
+      require('/server/lib/securityLog').record({
+        key: 'authn.authentication-method',
+        action: 'blocked',
+        source: 'user-authenticationMethod',
+        ip: this.connection && this.connection.clientAddress,
+        detail: 'unauthenticated user authentication metadata subscription',
+      });
+    } catch (e) { /* logging must never break the guard */ }
+    return this.ready();
+  }
+  // Only the caller's own record: the sign-in form uses this for the signed-in
+  // user, and any other user's organizations, teams and login method are not
+  // a signed-in stranger's to look up by username.
   const ret = await ReactiveCache.getUsers(
-    { $or: [{ _id: match }, { email: match }, { username: match }] },
+    { _id: this.userId, $or: [{ _id: match }, { 'emails.address': match }, { username: match }] },
     {
       fields: {
         authenticationMethod: 1,
@@ -62,16 +95,16 @@ Meteor.publish('user-search', async function (searchTerm) {
   }
 
   // Create a regex for case-insensitive search
-  const searchRegex = new RegExp(searchTerm, 'i');
+  const searchRegex = new RegExp(escapeForRegex(searchTerm), 'i');
 
-  // Search for users by username, fullname, or email
+  // This general publication deliberately exposes only public identity fields.
+  // Board-authorized email lookup is handled by the bounded searchUsers method.
   const ret = await ReactiveCache.getUsers(
     {
       $or: [
         { username: searchRegex },
         { 'profile.fullname': searchRegex },
-        { 'emails.address': searchRegex }
-      ]
+      ],
     },
     {
       fields: {
@@ -80,13 +113,6 @@ Meteor.publish('user-search', async function (searchTerm) {
         'profile.fullname': 1,
         'profile.avatarUrl': 1,
         'profile.initials': 1,
-        'emails.address': 1,
-        'emails.verified': 1,
-        authenticationMethod: 1,
-        isAdmin: 1,
-        loginDisabled: 1,
-        teams: 1,
-        orgs: 1,
       },
     },
     true,

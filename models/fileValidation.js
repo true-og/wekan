@@ -1,37 +1,120 @@
 import { Meteor } from 'meteor/meteor';
-import { exec, execFile } from 'node:child_process';
+import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'fs';
+const { detectMimeFile } = require('./lib/mimeDetection');
 
-let asyncExecFile;
 let asyncExec;
 
 if (Meteor.isServer) {
-  asyncExecFile = promisify(execFile);
   // Shell-based exec, used only for the admin-configured external scanner
   // command line below (which intentionally contains an arbitrary command and
-  // a {file} placeholder). MIME detection uses asyncExecFile to avoid any shell.
+  // a {file} placeholder). Shared MIME detection uses execFile or bundled libmagic, never a shell.
   asyncExec = promisify(exec);
 }
 
+// POSIX-safe shell quoting for a single argument.  Wraps the value in single
+// quotes and escapes any embedded single quote as '\'' .  Inside single quotes
+// the shell interprets no metacharacters ($ ` \ ; | & > < * ? ( ) etc.), so the
+// value cannot break out of the argument or inject additional commands.  This is
+// used for the file path interpolated into the admin-configured external scanner
+// command line, which is executed through /bin/sh (CWE-78 shell injection).
+function shellQuote(value) {
+  return "'" + String(value).replace(/'/g, "'\\''") + "'";
+}
+
+// Dependency-free content sniff used as a fallback when the `file` binary is
+// unavailable (GHSA-jhph-whx8-wq6p). It looks for definitive HTML / SVG / XML /
+// script signatures — deliberately NOT looser event-handler heuristics — so it
+// does not misfire on a genuine binary upload (e.g. a real PNG) read as text. A
+// match forces the dangerous-content scan regardless of the client-supplied MIME
+// type, closing the spoofed-"image/png" stored-XSS bypass. Exported for testing.
+export function looksLikeDangerousMarkup(text) {
+  if (!text) return false;
+  if (/<\s*(script|html|svg|iframe|object|embed|foreignobject|meta\b)/i.test(text)) return true;
+  // HTML permits a slash between a tag name and its first attribute, and event
+  // handler values may be unquoted. `<img/onerror=...>` therefore executes even
+  // though checks that require whitespace and quotes miss it.
+  if (/<[^>]*[\s/]on[a-z-]{1,40}\s*=\s*(?:["'][^"']*|[^\s>]+)/i.test(text)) return true;
+  if (/<[^>]*(?:href|src|action|formaction)\s*=\s*["']?\s*javascript\s*:/i.test(text)) return true;
+  if (/^\s*(<\?xml|<!doctype)/i.test(text)) return true;
+  if (/<!entity/i.test(text)) return true;
+  return false;
+}
+
+// Detect known "virus test" files that must be refused like real malware even
+// though they are harmless. The EICAR standard antivirus test file is the
+// canonical example: any real scanner flags it, so WeKan blocks it too (so an
+// operator can verify upload scanning works, and so a genuine scanner downstream
+// is never handed it). Matches the stable EICAR marker and its exact signature
+// prefix. Exported for testing.
+export function looksLikeMalwareTestFile(text) {
+  if (!text) return false;
+  if (text.indexOf('EICAR-STANDARD-ANTIVIRUS-TEST-FILE') !== -1) return true;
+  if (/X5O!P%@AP\[4\\PZX54\(P\^\)7CC\)7\}\$EICAR/.test(text)) return true;
+  return false;
+}
+
+// Warn only once if neither the native nor bundled detector can read a file.
+// Missing system `file` alone is normal on portable/Windows installations.
+let mimeDetectionUnavailableWarned = false;
+
 async function detectMimeFromFile(filePath) {
   if (!Meteor.isServer) return undefined;
-
-  try {
-    // Use execFile instead of exec so no shell is spawned and the path is
-    // passed as a direct argument — this eliminates shell injection entirely.
-    const { stdout } = await asyncExecFile('file', ['--mime-type', '-b', String(filePath)]);
-    const mime = (stdout || '').trim().toLowerCase();
-    if (!mime) return undefined;
-    return { mime };
-  } catch (e) {
-    // Fall through to filename/type fallback handled by caller.
+  const mime = await detectMimeFile(filePath);
+  if (mime) return { mime };
+  if (!mimeDetectionUnavailableWarned) {
+    mimeDetectionUnavailableWarned = true;
+    console.warn('fileValidation: MIME detection failed with both system file and bundled libmagic; falling back to JS content sniffing. Check file access and the installed runtime dependencies.');
   }
-
   return undefined;
 }
 
+// Record an upload rejection to the Admin Panel security log (server-only,
+// best-effort — never breaks validation). See docs/Security/Remediation/WeKan.md.
+function logUploadBlock(key, detail) {
+  try {
+    require('/server/lib/securityLog').record({ key, action: 'blocked', source: 'fileValidation', detail });
+  } catch (e) { /* logging must never break validation */ }
+}
+
+const { filenameLooksLikeExploit } = require('./lib/uploadFileName');
+const { isDangerousUploadMismatch } = require('./lib/uploadContentMismatch');
+
+// GitHub issue #3274: sniff the file's REAL type from its magic bytes with the
+// maintained `file-type` package (already a dependency, used the same way by
+// models/lib/fileTypeCorrection.js for extension correction) and compare it
+// against the client-declared MIME type. `file-type` is ESM-only, so it is
+// loaded with a dynamic import; detection failure must never block a
+// legitimate upload, so any error here simply yields no sniffed mime.
+async function detectMimeFromMagicBytes(filePath) {
+  if (!Meteor.isServer) return undefined;
+  try {
+    const { fileTypeFromFile } = await import('file-type');
+    const type = await fileTypeFromFile(String(filePath));
+    return type && type.mime ? String(type.mime).toLowerCase() : undefined;
+  } catch (e) {
+    return undefined;
+  }
+}
+
 export async function isFileValid(fileObj, mimeTypesAllowed, sizeAllowed, externalCommandLine) {
+  // Reject uploads whose FILENAME itself looks like an exploit: HTML/script
+  // markup, an XML doctype/entity (billion-laughs), template-injection payloads,
+  // php/asp tags, javascript:/data: URIs, inline event handlers, null bytes or
+  // path traversal. (File CONTENT is validated separately below.)
+  if (filenameLooksLikeExploit(fileObj && fileObj.name)) {
+    // With an external scanner configured, shell metacharacters in this name
+    // are specifically an attempted ScannerBleed. The generic FileBleed label
+    // hid that distinction from Admin Panel -> Problems -> Security.
+    logUploadBlock(
+      externalCommandLine ? 'injection.shell' : 'file.name',
+      externalCommandLine
+        ? 'rejected exploit-looking filename before external scanner command'
+        : 'rejected exploit-looking filename',
+    );
+    return false;
+  }
   let isValid = true;
   // Always validate uploads. The previous migration flag disabled validation and enabled XSS.
   try {
@@ -69,7 +152,7 @@ export async function isFileValid(fileObj, mimeTypesAllowed, sizeAllowed, extern
       // JavaScript execution vectors
       const patterns = [
         /<script\b/i,
-        /on[a-z\-]{1,20}\s*=\s*['"]/i, // event handlers
+        /<[^>]*[\s/]on[a-z\-]{1,40}\s*=\s*(?:["'][^"']*|[^\s>]+)/i,
         /javascript\s*:/i,
         /<iframe\b/i,
         /<object\b/i,
@@ -85,6 +168,14 @@ export async function isFileValid(fileObj, mimeTypesAllowed, sizeAllowed, extern
     };
 
     const checkDangerousMimeAllowance = async (mime, filePath, fileSize) => {
+      // An SVG was already sanitized on upload (sanitizeUploadedFile.js); check
+      // the WHOLE file, streaming, with the same sanitizer, so an SVG of any
+      // size is accepted when it is clean - a scan of the first megabyte would
+      // reject every large one, or pass a payload past the megabyte.
+      if (mime === 'image/svg+xml' || mime === 'image/svg') {
+        const { svgFileIsClean } = require('./lib/sanitizeSvg');
+        return svgFileIsClean(filePath);
+      }
       // Allow only if content is scanned and clean
       const { text, complete } = await readTextHead(filePath);
       if (!complete) {
@@ -103,6 +194,63 @@ export async function isFileValid(fileObj, mimeTypesAllowed, sizeAllowed, extern
     const detectedMime = mimeTypeResult?.mime || (fileObj.type || '').toLowerCase();
     const baseMimeType = detectedMime.split('/', 1)[0] || '';
 
+    // Reject known virus TEST files (EICAR) — harmless but must be blocked like
+    // real malware. Sniff a small head; the EICAR file is tiny.
+    try {
+      const { text: malwareHead } = await readTextHead(fileObj.path, 65536);
+      if (looksLikeMalwareTestFile(malwareHead)) {
+        console.log('Validation of uploaded file failed (known virus test file): ' + fileObj.path);
+        logUploadBlock('file.malware', 'rejected known virus test file (EICAR)');
+        return false;
+      }
+    } catch (e) {
+      // Head unreadable — the checks below still apply.
+    }
+
+    // GitHub issue #3274 (CWE-434): compare the client-declared MIME type
+    // against the REAL type sniffed from the file's magic bytes, and reject a
+    // dangerous mismatch - e.g. a Windows PE executable or a shell/batch
+    // script renamed with an image/document extension and Content-Type. Kept
+    // narrow (see isDangerousUploadMismatch): it never flags compatible
+    // textual differences (text/plain vs text/csv) to avoid false-positive
+    // breakage of legitimate uploads.
+    try {
+      const magicByteMime = await detectMimeFromMagicBytes(fileObj.path);
+      const { text: mismatchHead } = await readTextHead(fileObj.path, 4096);
+      const mismatch = isDangerousUploadMismatch({
+        declaredMime: fileObj.type,
+        detectedMime: magicByteMime,
+        headText: mismatchHead,
+      });
+      if (mismatch.blocked) {
+        console.log(
+          'Validation of uploaded file failed (declared/content type mismatch): file '
+          + fileObj.path + ' - ' + mismatch.reason,
+        );
+        logUploadBlock('file.mime', 'rejected spoofed upload type (' + mismatch.reason + ')');
+        return false;
+      }
+    } catch (e) {
+      // Mismatch detection must never block a legitimate upload on its own error.
+    }
+
+    // GHSA-jhph-whx8-wq6p (CWE-434): when content-based detection via the `file`
+    // binary is unavailable, `detectedMime` above falls back to the CLIENT-supplied
+    // fileObj.type, which an attacker can spoof to "image/png" so the dangerous-MIME
+    // deny-list below is skipped and HTML+JS is stored (stored XSS). In exactly that
+    // case, sniff the real bytes for markup and force the dangerous-content scan
+    // when the content looks dangerous — never trusting the claimed type.
+    let contentLooksDangerous = false;
+    if (!mimeTypeResult) {
+      try {
+        const { text } = await readTextHead(fileObj.path, 65536);
+        contentLooksDangerous = looksLikeDangerousMarkup(text);
+      } catch (e) {
+        // Head unreadable — fail closed and force the scan below.
+        contentLooksDangerous = true;
+      }
+    }
+
     // Hard deny-list for obviously dangerous types which can be allowed if content is safe
     const dangerousMimes = new Set([
       'text/html',
@@ -113,10 +261,11 @@ export async function isFileValid(fileObj, mimeTypesAllowed, sizeAllowed, extern
       'application/javascript',
       'text/javascript'
     ]);
-    if (dangerousMimes.has(detectedMime)) {
+    if (dangerousMimes.has(detectedMime) || contentLooksDangerous) {
       const allowedByContentScan = await checkDangerousMimeAllowance(detectedMime, fileObj.path, fileObj.size || 0);
       if (!allowedByContentScan) {
         console.log("Validation of uploaded file failed (dangerous MIME content): file " + fileObj.path + " - mimetype " + detectedMime);
+        logUploadBlock('xss.mime', 'rejected dangerous upload content (' + detectedMime + ')');
         return false;
       }
     }
@@ -129,18 +278,22 @@ export async function isFileValid(fileObj, mimeTypesAllowed, sizeAllowed, extern
 
       if (!isValid) {
         console.log("Validation of uploaded file failed: file " + fileObj.path + " - mimetype " + detectedMime);
+        logUploadBlock('file.mime', 'upload mime type not allowed (' + detectedMime + ')');
       }
     }
 
     // Size check
     if (isValid && sizeAllowed && fileObj.size > sizeAllowed) {
       console.log("Validation of uploaded file failed: file " + fileObj.path + " - size " + fileObj.size);
+      logUploadBlock('file.size', 'upload over size limit (' + fileObj.size + ' > ' + sizeAllowed + ')');
       isValid = false;
     }
 
     // External scanner (e.g., antivirus) – expected to delete/quarantine bad files
     if (isValid && externalCommandLine) {
-      await asyncExec(externalCommandLine.replace("{file}", '"' + fileObj.path + '"'));
+      // Shell-quote the file path so a malicious filename cannot inject shell
+      // commands into the admin-configured scanner command line (CWE-78 RCE).
+      await asyncExec(externalCommandLine.replace("{file}", shellQuote(fileObj.path)));
       isValid = fs.existsSync(fileObj.path);
 
       if (!isValid) {

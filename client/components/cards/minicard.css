@@ -5,9 +5,22 @@
   align-items: center;
   margin-bottom: 8px;
 }
+/* #3078: a subtle highlight for a minicard that has comments the current
+   user has not seen yet. An inset ring plus a left-edge stripe, not a
+   background fill, so it stays visible against every label swatch and
+   colorStyle background a minicard can already have (an inline
+   background-color always wins over these box-shadow rings anyway). */
+.minicard.minicard-unread-comments {
+  box-shadow: inset 3px 0 0 0 #f2c94c, inset 0 0 0 1px rgba(242, 201, 76, 0.55);
+}
 .minicard-wrapper.placeholder {
   background: #ccc;
-  border-radius: 1.2vw;
+  border-radius: 17px;
+}
+.minicard-wrapper.card-drop-preview {
+  background: transparent;
+  border-radius: 0;
+  pointer-events: none;
 }
 .minicard-wrapper.ui-sortable-helper {
   cursor: grabbing;
@@ -20,13 +33,13 @@
   padding: 5px;
   background-color: #f2f2f2;
   text-align: center;
-  border-radius: 0.4vw;
+  border-radius: 6px;
 }
 .minicard-wrapper.ui-sortable-helper .multi-selection-checkbox {
   display: none;
 }
 .minicard-wrapper .multi-selection-checkbox + .minicard {
-  margin-left: 1vw;
+  margin-inline-start: 14px;
 }
 /* Enlarge the clickable area of the small selection checkbox so it can be
    reliably clicked at the left side of the minicard. The visible 13px box (and
@@ -36,36 +49,50 @@
   content: "";
   position: absolute;
   top: -8px;
-  left: -8px;
-  right: -8px;
+  inset-inline-start: -8px;
+  inset-inline-end: -8px;
   bottom: -8px;
 }
 @media only screen {
   .minicard {
-    padding: 8px 1vw 3px;
+    padding: 8px 14px 3px;
     position: relative;
     flex: 1;
     flex-wrap: wrap;
     background-color: #fff;
     min-height: 25px;
     box-shadow: 0 2px 3px rgba(0,0,0,0.15);
-    border-radius: 0.3vw;
+    border-radius: 4px;
     color: #4d4d4d;
     overflow: hidden;
     transition: transform 0.2s, border-radius 0.2s;
   }
 }
+/* #1591: the whole-minicard collapse caret, top-left corner - unobtrusive,
+   the same size as the per-checklist caret it mirrors. It sits BEFORE
+   .minicard-title in the markup (see minicard.jade) so it stays at the
+   start of the title's line rather than floating separately. */
+.minicard .minicard-collapse {
+  float: inline-start;
+  margin-inline-end: 4px;
+  font-size: 0.875rem;
+  color: #999;
+  cursor: pointer;
+}
+.minicard .minicard-collapse:hover {
+  color: #4d4d4d;
+}
 .minicard-details-menu-with-handle {
-  float: right;
-  padding-left: 0.7vw;
-  font-size: clamp(14px, 3vw, 18px);
+  float: inline-end;
+  padding-inline-start: 10px;
+  font-size: 0.875rem;
   padding: 0;
   z-index: 1;
 }
 .minicard-details-menu {
-  float: right;
-  font-size: clamp(14px, 3vw, 18px);
-  padding-left: 0.7vw;
+  float: inline-end;
+  font-size: 0.875rem;
+  padding-inline-start: 10px;
 }
 @media print {
   .minicard-details-menu,
@@ -76,7 +103,7 @@
 .minicard.linked-board .linked-icon,
 .minicard.linked-card .linked-icon {
   display: inline-block;
-  margin-right: 1.5vw;
+  margin-inline-end: 21px;
   vertical-align: baseline;
   font-size: 0.9em;
 }
@@ -85,11 +112,11 @@
   color: #937760;
 }
 .is-selected .minicard {
-  transform: translateX(1.5vw);
+  transform: translateX(21px);
   border-bottom-right-radius: 0;
   border-top-right-radius: 0;
   z-index: 25;
-  box-shadow: -0.3vw 2px 3px rgba(0,0,0,0.2);
+  box-shadow: -4px 2px 3px rgba(0,0,0,0.2);
 }
 .minicard:hover:not(.minicard-composer),
 .is-selected .minicard,
@@ -100,24 +127,48 @@
   background: #ededed;
 }
 .minicard .minicard-cover {
-  background-position: center;
-  background-repeat: no-repeat;
-  background-size: contain;
-  height: 150px;
+  height: 120px;
+  margin: 0 -14px 8px -14px;
+  overflow: hidden;
+  background: #f4f5f7;
+  border-radius: 0;
   user-select: none;
-  margin: 8px -1vw 8px -1vw;
-  border-radius: top 0.3vw;
+}
+/* Cover, not contain: the banner fills the card width. The attachment row
+   (attachments.css) uses contain, where the whole file must stay visible. */
+.minicard .minicard-cover-image {
+  width: 100%;
+  height: 120px;
+  display: block;
+  object-fit: cover;
+  object-position: center;
 }
 .minicard .minicard-labels {
   float: none;
-  margin-right: 6vw;
+  margin-inline-end: 84px;
 }
 .minicard .minicard-labels .minicard-label {
-  width: clamp(12px, 1.5vw, 16px);
-  height: clamp(12px, 1.5vw, 16px);
-  border-radius: 0.3vw;
-  margin-right: 0.4vw;
+  width: 12px;
+  height: 12px;
+  border-radius: 4px;
+  margin-inline-end: 6px;
   margin-bottom: 4px;
+}
+/* Keep text labels on a single compact line. The label name is rendered
+   inside a `.viewer`, whose global `min-height: 2.5vh` otherwise forces every
+   label to roughly double height on the minicard. */
+.minicard .minicard-labels .card-label {
+  min-height: 0;
+  padding: 1px 6px;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+.minicard .minicard-labels .card-label .viewer {
+  min-height: 0;
+  display: inline;
+}
+.minicard .minicard-labels .card-label .viewer p {
+  display: inline;
 }
 .minicard .minicard-labels-no-text {
   display: flex;
@@ -125,7 +176,7 @@
 }
 .minicard .minicard-custom-fields {
   display: block;
-  margin-right: 6vw;
+  margin-inline-end: 84px;
 }
 .minicard .minicard-custom-field {
   display: flex;
@@ -134,21 +185,28 @@
   flex-grow: 1;
   display: block;
   word-wrap: break-word;
-  max-width: 13vw;
-  margin-right: 0.5vw;
+  /* Fixed, not 13vw: a chip that grew with the window made the card reflow. */
+  max-width: 160px;
+  margin-inline-end: 7px;
 }
 .minicard .minicard-custom-field-item-fullwidth {
   flex-grow: 1;
   display: block;
   word-wrap: break-word;
   max-width: 100%;
-  margin-right: 0.5vw;
+  margin-inline-end: 7px;
+}
+.minicard .minicard-custom-field-checkbox-icon.minicard-custom-field-checkbox-true {
+  color: #2ecc71;
+}
+.minicard .minicard-custom-field-checkbox-icon.minicard-custom-field-checkbox-false {
+  color: #e74c3c;
 }
 .minicard .handle {
-  width: clamp(20px, 2.5vw, 28px);
-  height: clamp(20px, 2.5vw, 28px);
+  width: 20px;
+  height: 20px;
   position: absolute;
-  right: 0vw;
+  inset-inline-end: 1px;
   top: 28px;
   display: none;
   z-index: 1;
@@ -158,20 +216,142 @@
     display: block;
   }
 }
+/* #6521: on a touch device the handle is the ONLY way to drag a card - the rest
+   of the minicard deliberately pans the board instead - so it has to be a target
+   a finger can actually hit. A 20-28px icon in the corner is a mouse-sized
+   target; on a wall-mounted infoscreen it is close to unusable.
+
+   On a coarse pointer the card's two controls become one column down the
+   TRAILING (right in LTR) edge: the details menu on top, the drag handle
+   directly BELOW it. That is where the handle already is for a mouse - just
+   under the menu button - so both pointer kinds put it in the same place, and
+   the thumb-sized version does not move it somewhere else to be looked for.
+   (It was a full-height strip on the LEADING edge, which reached the size goal
+   but put the handle on the opposite side from every other card control.)
+
+   The handle runs from under the menu to the bottom of the card, so on a tall
+   card it is a large target, and a minimum height keeps it a real one on a card
+   with nothing but a title. Mouse users keep the compact corner handle, since
+   `pointer: coarse` does not match a mouse. */
+/* MOBILE MODE on every browser. The explicit Desktop/Mobile Mode toggle decides
+   this layout, not pointer type: a desktop browser in Mobile Mode must place the
+   controls exactly like a phone does. A phone switched to Desktop Mode keeps the
+   compact desktop handle because none of these body.mobile-mode rules match. */
+  /* Pinned rather than floated: the card gets trailing padding below to keep its
+     text out of this column, and a float would be pushed inward by it. */
+  body.mobile-mode .minicard .minicard-details-menu-with-handle {
+    position: absolute;
+    float: none;
+    top: 0;
+    inset-inline-end: 0;
+    width: 44px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+  }
+  body.mobile-mode .minicard .handle {
+    width: 44px;
+    /* From just below the menu button down to the bottom of the card. */
+    top: 32px;
+    bottom: 0;
+    height: auto;
+    min-height: 36px;
+    inset-inline-start: auto;
+    inset-inline-end: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    /* Keep the handle visually part of the minicard. The icon identifies the
+       drag target; a tinted target area looked like a separate grey button. */
+    /* Safari can paint a transparent, positioned touch target as a grey layer.
+       Use the card's actual background instead, so the target disappears into
+       white, coloured and hover-state minicards alike. */
+    background: inherit !important;
+    border: 0;
+    box-shadow: none;
+    -webkit-tap-highlight-color: transparent;
+    border-end-end-radius: inherit;
+  }
+  body.mobile-mode .minicard .handle::before,
+  body.mobile-mode .minicard .handle::after {
+    background: transparent !important;
+  }
+  /* The card's own content must not sit under the column, and the card must be
+     tall enough to hold menu + handle at their minimum sizes (32 + 36). */
+  body.mobile-mode .minicard.minicard-with-handle {
+    padding-inline-end: 44px;
+    min-height: 68px;
+  }
+  body.mobile-mode .minicard .handle .drag-handle,
+  body.mobile-mode .minicard .handle .fa {
+    font-size: 1.375rem;
+    /* Both glyphs are centered by their equal-width parent controls. Do not add
+       a device- or direction-specific nudge: it makes their actual x centers
+       differ, and the error grows with mobile font scaling. */
+  }
+
 .minicard .handle .drag-handle {
-  font-size: clamp(16px, 3vw, 20px);
+  font-size: 1rem;
   color: #ccc;
   display: inline-block;
   width: 1.4em;
   text-align: center;
 }
 .minicard .minicard-title {
-  margin-right: 1.5vw;
+  /* #6465: one step below the list heading above it (16px), and above the
+     "Add card" affordance below (13px). It used to inherit the 16px document
+     size, which made a card title exactly as loud as the heading of the column
+     holding it. See the note on .list-header-name in lists/list.css. */
+  font-size: 0.875rem;
+  margin-inline-end: 21px;
+  /* #6444: isolate each title's bidirectional context. The title is a
+     dir="auto" .viewer; under a global dir="rtl" document, non-isolated
+     dir="auto" runs share bidi state, so typing a strong RTL (e.g. Arabic)
+     character into another list's dir="auto" composer re-resolved the shared
+     context and visibly reflowed OTHER lists' minicard titles (no data change,
+     reverts on refresh). Isolation makes each title a self-contained run. */
+  unicode-bidi: isolate;
 }
+/* #4990: the title text is the edit target. It is a block so that the whole
+   line, not only the words, is that target: a click on the empty space after a
+   short title is still a click on the title. */
+.minicard .minicard-title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.minicard .minicard-title .minicard-title-text {
+  display: block;
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+/* Direct title editing is disabled; the former editor styles are retained as
+   commented code while the title serves as a card-drag/board-scroll surface.
+.minicard .minicard-title .minicard-title-text.is-editable {
+  cursor: text;
+}
+.minicard .js-minicard-title-form textarea.minicard-title-editor {
+  font-size: 0.875rem;
+  width: 100%;
+  min-height: 40px;
+  max-height: 200px;
+  margin-bottom: 4px;
+  overflow-y: auto;
+  resize: none;
+  user-select: text;
+  Same bidi isolation as the title it stands in for.
+  unicode-bidi: isolate;
+}
+*/
 .minicard .minicard-title .card-number {
   color: #b3b3b3;
   display: inline-block;
-  margin-right: 0.7vw;
+  margin-inline-end: 10px;
 }
 @media only screen {
   .minicard .minicard-title p:last-child {
@@ -180,6 +360,12 @@
   .minicard .minicard-title .viewer {
     display: block;
     word-wrap: break-word;
+    /* #6465: the minicard title renders inside a .viewer, which inherits the
+       global `.viewer { min-height: 2.5vh }` (layouts.css). On tall screens that
+       reserves a big empty band under a one-line title, so half of every
+       minicard was white space. Collapse it to fit the text (same fix already
+       applied to the label .viewer above). */
+    min-height: 0;
   }
 }
 .minicard .dates {
@@ -188,30 +374,41 @@
   flex-wrap: wrap;
   position: relative;
   z-index: 5;
-  margin-right: 6vw;
+  /* #6834: room for the drag handle beside it (20px, 1px from the edge), and
+     no more. It reserved 84px - a third of a 250px minicard - for nothing:
+     the avatars float AFTER this row and `clear: both` starts it below the
+     menu, so a due date "1405-08-10 12:00 (1 day left)" was broken over three
+     lines beside an empty strip. */
+  margin-inline-end: 24px;
   clear: both;
 }
 .minicard .date {
-  margin-right: 0.4vw;
+  margin-inline-end: 6px;
 }
 
-/* Unicode icons for minicard dates - matching cardDate.css */
+/* Font Awesome glyphs for minicard dates - matching cardDate.css */
+.minicard .card-date time::before {
+  font-family: FontAwesome;
+  font-weight: normal;
+  font-style: normal;
+  text-decoration: inherit;
+}
 .minicard .card-date.end-date time::before {
-  content: "🏁"; /* Finish flag - represents end/completion */
+  content: "\f11e"; /* fa-flag-checkered - end/completion */
 }
 .minicard .card-date.due-date time::before {
-  content: "⏰"; /* Alarm clock - represents due/deadline */
+  content: "\f017"; /* fa-clock-o - due/deadline */
 }
 .minicard .card-date.start-date time::before {
-  content: "🚀"; /* Rocket - represents start/launch */
+  content: "\f135"; /* fa-rocket - start/launch */
 }
 .minicard .card-date.received-date time::before {
-  content: "📥"; /* Inbox tray - represents received/incoming */
+  content: "\f01c"; /* fa-inbox - received/incoming */
 }
 
 .minicard .card-date time::before {
   font-size: inherit;
-  margin-right: 0.3em;
+  margin-inline-end: 0.3em;
   display: inline-block;
 }
 
@@ -324,7 +521,7 @@
 }
 
 .minicard .badges {
-  float: left;
+  float: inline-start;
   margin-top: 8px;
   color: #808080;
 }
@@ -332,19 +529,19 @@
   display: none;
 }
 .minicard .badges .badge {
-  float: left;
-  margin-right: 1.5vw;
+  float: inline-start;
+  margin-inline-end: 21px;
   margin-bottom: 4px;
   font-size: 0.9em;
 }
 .minicard .badges .badge.is-finished {
   background: #3cb500;
-  padding: 0 0.4vw;
-  border-radius: 0.4vw;
+  padding: 0 6px;
+  border-radius: 6px;
   color: #fff;
 }
 .minicard .badges .badge:last-of-type {
-  margin-right: 0;
+  margin-inline-end: 0;
 }
 .minicard .badges .badge .badge-icon,
 .minicard .badges .badge .badge-text {
@@ -356,36 +553,44 @@
 }
 .minicard .badges .badge .badge-text {
   font-size: 0.9em;
-  padding-left: 0.3vw;
+  padding-inline-start: 4px;
   line-height: 1.2;
 }
 .minicard .badges .badge .check-list-text {
-  padding-left: 0px;
+  padding-inline-start: 0px;
   line-height: 1.1;
 }
 .minicard .minicard-members,
 .minicard .minicard-assignees,
 .minicard .minicard-creator {
-  float: right;
-  margin-left: 0.7vw;
+  float: inline-end;
+  margin-inline-start: 10px;
   margin-bottom: 4px;
+  /* #2110: the avatars in the order people were added, first at the start,
+     as on the opened card. Floating each one to the end drew them reversed. */
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 2px;
 }
 .minicard .minicard-members .member,
 .minicard .minicard-assignees .member,
 .minicard .minicard-creator .member {
-  float: right;
+  float: none;
+  position: relative;
   border-radius: 50%;
-  height: clamp(24px, 3.5vw, 32px);
-  width: clamp(24px, 3.5vw, 32px);
+  height: 24px;
+  width: 24px;
   margin-bottom: 4px;
 }
 .minicard .minicard-members .assignee,
 .minicard .minicard-assignees .assignee,
 .minicard .minicard-creator .assignee {
-  float: right;
+  float: none;
+  position: relative;
   border-radius: 50%;
-  height: clamp(24px, 3.5vw, 32px);
-  width: clamp(24px, 3.5vw, 32px);
+  height: 24px;
+  width: 24px;
 }
 .minicard .minicard-members + .badges,
 .minicard .minicard-assignees + .badges,
@@ -403,18 +608,65 @@
   display: none;
 }
 .minicard .minicard-description {
-  padding: 8px 0 0 1vw;
+  padding: 8px 0 0 14px;
   color: #000;
   background-color: #eee;
   width: 100%;
   margin-bottom: 3px;
-  margin-left: -0.5vw;
-  border-radius: 0.4vw;
+  margin-inline-start: -7px;
+  border-radius: 6px;
   overflow: hidden;
   text-overflow: ellipsis;
   display: -webkit-box;
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
+}
+/* #4285: compact preview of the most recent comments on the minicard.
+
+   The comments get a line of their own. The assignee, member and creator
+   avatars are `float: inline-end` and the badges `float: inline-start`, and
+   the comments come right after them in the default order. Each
+   .minicard-comment is `overflow: hidden`, which makes it a block formatting
+   context, and a block formatting context next to a float is NARROWED to the
+   space the float leaves: with seven assignees that was a few characters, so
+   the comment read "Någr…" beside a row of avatars. `clear: both` starts the
+   comments under every float, at full width, the way .minicard-checklist does.
+
+   The text wraps and is clamped to three lines with the ellipsis at the end,
+   instead of `nowrap` cutting it at whatever width was left. */
+.minicard .minicard-comments {
+  clear: both;
+  width: 100%;
+  margin-bottom: 3px;
+}
+.minicard .minicard-comment {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  font-size: calc(11px * var(--wekan-ui-font-scale, 1));
+  color: #555;
+  overflow: hidden;
+}
+.minicard .minicard-comment-icon {
+  flex: 0 0 auto;
+}
+.minicard .minicard-comment-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+}
+.minicard .minicard-comments-more {
+  font-size: calc(11px * var(--wekan-ui-font-scale, 1));
+  color: #888;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
 }
 .minicard.minicard-composer {
   margin-bottom: 12px;
@@ -432,6 +684,10 @@
   min-height: 50px;
   margin-bottom: 20px;
   overflow-y: auto;
+  /* #6444: isolate the composer's dir="auto" bidi run so typing a strong RTL
+     character here cannot perturb the rendering of the surrounding minicard
+     titles under a dir="rtl" document. */
+  unicode-bidi: isolate;
 }
 .parent-prefix {
   color: #b3b3b3;
@@ -744,14 +1000,34 @@
   transition: all 0.2s ease;
 }
 
-/* List name display on minicard */
+/* The name of the LIST this card is in, under the badges - "Show on Minicard /
+   List title", for reading a card away from the column it lives in (a
+   swimlane, search results, My Cards).
+
+   `clear` is the whole rule: `.minicard .badges` is `float: inline-start`, so
+   without it this block shares the badges' line and reads as one more badge
+   rather than as the line it is. Logical `inline-start`, so it clears the
+   floats on whichever side the page starts. */
 .minicard-list-name {
+  clear: inline-start;
   font-size: 0.75em;
-  color: #8c8c8c;
+  color: var(--wekan-quiet-text, #595959);
   margin-top: 2px;
   display: flex;
   align-items: center;
-  gap: 0.3vw;
+  gap: 4px;
+}
+
+/* #2426: the swimlane-name label, same place/weight as the list name above -
+   a small, unobtrusive line at the bottom of the minicard. */
+.minicard-swimlane-name {
+  clear: inline-start;
+  font-size: 0.75em;
+  color: var(--wekan-quiet-text, #595959);
+  margin-top: 2px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 /* Checklist display on minicard */
@@ -761,9 +1037,9 @@
   clear: both;
   margin-top: 2px;
   margin-bottom: 5px;
-  padding: 3px 0.5vw;
+  padding: 3px 7px;
   background-color: rgba(255, 255, 255, 0.8);
-  border-radius: 0.3vw;
+  border-radius: 4px;
   border: 1px solid #e0e0e0;
 }
 
@@ -786,8 +1062,8 @@
   font-size: 1.2em;
   color: #666;
   cursor: pointer;
-  padding: 0 0.3vw;
-  border-radius: 0.2vw;
+  padding: 0 4px;
+  border-radius: 3px;
   transition: background-color 0.2s;
 }
 
@@ -801,11 +1077,11 @@
   margin-bottom: 2px;
   display: flex;
   align-items: flex-start;
-  gap: 0.3vw;
+  gap: 4px;
   line-height: 1.2;
   cursor: pointer;
   padding: 2px 0;
-  border-radius: 0.2vw;
+  border-radius: 3px;
   transition: background-color 0.2s;
 }
 
@@ -840,11 +1116,8 @@
   display: inline-flex;
   align-items: center;
   vertical-align: middle;
-  /* Nudge down so the checkmark sits at the vertical middle of the title text
-     (the checked materialCheckBox is shifted up 4px by its own positioning). */
-  position: relative;
-  top: 4px;
-  margin-right: 6px;
+  flex-shrink: 0;
+  margin-inline-end: 0;
   cursor: pointer;
 }
 
@@ -865,4 +1138,101 @@
   height: 1.6em;
   line-height: 1;
   box-sizing: border-box;
+}
+
+/* #3984: Visual card aging — progressively fade cards that have not been
+ * touched recently, when card aging is enabled for the board. */
+.minicard.minicard-aging-1 {
+  opacity: 0.85;
+}
+.minicard.minicard-aging-2 {
+  opacity: 0.6;
+}
+.minicard.minicard-aging-3 {
+  opacity: 0.4;
+}
+.minicard.minicard-aging-1:hover,
+.minicard.minicard-aging-2:hover,
+.minicard.minicard-aging-3:hover {
+  opacity: 1;
+}
+
+/* Jira issue type badge (models/lib/issueTypeIcon.js). */
+.minicard .badge.minicard-issue-type .badge-text {
+  max-width: 8em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.minicard .issue-type-red .badge-icon { color: #d04437; }
+.minicard .issue-type-green .badge-icon { color: #2e8540; }
+.minicard .issue-type-blue .badge-icon { color: #2a6ebb; }
+.minicard .issue-type-purple .badge-icon { color: #7a4fb0; }
+.minicard .issue-type-orange .badge-icon { color: #c26a00; }
+.minicard .issue-type-grey .badge-icon { color: #6b778c; }
+
+/* Markdown title headings retain their hierarchy after the global reset and
+   mobile normal-text rules. Relative sizes follow the selected UI font scale. */
+#content .minicard-title-text .viewer h1 { font-size: 2em !important; }
+#content .minicard-title-text .viewer h2 { font-size: 1.5em !important; }
+#content .minicard-title-text .viewer h3 { font-size: 1.25em !important; }
+#content .minicard-title-text .viewer h4 { font-size: 1.125em !important; }
+#content .minicard-title-text .viewer h5 { font-size: 1em !important; }
+#content .minicard-title-text .viewer h6 { font-size: 0.875em !important; }
+
+/* Board Settings / Card, Show on Minicard (2026-10-02): the compact lines of
+   what the opened card shows. */
+.minicard-description-title,
+.minicard-location,
+.minicard-requested-by,
+.minicard-assigned-by,
+.minicard-attachment-name,
+.minicard-last-activity {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.85em;
+  overflow-wrap: anywhere;
+}
+.minicard-checklist-due {
+  font-size: 0.85em;
+  margin-inline-start: 4px;
+}
+.minicard-card-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 2px;
+}
+.minicard-card-buttons button {
+  font-size: 0.8em;
+  padding: 1px 6px;
+  margin: 0;
+}
+
+/* At risk, Show on Minicard (docs/Features/Cards/At-Risk.md). */
+.minicard .badges .minicard-at-risk .badge-icon {
+  color: #c62828;
+}
+
+/* #2111 / #1604: changed since this member last opened it (Member Settings). */
+.minicard.minicard-unread-changes {
+  box-shadow: inset 4px 0 0 #2b6cb0;
+}
+
+/* Card Settings' sections on the minicard (2026-10-28, models/lib/minicardGroups.js):
+   At risk and Forecast are badges drawn in the dates line, after the date
+   their row follows; and a section boundary can start a second badge strip,
+   which floats beside the first with the gap two badges have. */
+.minicard .dates .badge {
+  align-self: center;
+  margin-inline-end: 6px;
+  font-size: 0.9em;
+  color: #808080;
+}
+.minicard .dates .badge .badge-text {
+  padding-inline-start: 4px;
+}
+.minicard .badges + .badges {
+  margin-inline-start: 21px;
 }

@@ -2,11 +2,13 @@ import { Meteor } from 'meteor/meteor';
 import { Mongo } from 'meteor/mongo';
 import { ReactiveCache } from '/imports/reactiveCache';
 import { SWIMLANE_COLORS } from '/models/metadata/colors';
+import { isHexColor, contrastText } from '/models/lib/contrastColor';
 import PositionHistory from './positionHistory';
 import Activities from '/models/activities';
 import Boards from '/models/boards';
 import Cards from '/models/cards';
-import Lists from '/models/lists';
+import Lists, { normalizeListColor } from '/models/lists';
+import { remapLabelIds } from '/server/lib/labelRemap';
 const { SimpleSchema } = require('/imports/simpleSchema');
 
 const Swimlanes = new Mongo.Collection('swimlanes');
@@ -16,6 +18,9 @@ const Swimlanes = new Mongo.Collection('swimlanes');
  */
 Swimlanes.attachSchema(
   new SimpleSchema({
+    // Scrum metadata is optional and hidden by default; only validated methods write it.
+    scrum: { type: Object, optional: true, blackbox: true },
+    scrumRevision: { type: Number, optional: true, min: 0 },
     title: {
       /**
        * the title of the swimlane
@@ -78,7 +83,14 @@ Swimlanes.attachSchema(
       type: String,
       optional: true,
       // silver is the default
-      allowedValues: SWIMLANE_COLORS,
+      // #5514: accept a named palette color OR a custom '#rrggbb' hex chosen
+      // from the color wheel (instead of a fixed allowedValues enum).
+      custom() {
+        const v = this.value;
+        if (v === undefined || v === null || v === '') return undefined;
+        if (SWIMLANE_COLORS.includes(v) || isHexColor(v)) return undefined;
+        return 'notAllowed';
+      },
     },
     updatedAt: {
       /**
@@ -136,13 +148,17 @@ Swimlanes.attachSchema(
 );
 
 Swimlanes.helpers({
-  async copy(boardId, targetSwimlaneId = null, position = 'below', title = '') {
+  async copy(boardId, targetSwimlaneId = null, position = 'below', title = '', cardIdMap = null, withoutCards = false, copyOptions, copyMaps = null) {
     const oldId = this._id;
     const oldBoardId = this.boardId;
     const desiredTitle = typeof title === 'string' && title.trim().length > 0
       ? title.trim()
       : this.title;
-    this.boardId = boardId;
+    const { copiedScrumMetadata } = require('./lib/scrumCopy');
+    // On another board: its sprint and release linked by name.
+    const planning = Meteor.isServer && oldBoardId !== boardId && !copyMaps
+      ? await require('/server/lib/scrumPlanningPair').scrumPlanningPair(oldBoardId, boardId) : null;
+    const copiedMetadata = copiedScrumMetadata(this, boardId, { omit: !!copyMaps || copyOptions?.scrum === false, planning });
 
     if (process.env.DEBUG === 'true') {
       console.log('[copySwimlane] start', {
@@ -184,13 +200,28 @@ Swimlanes.helpers({
       }
     }
 
-    this.sort = targetSort;
-    this.title = desiredTitle;
-    delete this._id;
-    const newSwimlaneId = await Swimlanes.insertAsync(this);
+    const copy = { ...this, boardId, sort: targetSort, title: desiredTitle };
+    delete copy._id;
+    delete copy.scrum;
+    delete copy.scrumRevision;
+    Object.assign(copy, copiedMetadata);
+    const newSwimlaneId = await Swimlanes.insertAsync(copy);
+    if (copyMaps) copyMaps.swimlanes[oldId] = newSwimlaneId;
+
+    if (copyOptions && !copyOptions.lists) return newSwimlaneId;
 
     const sourceBoard = oldBoardId ? await ReactiveCache.getBoard(oldBoardId) : null;
-    const sourceDefaultSwimlaneId = sourceBoard?.getDefaultSwimline?.()?._id;
+    // Use the ASYNC default-swimlane getter here (this runs on the server): the
+    // sync getDefaultSwimline() self-heals a swimlane-less board via a synchronous
+    // Swimlanes.upsert(), which throws "update is not available on the server.
+    // Please use updateAsync() instead." on Meteor 3 and aborted the whole board
+    // copy (POST /api/boards/:id/copy). getDefaultSwimlineAsync() does the same
+    // pick + idempotent upsertAsync self-heal.
+    const sourceDefaultSwimlane =
+      sourceBoard && typeof sourceBoard.getDefaultSwimlineAsync === 'function'
+        ? await sourceBoard.getDefaultSwimlineAsync()
+        : null;
+    const sourceDefaultSwimlaneId = sourceDefaultSwimlane?._id;
     const isDefaultSourceSwimlane = sourceDefaultSwimlaneId === oldId;
 
     const listQuery = {
@@ -210,6 +241,47 @@ Swimlanes.helpers({
       });
     }
 
+    // #5158 "Copy Swimlane does not copy labels".
+    // Card.copy() remaps each card's labels to the destination board BY NAME,
+    // but it never CREATES labels that are missing on the destination board, so
+    // when a swimlane is copied to ANOTHER board those label assignments are
+    // silently lost. Pre-create the missing labels here (by name + color) so the
+    // per-card remap inside card.copy() finds a match for every label.
+    if (!withoutCards && oldBoardId && oldBoardId !== boardId && (!copyOptions || copyOptions.labels)) {
+      const sourceBoardLabels =
+        (sourceBoard && sourceBoard.labels) || [];
+      const destBoard = await ReactiveCache.getBoard(boardId);
+      if (destBoard) {
+        // Collect every label id referenced by the cards being copied.
+        const referencedLabelIds = new Set();
+        for (const sourceList of sourceLists) {
+          const cards = await ReactiveCache.getCards({
+            listId: sourceList._id,
+            archived: false,
+            swimlaneId: isDefaultSourceSwimlane ? { $in: [oldId, '', null] } : oldId,
+          });
+          for (const card of cards) {
+            for (const labelId of card.labelIds || []) {
+              referencedLabelIds.add(labelId);
+            }
+          }
+        }
+
+        const { missingNames } = remapLabelIds(
+          sourceBoardLabels,
+          [...referencedLabelIds],
+          destBoard.labels || [],
+        );
+
+        for (const name of missingNames) {
+          const sourceLabel = sourceBoardLabels.find(
+            label => label && label.name === name,
+          );
+          await destBoard.addLabel(name, sourceLabel && sourceLabel.color);
+        }
+      }
+    }
+
     for (const sourceList of sourceLists) {
       // Always create a new list for the copied swimlane, even if title already exists.
       const newListId = await Lists.insertAsync({
@@ -222,17 +294,24 @@ Swimlanes.helpers({
         swimlaneId: newSwimlaneId,
         color: sourceList.color,
         width: sourceList.width,
+        ...copiedScrumMetadata(sourceList, boardId, { omit: !!copyMaps || copyOptions?.scrum === false }),
       });
+      if (copyMaps) copyMaps.lists[sourceList._id] = newListId;
 
-      const cardQuery = {
-        listId: sourceList._id,
-        archived: false,
-        swimlaneId: isDefaultSourceSwimlane ? { $in: [oldId, '', null] } : oldId,
-      };
-      const cards = await ReactiveCache.getCards(cardQuery, { sort: { sort: 1 } });
+      // #4726 "Clone Board without cards": when withoutCards is set, the
+      // board/swimlane/list/label/custom-field structure above is still
+      // copied in full; only the per-card copy below is skipped.
+      if (!withoutCards) {
+        const cardQuery = {
+          listId: sourceList._id,
+          archived: false,
+          swimlaneId: isDefaultSourceSwimlane ? { $in: [oldId, '', null] } : oldId,
+        };
+        const cards = await ReactiveCache.getCards(cardQuery, { sort: { sort: 1 } });
 
-      for (const card of cards) {
-        await card.copy(boardId, newSwimlaneId, newListId);
+        for (const card of cards) {
+          await card.copy(boardId, newSwimlaneId, newListId, cardIdMap, copyOptions, !!copyMaps);
+        }
       }
     }
 
@@ -284,7 +363,9 @@ Swimlanes.helpers({
       if (toList) {
         toListId = toList._id;
       } else {
+        const { copiedScrumMetadata } = require('./lib/scrumCopy');
         toListId = await Lists.insertAsync({
+          ...copiedScrumMetadata(list, toBoardId),
           title: list.title,
           boardId: toBoardId,
           type: list.type,
@@ -345,6 +426,7 @@ Swimlanes.helpers({
       {
         boardId: this.boardId,
         //archived: false,
+        deletedAt: null, // soft delete: hide deleted lists (docs/Features/Undo/Undo.md)
       },
       { sort: ['sort'] },
     );
@@ -365,6 +447,7 @@ Swimlanes.helpers({
           { swimlaneId: '' },     // empty string from old shared-lists era
         ],
         archived: false,
+        deletedAt: null, // soft delete: hide deleted lists
       },
       { sort: ['sort'] },
     );
@@ -417,8 +500,32 @@ Swimlanes.helpers({
     return ReactiveCache.getBoard(this.boardId);
   },
 
+  // A swimlane can be linked to, the same way a card and a list can.
+  // models/lib/boardItemUrl.js
+  originRelativeUrl(board) {
+    const { buildSwimlaneRelativeUrl } = require('./lib/boardItemUrl');
+    return buildSwimlaneRelativeUrl(this, board || this.board());
+  },
+  absoluteUrl(board) {
+    const relativeUrl = this.originRelativeUrl(board);
+    if (!relativeUrl) return undefined;
+    return Meteor.absoluteUrl(relativeUrl.replace(/^\//, ''));
+  },
+
   colorClass() {
-    if (this.color) return `swimlane-${this.color}`;
+    // #5514: a custom '#rrggbb' hex has no CSS class; it is applied inline via
+    // colorStyle(). Named palette colors keep using their `swimlane-<name>` class.
+    if (this.color && !isHexColor(this.color)) return `swimlane-${this.color}`;
+    return '';
+  },
+
+  colorStyle() {
+    // #5514: for a custom hex color, set the background inline plus an
+    // automatically readable text color (contrastText) so the header title
+    // stays visible. Empty for named colors (their CSS class sets both).
+    if (isHexColor(this.color)) {
+      return `background-color:${this.color} !important;color:${contrastText(this.color)} !important;`;
+    }
     return '';
   },
 
@@ -462,7 +569,22 @@ Swimlanes.helpers({
         await list.archive();
       }
     }
-    return await Swimlanes.updateAsync(this._id, { $set: { archived: true, archivedAt: new Date() } });
+    // #2292: archive the swimlane's cards WITH it, mirroring the card cascade
+    // of Lists.archive() (models/lists.js). Without this the cards stayed
+    // `archived: false` under an archived swimlane — invisible in every board
+    // view AND in the Archive sidebar, and reassigned to another swimlane by
+    // the startup rescue of #1959/#1971 (server/lib/schemaUpgradeSteps.js),
+    // so restoring the swimlane later found it empty. The swimlane's
+    // archivedAt is captured BEFORE the per-card archive() calls stamp each
+    // card's archivedAt, so restore() below can recognise the cards that were
+    // archived with the swimlane. Cards already archived by the user keep
+    // their own archivedAt (see models/lib/swimlaneArchive.js).
+    const { cardsToArchiveWithSwimlane } = require('./lib/swimlaneArchive');
+    const archivedAt = new Date();
+    for (const card of cardsToArchiveWithSwimlane(await this.allCards())) {
+      await card.archive();
+    }
+    return await Swimlanes.updateAsync(this._id, { $set: { archived: true, archivedAt } });
   },
 
   async restore() {
@@ -471,11 +593,25 @@ Swimlanes.helpers({
         await list.restore();
       }
     }
+    // #2292: restore the cards that were archived WITH this swimlane by
+    // archive() above (their archivedAt is at/after the swimlane's),
+    // mirroring the card cascade of Lists.restore() (models/lists.js). Cards
+    // the user archived individually BEFORE archiving the swimlane stay
+    // archived (see models/lib/swimlaneArchive.js).
+    const { cardsToRestoreWithSwimlane } = require('./lib/swimlaneArchive');
+    for (const card of cardsToRestoreWithSwimlane(await this.allCards(), this.archivedAt)) {
+      await card.restore();
+    }
     return await Swimlanes.updateAsync(this._id, { $set: { archived: false } });
   },
 
   async setColor(newColor) {
-    return await Swimlanes.updateAsync(this._id, { $set: { color: newColor } });
+    // Normalize so an offered-but-unsupported color (or a removal) becomes None
+    // instead of being silently saved as the wrong color or rejected (#5382).
+    // normalizeListColor returns '' for None; store null so the optional,
+    // allowedValues-constrained schema field accepts it (as cards do).
+    const color = normalizeListColor(newColor) || null;
+    return await Swimlanes.updateAsync(this._id, { $set: { color } });
   },
 });
 
@@ -486,8 +622,12 @@ Swimlanes.userArchivedSwimlanes = async userId => {
   })
 };
 
-Swimlanes.userArchivedSwimlaneIds = async () => {
-  const swimlanes = await Swimlanes.userArchivedSwimlanes();
+// The userId is what makes this the USER's archived swimlanes: it was declared
+// with no parameter and called the finder with none either, so the finder asked
+// for the boards of `undefined` and the answer was always empty - the archived
+// half of a global search matched nothing (#6537).
+Swimlanes.userArchivedSwimlaneIds = async userId => {
+  const swimlanes = await Swimlanes.userArchivedSwimlanes(userId);
   return swimlanes.map(swim => { return swim._id; });
 };
 
@@ -580,3 +720,13 @@ Swimlanes.helpers({
 });
 
 export default Swimlanes;
+
+// Prevent direct DDP writes bypassing Scrum reference and lifecycle validation.
+if (Meteor.isServer) {
+  Swimlanes.deny({
+    insert(userId, doc) { return doc.scrum !== undefined || doc.scrumRevision !== undefined; },
+    update(userId, doc, fields) {
+      return fields.some(field => field === 'scrum' || field.startsWith('scrum.') || field === 'scrumRevision');
+    },
+  });
+}

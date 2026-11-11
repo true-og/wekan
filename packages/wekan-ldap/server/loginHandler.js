@@ -1,6 +1,20 @@
-import {slug, getLdapUsername, getLdapEmail, getLdapUserUniqueID, syncUserData, addLdapUser} from './sync';
+import {slug, getLdapUsername, getLdapEmail, getLdapUserUniqueID, syncUserData, addLdapUser, syncUserGroupsToOrgsTeams} from './sync';
 import LDAP from './ldap';
+import { runWithLdapDisconnect } from './connectionGuard';
 import { log_debug, log_info, log_warn, log_error } from './logger';
+import { isAdminByGroups } from './adminGroups';
+import { requireUserCredentials } from './userCredentials';
+import { boundToAnotherEntry } from './accountBinding';
+
+// Org/team sync is optional enrichment; failed sync must not block login.
+async function syncUserGroupsToOrgsTeamsSafe(ldap, ldapUser, userId) {
+  try {
+    await syncUserGroupsToOrgsTeams(ldap, ldapUser, userId);
+  } catch (error) {
+    const reason = error && (error.reason || error.message || error.error);
+    log_warn('LDAP org/team sync failed during login; continuing without org/team sync', reason);
+  }
+}
 
 function fallbackDefaultAccountSystem(bind, username, password) {
   if (typeof username === 'string') {
@@ -30,6 +44,14 @@ Accounts.registerLoginHandler('ldap', async function(loginRequest) {
     return undefined;
   }
 
+  // DDP and REST both reach this handler. Reject malformed credentials before
+  // connecting, looking up an account, or entering the local-login fallback.
+  try {
+    requireUserCredentials(loginRequest.username, loginRequest.ldapPass);
+  } catch (error) {
+    throw new Meteor.Error('LDAP-login-error', 'LDAP authentication failed');
+  }
+
   log_info('Init LDAP login', loginRequest.username);
 
   if (LDAP.settings_get('LDAP_ENABLE') !== true) {
@@ -38,215 +60,236 @@ Accounts.registerLoginHandler('ldap', async function(loginRequest) {
 
   const self = this;
   const ldap = new LDAP();
-  let ldapUser;
 
-  try {
+  // #6467/#6469: run the whole login flow through runWithLdapDisconnect so the
+  // connection opened by ldap.connect() below is ALWAYS released, on every exit
+  // path (success, fallback, thrown Meteor.Error). Previously disconnect() was
+  // never called, so every login attempt leaked a connection to the directory
+  // server until it hit "too many open connections" and fell over.
+  return await runWithLdapDisconnect(ldap, async () => {
+    let ldapUser;
+    const userAuthentication = !!LDAP.settings_get('LDAP_USER_AUTHENTICATION');
 
+    try {
       await ldap.connect();
-
-     if (!!LDAP.settings_get('LDAP_USER_AUTHENTICATION')) {
+      if (userAuthentication) {
         await ldap.bindUserIfNecessary(loginRequest.username, loginRequest.ldapPass);
-       ldapUser = (await ldap.searchUsers(loginRequest.username))[0];
-       } else {
-
-       const users = await ldap.searchUsers(loginRequest.username);
-
-       if (users.length !== 1) {
-         log_info('Search returned', users.length, 'record(s) for', loginRequest.username);
-         throw new Error('User not Found');
-       }
-
-      if (await ldap.isUserInGroup(loginRequest.username, users[0])) {
-        ldapUser = users[0];
-      } else {
-        throw new Error('User not in a valid group');
       }
-
-      if (await ldap.auth(users[0].dn, loginRequest.ldapPass) !== true) {
-        ldapUser = null;
-        log_info('Wrong password for', loginRequest.username)
-      }
-     }
-
-  } catch (error) {
-     log_error(error);
-  }
-
-  if (!ldapUser) {
-    if (LDAP.settings_get('LDAP_LOGIN_FALLBACK') === true) {
-      return fallbackDefaultAccountSystem(self, loginRequest.username, loginRequest.ldapPass);
+      const users = await ldap.searchUsers(loginRequest.username);
+      if (users.length !== 1) throw new Error('User not uniquely identified');
+      ldapUser = users[0];
+    } catch (error) {
+      ldapUser = null;
+      log_error(error);
     }
 
-    throw new Meteor.Error('LDAP-login-error', `LDAP Authentication failed with provided username [${ loginRequest.username }]`);
-  }
+    if (!ldapUser) {
+      if (LDAP.settings_get('LDAP_LOGIN_FALLBACK') === true) {
+        return fallbackDefaultAccountSystem(self, loginRequest.username, loginRequest.ldapPass);
+      }
 
-  // Look to see if user already exists
+      throw new Meteor.Error('LDAP-login-error', `LDAP Authentication failed with provided username [${ loginRequest.username }]`);
+    }
 
-  let userQuery;
+    // The directory group policy applies to both user-bind and service-bind
+    // authentication. A verified identity outside the allowed group must not
+    // fall back to a cached local password and bypass this policy.
+    if (!(await ldap.isUserInGroup(loginRequest.username, ldapUser))) {
+      try {
+        if (typeof global.__wekanTripCanary === 'function') {
+          global.__wekanTripCanary('ldap.group-denied');
+        }
+      } catch (e) { /* logging must never break the guard */ }
+      throw new Meteor.Error('LDAP-login-error', 'LDAP authentication failed');
+    }
 
-  const Unique_Identifier_Field = getLdapUserUniqueID(ldapUser);
-  let user;
-   // Attempt to find user by unique identifier
+    // In service-search mode the group lookup must still use the service
+    // identity, before auth() switches the connection to the user's bind.
+    if (!userAuthentication && await ldap.auth(ldapUser.dn, loginRequest.ldapPass) !== true) {
+      if (LDAP.settings_get('LDAP_LOGIN_FALLBACK') === true) {
+        return fallbackDefaultAccountSystem(self, loginRequest.username, loginRequest.ldapPass);
+      }
+      throw new Meteor.Error('LDAP-login-error', 'LDAP authentication failed');
+    }
 
-  if (Unique_Identifier_Field) {
-    userQuery = {
-      'services.ldap.id': Unique_Identifier_Field.value,
-    };
+    // Look to see if user already exists
 
-    log_info('Querying user');
-    log_debug('userQuery', userQuery);
+    let userQuery;
 
-    user = await Meteor.users.findOneAsync(userQuery);
-   }
+    const Unique_Identifier_Field = getLdapUserUniqueID(ldapUser);
+    let user;
+     // Attempt to find user by unique identifier
 
-  // Attempt to find user by username
+    if (Unique_Identifier_Field) {
+      userQuery = {
+        'services.ldap.id': Unique_Identifier_Field.value,
+      };
 
-  let username;
-  let email;
+      log_info('Querying user');
+      log_debug('userQuery', userQuery);
 
-   if (LDAP.settings_get('LDAP_USERNAME_FIELD') !== '') {
-    username = slug(getLdapUsername(ldapUser));
-  } else {
-    username = slug(loginRequest.username);
-  }
+      user = await Meteor.users.findOneAsync(userQuery);
+     }
 
-  if(LDAP.settings_get('LDAP_EMAIL_FIELD') !== '') {
-    email = getLdapEmail(ldapUser);
-  }
+    // Attempt to find user by username
+
+    let username;
+    let email;
+
+     if (LDAP.settings_get('LDAP_USERNAME_FIELD') !== '') {
+      username = slug(getLdapUsername(ldapUser));
+    } else {
+      username = slug(loginRequest.username);
+    }
+
+    if(LDAP.settings_get('LDAP_EMAIL_FIELD') !== '') {
+      email = getLdapEmail(ldapUser);
+    }
 
 
-  if (!user) {
-    if(email && LDAP.settings_get('LDAP_EMAIL_MATCH_REQUIRE') === true) {
+    if (!user) {
+      if(email && LDAP.settings_get('LDAP_EMAIL_MATCH_REQUIRE') === true) {
+        // `username`, not `_id`: a user's _id is a random id, never the
+        // username, so this query never found anybody and LDAP_EMAIL_MATCH_REQUIRE
+        // made every existing user's login try to create the account again.
+        if(LDAP.settings_get('LDAP_EMAIL_MATCH_VERIFIED') === true) {
+          userQuery = {
+            username,
+            'emails.0.address' : email,
+            'emails.0.verified' : true
+          };
+        } else {
+          userQuery = {
+            username,
+            'emails.0.address' : email
+          };
+        }
+      } else {
+        userQuery = {
+          username
+        };
+      }
+
+      log_debug('userQuery', userQuery);
+
+      user = await Meteor.users.findOneAsync(userQuery);
+    }
+
+    // Attempt to find user by e-mail address only
+
+    if (!user && email && LDAP.settings_get('LDAP_EMAIL_MATCH_ENABLE') === true) {
+
+      log_info('No user exists with username', username, '- attempting to find by e-mail address instead');
+
       if(LDAP.settings_get('LDAP_EMAIL_MATCH_VERIFIED') === true) {
         userQuery = {
-          '_id' : username,
-          'emails.0.address' : email,
+          'emails.0.address': email,
           'emails.0.verified' : true
         };
       } else {
         userQuery = {
-          '_id' : username,
           'emails.0.address' : email
         };
       }
-    } else {
-      userQuery = {
-        username
+
+      log_debug('userQuery', userQuery);
+
+      user = await Meteor.users.findOneAsync(userQuery);
+
+    }
+
+    // A name or e-mail match that belongs to ANOTHER directory entry is not
+    // this person's account (accountBinding.js): a reused login name must not
+    // open the previous owner's boards.
+    if (user && boundToAnotherEntry(user, Unique_Identifier_Field)) {
+      log_warn('LDAP login matched an existing account by name or e-mail, but that account belongs to another directory entry; refusing', user._id);
+      throw new Meteor.Error('LDAP-login-error', 'LDAP authentication failed');
+    }
+
+    // Login user if they exist
+    if (user) {
+      if (user.authenticationMethod !== 'ldap' && LDAP.settings_get('LDAP_MERGE_EXISTING_USERS') !== true) {
+        log_info('User exists without "authenticationMethod : ldap"');
+        throw new Meteor.Error('LDAP-login-error', `LDAP Authentication succeded, but there's already a matching Wekan account in MongoDB`);
+      }
+
+      log_info('Logging user');
+
+      // Return the verified identity only. Meteor's DDP login pipeline (or the
+      // REST caller) validates account status before issuing a session token.
+      if (LDAP.settings_get('LDAP_SYNC_ADMIN_STATUS') === true) {
+        log_debug('Updating admin status');
+        // #6540: trimmed, case-insensitive, and an empty configured list never
+        // grants admin. See server/adminGroups.js for what went wrong.
+        user.isAdmin = isAdminByGroups(
+          await ldap.getUserGroups(username, ldapUser),
+          LDAP.settings_get('LDAP_SYNC_ADMIN_GROUPS'),
+        );
+        await Meteor.users.updateAsync({_id: user._id}, {$set: {isAdmin: user.isAdmin}});
+      }
+
+      if( LDAP.settings_get('LDAP_SYNC_GROUP_ROLES') === true ) {
+        log_debug('Updating Groups/Roles');
+        const groups = await ldap.getUserGroups(username, ldapUser);
+
+        if( groups.length > 0 ) {
+          Roles.setUserRoles(user._id, groups );
+          log_info(`Updated roles to:${  groups.join(',')}`);
+        }
+      }
+
+      // #4737: sync LDAP groups as Organizations/Teams at login too (default off).
+      await syncUserGroupsToOrgsTeamsSafe(ldap, ldapUser, user._id);
+
+      await syncUserData(user, ldapUser);
+
+      if (LDAP.settings_get('LDAP_LOGIN_FALLBACK') === true) {
+        await Accounts.setPasswordAsync(user._id, loginRequest.ldapPass, {logout: false});
+      }
+
+      return {
+        userId: user._id,
       };
     }
 
-    log_debug('userQuery', userQuery);
+    // Create new user
 
-    user = await Meteor.users.findOneAsync(userQuery);
-  }
+    log_info('User does not exist, creating', username);
 
-  // Attempt to find user by e-mail address only
-
-  if (!user && email && LDAP.settings_get('LDAP_EMAIL_MATCH_ENABLE') === true) {
-
-    log_info('No user exists with username', username, '- attempting to find by e-mail address instead');
-
-    if(LDAP.settings_get('LDAP_EMAIL_MATCH_VERIFIED') === true) {
-      userQuery = {
-        'emails.0.address': email,
-        'emails.0.verified' : true
-      };
-    } else {
-      userQuery = {
-        'emails.0.address' : email
-      };
+    if (LDAP.settings_get('LDAP_USERNAME_FIELD') === '') {
+      username = undefined;
     }
 
-    log_debug('userQuery', userQuery);
-
-    user = await Meteor.users.findOneAsync(userQuery);
-
-  }
-
-  // Login user if they exist
-  if (user) {
-    if (user.authenticationMethod !== 'ldap' && LDAP.settings_get('LDAP_MERGE_EXISTING_USERS') !== true) {
-      log_info('User exists without "authenticationMethod : ldap"');
-      throw new Meteor.Error('LDAP-login-error', `LDAP Authentication succeded, but there's already a matching Wekan account in MongoDB`);
+    if (LDAP.settings_get('LDAP_LOGIN_FALLBACK') !== true) {
+      loginRequest.ldapPass = undefined;
     }
 
-    log_info('Logging user');
+    const result = await addLdapUser(ldapUser, username, loginRequest.ldapPass);
 
-    const stampedToken = Accounts._generateStampedLoginToken();
-    const update_data = {
-      $push: {
-        'services.resume.loginTokens': Accounts._hashStampedToken(stampedToken),
-      },
-    };
+    if (result instanceof Error) {
+      throw result;
+    }
 
     if (LDAP.settings_get('LDAP_SYNC_ADMIN_STATUS') === true) {
       log_debug('Updating admin status');
-      const targetGroups = LDAP.settings_get('LDAP_SYNC_ADMIN_GROUPS').split(',');
-      const groups = (await ldap.getUserGroups(username, ldapUser)).filter((value) => targetGroups.includes(value));
-
-      user.isAdmin = groups.length > 0;
-      await Meteor.users.updateAsync({_id: user._id}, {$set: {isAdmin: user.isAdmin}});
+      result.isAdmin = isAdminByGroups(
+        await ldap.getUserGroups(username, ldapUser),
+        LDAP.settings_get('LDAP_SYNC_ADMIN_GROUPS'),
+      );
+      await Meteor.users.updateAsync({_id: result.userId}, {$set: {isAdmin: result.isAdmin}});
     }
 
     if( LDAP.settings_get('LDAP_SYNC_GROUP_ROLES') === true ) {
-      log_debug('Updating Groups/Roles');
       const groups = await ldap.getUserGroups(username, ldapUser);
-
       if( groups.length > 0 ) {
-        Roles.setUserRoles(user._id, groups );
-        log_info(`Updated roles to:${  groups.join(',')}`);
+        Roles.setUserRoles(result.userId, groups );
+        log_info(`Set roles to:${  groups.join(',')}`);
       }
     }
 
-    await Meteor.users.updateAsync(user._id, update_data );
+    // #4737: sync LDAP groups as Organizations/Teams for the new user (default off).
+    await syncUserGroupsToOrgsTeamsSafe(ldap, ldapUser, result.userId);
 
-    await syncUserData(user, ldapUser);
-
-    if (LDAP.settings_get('LDAP_LOGIN_FALLBACK') === true) {
-      await Accounts.setPasswordAsync(user._id, loginRequest.ldapPass, {logout: false});
-    }
-
-    return {
-      userId: user._id,
-      token: stampedToken.token,
-    };
-  }
-
-  // Create new user
-
-  log_info('User does not exist, creating', username);
-
-  if (LDAP.settings_get('LDAP_USERNAME_FIELD') === '') {
-    username = undefined;
-  }
-
-  if (LDAP.settings_get('LDAP_LOGIN_FALLBACK') !== true) {
-    loginRequest.ldapPass = undefined;
-  }
-
-  const result = await addLdapUser(ldapUser, username, loginRequest.ldapPass);
-
-  if (LDAP.settings_get('LDAP_SYNC_ADMIN_STATUS') === true) {
-    log_debug('Updating admin status');
-    const targetGroups = LDAP.settings_get('LDAP_SYNC_ADMIN_GROUPS').split(',');
-    const groups = (await ldap.getUserGroups(username, ldapUser)).filter((value) => targetGroups.includes(value));
-
-    result.isAdmin = groups.length > 0;
-    await Meteor.users.updateAsync({_id: result.userId}, {$set: {isAdmin: result.isAdmin}});
-  }
-
-  if( LDAP.settings_get('LDAP_SYNC_GROUP_ROLES') === true ) {
-    const groups = await ldap.getUserGroups(username, ldapUser);
-    if( groups.length > 0 ) {
-      Roles.setUserRoles(result.userId, groups );
-      log_info(`Set roles to:${  groups.join(',')}`);
-    }
-  }
-
-
-  if (result instanceof Error) {
-    throw result;
-  }
-
-  return result;
+    return result;
+  });
 });

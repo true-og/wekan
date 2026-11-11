@@ -28,7 +28,7 @@ test.describe('My Cards, filter & sort', () => {
     } else {
       // Navigate directly — myCards template renders .board-header-btn-container (from myCardsHeaderBar)
       // and optionally a .wrapper (when boards have cards).
-      await boardPage.goto(`${BASE_URL}/my-cards`, { waitUntil: 'networkidle' });
+      await boardPage.goto(`${BASE_URL}/my-cards`, { waitUntil: 'domcontentloaded' });
       // The page always renders the header bar with a board-title h1
       const content = boardPage.locator('.board-header-btn-container, .board-title, .wrapper').first();
       await expect(content).toBeVisible({ timeout: 10_000 });
@@ -37,71 +37,43 @@ test.describe('My Cards, filter & sort', () => {
 
   test('"My Cards" page shows cards assigned to the current user', async ({ page, user, board }) => {
     // Assign the user to the Alpha Card via MongoDB
-    db.mongoEval(`
-      db.cards.updateOne(
-        { boardId: ${JSON.stringify(board.boardId)}, title: 'Alpha Card' },
-        { $set: { assignees: [${JSON.stringify(user.id)}] } }
-      );
-    `);
+    db.updateOne('cards', { boardId: board.boardId, title: 'Alpha Card' },
+      { $set: { assignees: [user.id] } });
 
     const { loginWithToken } = require('../helpers/auth');
     await loginWithToken(page, user.id, user.token);
-    await page.goto(`${BASE_URL}/my-cards`, { waitUntil: 'networkidle' });
+    await page.goto(`${BASE_URL}/my-cards`, { waitUntil: 'domcontentloaded' });
 
-    const alphaCard = page.locator('.minicard-title, .card-title').filter({ hasText: 'Alpha Card' });
-    if (await alphaCard.count() > 0) {
-      await expect(alphaCard.first()).toBeVisible({ timeout: 10_000 });
-    }
-    // Beta/Gamma (not assigned to user) should NOT appear
-    const betaCard = page.locator('.minicard-title, .card-title').filter({ hasText: 'Beta Card' });
-    await expect(betaCard).not.toBeVisible({ timeout: 3_000 }).catch(() => {});
+    await expect.poll(() => page.evaluate(() => Meteor.userId())).toBe(user.id);
+    await expect(page).toHaveURL(/\/my-cards(?:[?#]|$)/);
+    const cards = page.locator('.my-cards-card-wrapper .minicard-title, .my-cards-card-title-table');
+    await expect(cards.filter({ hasText: 'Alpha Card' })).toBeVisible({ timeout: 15_000 });
+    // Unassigned cards must not be included in either My Cards layout.
+    await expect(cards.filter({ hasText: 'Beta Card' })).toHaveCount(0);
+    await expect(cards.filter({ hasText: 'Gamma Card' })).toHaveCount(0);
   });
 
   test('filter by assignee shows only assigned cards on the board', async ({ boardPage, board, user }) => {
     // Self-assign user to Alpha Card — set both assignees and members so either
     // WeKan filter field (card.assignees vs card.members) will match.
-    db.mongoEval(`
-      db.cards.updateOne(
-        { boardId: ${JSON.stringify(board.boardId)}, title: 'Alpha Card' },
-        { $set: { assignees: [${JSON.stringify(user.id)}], members: [${JSON.stringify(user.id)}] } }
-      );
-    `);
-    await boardPage.reload({ waitUntil: 'networkidle' });
+    db.updateOne('cards', { boardId: board.boardId, title: 'Alpha Card' },
+      { $set: { assignees: [user.id], members: [user.id] } });
+    await boardPage.reload({ waitUntil: 'domcontentloaded' });
 
     const sp = new SearchPage(boardPage);
     await sp.openFilterSidebar();
 
-    // sidebarFilters.jade: first .js-toggle-assignee-filter = "No Assignee" filter,
-    // subsequent ones = per board member. Our board has 1 member (the owner).
-    // The second filter element targets the current user.
-    const allAssigneeFilters = boardPage.locator('.js-toggle-assignee-filter');
-    const filterCount = await allAssigneeFilters.count();
-
-    if (filterCount >= 2) {
-      // Click the second filter (index 1) = the user's filter
-      const userFilter = allAssigneeFilters.nth(1);
-      await userFilter.click();
-      // Give the reactive filter time to apply (mini-mongo + Blaze re-render)
-      await boardPage.waitForTimeout(1_500);
-
-      // Alpha Card (assigned to user) should remain visible after filter.
-      // If the filter excludes it (field mismatch with seeded data), fall back to
-      // verifying the board sidebar is still present (no crash).
-      const bp = new BoardPage(boardPage);
-      const alphaVisible = await bp.minicard(board.listIds[0], 'Alpha Card')
-        .isVisible()
-        .catch(() => false);
-      if (!alphaVisible) {
-        // Filter may be using a different field than what we seeded;
-        // verify the board didn't crash by checking the sidebar is still open.
-        await expect(boardPage.locator('.board-sidebar')).toBeVisible({ timeout: 5_000 });
-      } else {
-        await expect(bp.minicard(board.listIds[0], 'Alpha Card')).toBeVisible({ timeout: 5_000 });
-      }
-    } else {
-      // Assignee filter for members not rendered — just confirm sidebar opened
-      await expect(boardPage.locator('.board-sidebar')).toBeVisible();
-    }
+    const userFilter = boardPage.locator(
+      `.js-toggle-assignee-filter[data-filter-id="${user.id}"]`,
+    );
+    await expect(userFilter).toBeVisible();
+    await userFilter.click();
+    await expect(userFilter.locator('i.fa-check')).toBeVisible();
+    const bp = new BoardPage(boardPage);
+    await expect(bp.minicard(board.listIds[0], 'Alpha Card')).toBeVisible();
+    await expect(boardPage.locator('.js-minicard').filter({ hasText: 'Beta Card' })).toBeHidden();
+    await expect(boardPage.locator('.js-minicard').filter({ hasText: 'Gamma Card' })).toBeHidden();
+    await expect(boardPage.locator('.board-sidebar')).toBeVisible();
   });
 
   test('sorting cards by date does not crash and reorders list', async ({ boardPage, board }) => {

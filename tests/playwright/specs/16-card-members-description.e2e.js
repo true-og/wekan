@@ -9,6 +9,7 @@
  *  - Description editor opens when the description area is clicked
  *  - Adding a description and saving it persists the text
  *  - The "add card" form on a list creates a new card
+ *  - Requested/Assigned By icon controls expose Add or Edit from their value
  */
 
 const { test, expect } = require('../fixtures');
@@ -17,6 +18,30 @@ const BoardPage = require('../pages/BoardPage');
 const CardPage = require('../pages/CardPage');
 
 test.describe('Card members & description', () => {
+  test('Requested By exposes Edit while empty Assigned By exposes Add', async ({ boardPage, board }) => {
+    db.updateOne('boards', { _id: board.boardId }, {
+      $set: { allowsRequestedBy: true, allowsAssignedBy: true },
+    });
+    db.updateOne('cards', { boardId: board.boardId, title: 'Alpha Card' }, {
+      $set: { requestedBy: 'Customer One', assignedBy: '' },
+    });
+    await boardPage.reload({ waitUntil: 'domcontentloaded' });
+
+    const bp = new BoardPage(boardPage);
+    const cp = new CardPage(boardPage);
+    await bp.clickCard(board.listIds[0], 'Alpha Card');
+    await cp.waitForOpen();
+
+    await expect(cp.root.locator('.card-details-item-requested-by, .card-details-item-name')
+      .filter({ hasText: 'Requested By' }).locator('.js-open-inlined-form'))
+      .toHaveAttribute('aria-label', /Edit/i);
+    const assignedByAction = cp.root.locator('.card-details-item-assigned-by, .card-details-item-name')
+      .filter({ hasText: 'Assigned By' }).locator('.js-open-inlined-form');
+    await expect(assignedByAction).toHaveAttribute('aria-label', /Add/i);
+    await expect(assignedByAction).toHaveAttribute('title', /Add/i);
+    await expect(assignedByAction.locator('i.fa-plus')).toHaveCount(1);
+  });
+
   test('member selector popup opens from a card', async ({ boardPage, board }) => {
     const errors = [];
     boardPage.on('pageerror', e => errors.push(e.message));
@@ -126,13 +151,9 @@ test.describe('Card members & description', () => {
 
   test('seeded description text is visible when card opens', async ({ boardPage, board }) => {
     // Seed a description directly via MongoDB
-    db.mongoEval(`
-      db.cards.updateOne(
-        { boardId: ${JSON.stringify(board.boardId)}, title: 'Alpha Card' },
-        { $set: { description: 'Integration test description text' } }
-      );
-    `);
-    await boardPage.reload({ waitUntil: 'networkidle' });
+    db.updateOne('cards', { boardId: board.boardId, title: 'Alpha Card' },
+      { $set: { description: 'Integration test description text' } });
+    await boardPage.reload({ waitUntil: 'domcontentloaded' });
 
     const bp = new BoardPage(boardPage);
     const cp = new CardPage(boardPage);
@@ -177,10 +198,13 @@ test.describe('Card members & description', () => {
 
     // Submit via button.primary.confirm
     await boardPage.locator('.add-controls button.primary.confirm').first().click();
-    await boardPage.waitForTimeout(800);
 
-    // New card should appear on the board
-    await expect(bp.minicard(listA, 'Playwright New Card')).toBeVisible({ timeout: 8_000 });
+    // New card should appear on the board. Card creation awaits an async card
+    // number allocation (board.getNextCardNumber) before the Cards.insert, so
+    // under the heavy all-parallel run — where WebKit shares the single dev
+    // server — the minicard can take several seconds to render. Use the suite's
+    // standard 15s budget (spec 24 uses the same) instead of a short 8s window.
+    await expect(bp.minicard(listA, 'Playwright New Card')).toBeVisible({ timeout: 15_000 });
 
     const critical = errors.filter(
       e => !e.includes('ResizeObserver') && !e.includes('Non-Error promise rejection'),

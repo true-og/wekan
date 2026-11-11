@@ -1,0 +1,21 @@
+{
+  "repo": "wekan/wekan",
+  "kind": "wekan",
+  "branch": "main",
+  "changelog": "CHANGELOG-big.md",
+  "upcoming": "# Upcoming WeKan \u00ae release",
+  "audits": [
+    [
+      "python3",
+      "releases/check-telemetry.py",
+      "--source",
+      "."
+    ]
+  ],
+  "indicatorCommand": [
+    "python3",
+    "releases/risk-audit.py",
+    "--source",
+    "."
+  ]
+}

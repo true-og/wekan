@@ -1,66 +1,38 @@
-template(name="translation")
-  .setting-content
-    unless currentUser.isAdmin
-      | {{_ 'error-notAuthorized'}}
-    else
-      .content-title.ext-box
-        .ext-box-left
-          if loading.get
-            +spinner
-          else if translationSetting.get
-            span
-              i.fa.fa-globe
-              unless isMiniScreen
-                | {{_ 'translation'}}
-            input#searchTranslationInput(placeholder="{{_ 'search'}}")
-            button#searchTranslationButton
-              i.fa.fa-search
-              | {{_ 'search'}}
-            .ext-box-right
-              span {{#unless isMiniScreen}}{{_ 'translation-number'}}{{/unless}} #{translationNumber}
+//- Admin Panel / Settings / Translation. It renders through the shared table page
+//- now - docs/Features/General/Table.md - so the title, the search box, the pager and
+//- the table itself all come from ONE template, and this pane only says what is
+//- different about it: its four columns, its interactive rows and its "New" link.
+//-
+//- It kept a hand-written table until then, which is why its right-hand side was
+//- off screen: the shared page is width:100% + table-layout:fixed with equal,
+//- wrapping columns, and a hand-written table in the admin body gets the
+//- wide-table treatment (a 1200px floor, nowrap cells) instead.
+template(name="translationSettings")
+  +tablePage(tablePageData)
 
-      .content-body
-        .side-menu
-          ul
-            li.active
-              a.js-translation-menu(data-id="translation-setting")
-                i.fa.fa-globe
-                | {{_ 'translation'}}
-        .main-body
-          if loading.get
-            +spinner
-          else if translationSetting.get
-            +translationGeneral
-
-template(name="translationGeneral")
-  table
-    thead
-      tr
-        th {{_ 'language'}}
-        th {{_ 'text'}}
-        th {{_ 'translation-text'}}
-        th
-          +newTranslationRow
-    tbody
-      each translation in translationList
-        +translationRow(translationId=translation._id)
-
+//- The header of the last column: the shared page owns the <th>, this owns what is
+//- inside it (docs/Features/General/Table.md, headerTemplate).
 template(name="newTranslationRow")
   a.new-translation
     i.fa.fa-plus
     | {{_ 'new'}}
 
+//- Interactive row: an Edit link and the ⋯ menu, which a text-cell column spec
+//- cannot express - so this pane owns its <tr> (rowTemplate) and is responsible
+//- for matching the four columns of the header.
 template(name="translationRow")
   tr
-    td {{translationData.language}}
-    td {{translationData.text}}
-    td {{translationData.translationText}}
+    //- The actions come FIRST, under the "New" header, the way every other Admin
+    //- Panel table page orders them (Organizations, Teams, People).
     td
       a.edit-translation
         i.fa.fa-pencil-square-o
         | {{_ 'edit'}}
       a.more-settings-translation
         | ⋯
+    td {{translationData.language}}
+    td {{translationData.text}}
+    td {{translationData.translationText}}
 
 template(name="editTranslationPopup")
   form
@@ -72,7 +44,7 @@ template(name="editTranslationPopup")
       input.js-translation-text(type="text" value=translation.text required readonly)
     label
       | {{_ 'translation-text'}}
-      input.js-translation-translation-text(type="text" value=translation.translationText)
+      textarea.js-translation-translation-text(rows="2")= translation.translationText
     hr
     div.buttonsContainer
       input.primary.wide(type="submit" value="{{_ 'save'}}")
@@ -85,11 +57,11 @@ template(name="newTranslationPopup")
     label
       | {{_ 'text'}}
       span.error.hide.text-taken
-        | {{_ 'error-text-taken'}}
+        | {{_ 'editTranslationPopup-title'}}
       input.js-translation-text(type="text" value="" required)
     label
       | {{_ 'translation-text'}}
-      input.js-translation-translation-text(type="text" value="")
+      textarea.js-translation-translation-text(rows="2")
     hr
     div.buttonsContainer
       input.primary.wide(type="submit" value="{{_ 'save'}}")

@@ -14,10 +14,107 @@
 
 const { test, expect } = require('../fixtures');
 const db = require('../helpers/db');
+const { loginWithToken, openBoard } = require('../helpers/auth');
 const BoardPage = require('../pages/BoardPage');
 const CardPage = require('../pages/CardPage');
+const { centerOf } = require('../helpers/dragSort');
+
+async function dragSidebarItemToCard(page, source, target) {
+  const from = await centerOf(source);
+  const to = await centerOf(target);
+  await page.mouse.move(from.cx, from.cy);
+  await page.mouse.down();
+  await page.mouse.move(from.cx + 12, from.cy, { steps: 4 });
+  await page.mouse.move(to.cx, to.cy, { steps: 16 });
+  await page.waitForTimeout(100);
+  await page.mouse.up();
+}
 
 test.describe('Labels & due dates', () => {
+  test('#1554 sidebar labels remain droppable on cards rendered later', async ({
+    boardPage,
+    board,
+  }) => {
+    const labelId = `issue-1554-label-${Date.now()}`;
+    db.updateOne('boards', { _id: board.boardId }, {
+      $push: { labels: { _id: labelId, name: 'Dragged Label', color: 'green' } },
+    });
+    await boardPage.reload({ waitUntil: 'domcontentloaded' });
+
+    const existing = db.findOne('cards', {
+      boardId: board.boardId,
+      title: 'Alpha Card',
+    });
+    const lateCardId = db.uid('late-card');
+    db.insertOne('cards', {
+      ...existing,
+      _id: lateCardId,
+      title: 'Later Card',
+      labelIds: [],
+      sort: existing.sort + 50,
+      createdAt: new Date(),
+      modifiedAt: new Date(),
+      dateLastActivity: new Date(),
+    });
+
+    const bp = new BoardPage(boardPage);
+    await expect(bp.minicard(board.listIds[0], 'Later Card')).toBeVisible();
+    await bp.openSidebar();
+    const label = boardPage.locator('.board-sidebar .js-label').filter({
+      hasText: 'Dragged Label',
+    });
+    await expect(label).toBeVisible();
+
+    await dragSidebarItemToCard(
+      boardPage,
+      label,
+      bp.minicard(board.listIds[0], 'Later Card'),
+    );
+    await expect.poll(() => {
+      const card = db.findOne('cards', { _id: lateCardId });
+      return card && card.labelIds;
+    }).toContain(labelId);
+  });
+
+  test('#6615: an existing card with dates opens and remains editable', async ({ boardPage, board }) => {
+    const errors = [];
+    boardPage.on('pageerror', error => errors.push(error.message));
+
+    const card = db.findOne('cards', {
+      boardId: board.boardId,
+      title: 'Alpha Card',
+    });
+    const labelId = `issue-6615-label-${Date.now()}`;
+    db.updateOne('boards', { _id: board.boardId }, {
+      $push: { labels: { _id: labelId, name: 'Still assigned', color: 'green' } },
+    });
+    db.updateOne('cards', { _id: card._id }, {
+      $set: {
+        receivedAt: new Date('2026-08-18T08:00:00.000Z'),
+        startAt: new Date('2026-08-19T08:00:00.000Z'),
+        dueAt: new Date('2026-08-20T17:00:00.000Z'),
+        endAt: new Date('2026-08-21T17:00:00.000Z'),
+        labelIds: [labelId],
+      },
+    });
+    await boardPage.reload({ waitUntil: 'domcontentloaded' });
+
+    const bp = new BoardPage(boardPage);
+    const cp = new CardPage(boardPage);
+    await bp.clickCard(board.listIds[0], 'Alpha Card');
+    await cp.waitForOpen();
+
+    await expect(cp.root.locator('.card-date')).toHaveCount(4);
+    await expect(cp.root.locator('.card-label').filter({ hasText: 'Still assigned' }))
+      .toBeVisible();
+    await cp.editTitle('Alpha Card remains editable');
+    await expect(cp.title()).toContainText('Alpha Card remains editable');
+
+    expect(errors.filter(message =>
+      /get(Received|Start|Due|End) is not a function/.test(message),
+    )).toEqual([]);
+  });
+
   test('label selector popup opens from a card', async ({ boardPage, board }) => {
     const bp = new BoardPage(boardPage);
     const cp = new CardPage(boardPage);
@@ -48,7 +145,7 @@ test.describe('Labels & due dates', () => {
     await boardPage.waitForTimeout(500);
 
     // createLabelPopup: fill name and pick a color
-    const nameInput = pop.locator('input.js-label-name, input#labelName');
+    const nameInput = pop.locator('.js-label-name, input#labelName');
     if (await nameInput.count() > 0) {
       await nameInput.fill('TestLabel');
       // Pick the first palette color
@@ -67,9 +164,7 @@ test.describe('Labels & due dates', () => {
           .toBeVisible({ timeout: 8_000 });
       } else {
         // Popup didn't reopen (Blaze re-render race) — verify label in MongoDB instead
-        const result = db.mongoEval(
-          `db.boards.findOne({ _id: ${JSON.stringify(board.boardId)}, 'labels.name': 'TestLabel' }, { _id: 1 })`
-        );
+        const result = db.findOne('boards', { _id: board.boardId, 'labels.name': 'TestLabel' }, { _id: 1 });
         // If the label is in the DB or we simply couldn't verify, pass
         // (the absence of a JS error is the key assertion)
         console.log('Label popup reopen skipped; DB result:', result ? 'found' : 'not found yet');
@@ -83,14 +178,10 @@ test.describe('Labels & due dates', () => {
   test('applying a seeded label to a card shows it in card details', async ({ boardPage, board }) => {
     // Seed a label directly onto the board document
     const labelId = `label-${Date.now()}`;
-    db.mongoEval(`
-      db.boards.updateOne(
-        { _id: ${JSON.stringify(board.boardId)} },
-        { $push: { labels: { _id: ${JSON.stringify(labelId)}, name: 'SeededLabel', color: 'green' } } }
-      );
-    `);
+    db.updateOne('boards', { _id: board.boardId },
+      { $push: { labels: { _id: labelId, name: 'SeededLabel', color: 'green' } } });
 
-    await boardPage.reload({ waitUntil: 'networkidle' });
+    await boardPage.reload({ waitUntil: 'domcontentloaded' });
     const bp = new BoardPage(boardPage);
     const cp = new CardPage(boardPage);
     const [listA] = board.listIds;
@@ -102,17 +193,11 @@ test.describe('Labels & due dates', () => {
     const pop = boardPage.locator('.js-pop-over');
     // Find the seeded label in the popup and click to apply it
     const labelItem = pop.locator('.js-select-label').filter({ hasText: 'SeededLabel' });
-    if (await labelItem.count() > 0) {
-      await labelItem.first().click();
-      await boardPage.waitForTimeout(600);
+    await expect(labelItem).toBeVisible();
+    await labelItem.click();
 
-      // The label badge should now appear in the card details
-      const labelBadge = cp.root.locator('.card-label').filter({ hasText: 'SeededLabel' });
-      await expect(labelBadge.first()).toBeVisible({ timeout: 5_000 });
-    } else {
-      // Label not yet visible in popup (reactive latency) — verify popup is still open
-      await expect(pop).toBeVisible({ timeout: 3_000 });
-    }
+    const labelBadge = cp.root.locator('.card-label').filter({ hasText: 'SeededLabel' });
+    await expect(labelBadge).toBeVisible({ timeout: 5_000 });
   });
 
   test('due date "+" button opens the date-editor popup', async ({ boardPage, board }) => {
@@ -129,15 +214,17 @@ test.describe('Labels & due dates', () => {
       await addDueDateBtn.first().click();
       const pop = boardPage.locator('.js-pop-over');
       await expect(pop).toBeVisible({ timeout: 8_000 });
-      // Popup should have a date input
-      await expect(pop.locator('input.js-date-field, input[type=date]').first()).toBeVisible({ timeout: 5_000 });
+      await expect(pop.locator('.selected-calendar-picker')).toBeVisible();
+      await expect(pop.locator('.js-calendar-day').first()).toBeVisible();
+      await expect(pop.locator('.js-calendar-hour')).toBeVisible();
+      await expect(pop.locator('.js-calendar-minute')).toBeVisible();
     } else {
       // Board may not allow due dates or user is a worker — skip interaction
       console.log('Note: .js-due-date button not found; board may not allow due dates');
     }
   });
 
-  test('setting a due date saves and displays a date badge on the card', async ({ boardPage, board }) => {
+  test('setting a due date saves the selected value', async ({ boardPage, board }) => {
     const errors = [];
     boardPage.on('pageerror', e => errors.push(e.message));
 
@@ -151,9 +238,13 @@ test.describe('Labels & due dates', () => {
     const addDueDateBtn = cp.root.locator('a.js-due-date');
     if (await addDueDateBtn.count() > 0) {
       await cp.setDueDate('2099-12-31');
-      // After saving, a date badge should appear in the due-date section
-      const badge = cp.dueDateBadge();
-      await expect(badge.first()).toBeVisible({ timeout: 8_000 });
+      await expect.poll(() => {
+        const saved = db.findOne('cards', {
+          boardId: board.boardId,
+          title: 'Alpha Card',
+        })?.dueAt;
+        return saved ? new Date(saved).toISOString() : '';
+      }).toMatch(/^2099-12-31T/);
     } else {
       console.log('Note: due-date add button not available; skipping set-date assertion');
     }
@@ -165,16 +256,158 @@ test.describe('Labels & due dates', () => {
     expect(critical).toHaveLength(0);
   });
 
+  // #6809: the calendar opens on today and marks it; Save without clicking a
+  // day saves today at the popup's default time instead of "Invalid date".
+  test('#6809: Save without picking a day saves today', async ({ boardPage, board }) => {
+    const cp = new CardPage(boardPage);
+    const bp = new BoardPage(boardPage);
+    const card = db.findOne('cards', { boardId: board.boardId, title: 'Alpha Card' });
+    db.updateOne('boards', { _id: board.boardId }, { $set: { allowsDueDate: true } });
+    // Empty: every opened card shows Due when the board does (since
+    // 2026-10-28, no per-card choice), so its "+" is there to click.
+    db.updateOne('cards', { _id: card._id }, { $unset: { dueAt: '', shownFields: '' } });
+    await bp.clickCard(board.listIds[0], 'Alpha Card');
+    await cp.waitForOpen();
+    await cp.root.locator('a.js-due-date').first().click();
+    const pop = boardPage.locator('.js-pop-over');
+    await expect(pop.locator('.selected-calendar-picker')).toBeVisible();
+    // Today is the selected day, not only the marked one.
+    await expect(pop.locator('.js-calendar-day.is-today')).toHaveAttribute('aria-pressed', 'true');
+    await pop.locator('button.js-submit-date').click();
+    // Negative: no "Invalid date".
+    await expect(pop.locator('.warning')).toHaveCount(0);
+    await expect.poll(() => {
+      const saved = db.findOne('cards', { _id: card._id })?.dueAt;
+      return saved ? new Date(saved).toDateString() : '';
+    }).toBe(new Date().toDateString());
+  });
+
+  test('changing an existing due date saves the replacement (#6607)', async ({ boardPage, board }) => {
+    db.updateOne('cards', { boardId: board.boardId, title: 'Alpha Card' },
+      { $set: { dueAt: new Date('2098-01-15T17:00:00') } });
+    await boardPage.reload({ waitUntil: 'domcontentloaded' });
+
+    const bp = new BoardPage(boardPage);
+    const cp = new CardPage(boardPage);
+    const [listA] = board.listIds;
+    await bp.clickCard(listA, 'Alpha Card');
+    await cp.waitForOpen();
+    // #6607 is about CHANGING a due date. The one above was written straight to
+    // the database, so wait until this card shows it: opened earlier, the card
+    // offers "+ add due date", which is replaced by the date badge mid-click -
+    // a timeout, or worse, a test of adding instead of changing.
+    await expect(cp.root.locator('a.js-edit-date.card-date').first()).toBeVisible();
+
+    await cp.setDueDate('2099-12-31');
+    await expect.poll(() => {
+      const saved = db.findOne('cards', {
+        boardId: board.boardId,
+        title: 'Alpha Card',
+      })?.dueAt;
+      return saved ? new Date(saved).toISOString() : '';
+    }).toMatch(/^2099-12-31T/);
+  });
+
+  test('#6636/#6638 widened card keeps real content in its gutters and centers the date editor', async ({ boardPage, board }) => {
+    const bp = new BoardPage(boardPage);
+    const cp = new CardPage(boardPage);
+    const [listA] = board.listIds;
+    await bp.clickCard(listA, 'Alpha Card');
+    await cp.waitForOpen();
+
+    // Reproduce #6638's wide desktop card. The regression left a correctly
+    // padded but empty canvas beside all visible content, so computed padding
+    // alone was a false positive.
+    await cp.root.evaluate(el => {
+      el.style.setProperty('width', 'min(1100px, 90vw)', 'important');
+      el.style.setProperty('max-width', '90vw', 'important');
+    });
+
+    const gutters = await cp.root.locator('.card-details-canvas').evaluate(el => {
+      const style = getComputedStyle(el);
+      const content = el.querySelector('.card-details-items');
+      const canvasBox = el.getBoundingClientRect();
+      const contentBox = content?.getBoundingClientRect();
+      return {
+        left: parseFloat(style.paddingLeft),
+        right: parseFloat(style.paddingRight),
+        fits: el.scrollWidth <= el.clientWidth,
+        ownsHeader: Boolean(el.querySelector(':scope > .card-details-header')),
+        ownsContent: Boolean(content),
+        contentLeft: contentBox ? contentBox.left - canvasBox.left : 0,
+        contentRight: contentBox ? canvasBox.right - contentBox.right : 0,
+      };
+    });
+    expect(gutters.left).toBeGreaterThanOrEqual(20);
+    expect(gutters.right).toBeGreaterThanOrEqual(20);
+    expect(gutters.fits).toBe(true);
+    expect(gutters.ownsHeader).toBe(true);
+    expect(gutters.ownsContent).toBe(true);
+    expect(gutters.contentLeft).toBeGreaterThanOrEqual(20);
+    expect(gutters.contentRight).toBeGreaterThanOrEqual(20);
+
+    await cp.openDueDateEditor();
+    const layout = await boardPage.locator('.js-pop-over').evaluate(el => {
+      const box = el.getBoundingClientRect();
+      const wrapper = el.querySelector('.content-wrapper');
+      return {
+        centerError: Math.abs((box.left + box.right) / 2 - innerWidth / 2),
+        shellFits: el.scrollWidth <= el.clientWidth,
+        contentFits: !wrapper || wrapper.scrollWidth <= wrapper.clientWidth,
+      };
+    });
+    expect(layout.centerError).toBeLessThanOrEqual(1);
+    expect(layout.shellFits).toBe(true);
+    expect(layout.contentFits).toBe(true);
+  });
+
+  test('clicking an existing start date reopens and saves its editor', async ({ page, user }) => {
+    const seeded = db.seedBoard({
+      ownerId: user.id,
+      cardTitlesPerList: [['Existing start date'], [], []],
+    });
+    try {
+      const cardId = db.findCardIdByTitle({
+        boardId: seeded.boardId,
+        title: 'Existing start date',
+      });
+      db.updateOne('cards', { _id: cardId }, {
+        $set: { startAt: new Date('2098-01-15T12:00:00.000Z') },
+      });
+      db.updateOne('users', { _id: user.id }, {
+        $set: { 'profile.showDesktopDragHandles': false },
+      });
+      await loginWithToken(page, user.id, user.token);
+      await openBoard(page, seeded.boardId, seeded.slug);
+
+      const badge = page.locator(
+        `.js-minicard[data-card-id="${cardId}"] .start-date.js-edit-date`,
+      );
+      await expect(badge).toBeVisible({ timeout: 8_000 });
+      await badge.click();
+      const pop = page.locator('.js-pop-over');
+      const date = pop.locator('input.js-date-field, input[type=date]').first();
+      await expect(date).toHaveValue('2098-01-15', { timeout: 5_000 });
+      await new CardPage(page).selectDateInPopup('2099-12-30');
+      await expect(date).toHaveValue('2099-12-30');
+      await pop.locator('button.js-submit-date').click();
+
+      await expect.poll(() => {
+        const saved = db.findOne('cards', { _id: cardId })?.startAt;
+        return saved ? new Date(saved).toISOString() : '';
+      })
+        .toMatch(/^2099-12-30T/);
+    } finally {
+      db.cleanup({ boardIds: [seeded.boardId] });
+    }
+  });
+
   test('clearing a due date removes its badge from the card', async ({ boardPage, board }) => {
     // Seed a due date directly so we skip the "set" step
-    const dueDate = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
-    db.mongoEval(`
-      db.cards.updateOne(
-        { boardId: ${JSON.stringify(board.boardId)}, title: 'Alpha Card' },
-        { $set: { dueAt: ISODate(${JSON.stringify(dueDate)}) } }
-      );
-    `);
-    await boardPage.reload({ waitUntil: 'networkidle' });
+    const dueDate = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    db.updateOne('cards', { boardId: board.boardId, title: 'Alpha Card' },
+      { $set: { dueAt: dueDate } });
+    await boardPage.reload({ waitUntil: 'domcontentloaded' });
 
     const bp = new BoardPage(boardPage);
     const cp = new CardPage(boardPage);

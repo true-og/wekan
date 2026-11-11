@@ -18,6 +18,99 @@ const SearchPage = require('../pages/SearchPage');
 const BoardPage = require('../pages/BoardPage');
 
 test.describe('Search', () => {
+  test('Latin search help explains negation, conjunction and archive defaults', async ({ boardPage }) => {
+    await boardPage.evaluate(() => Meteor.callAsync('setLanguage', 'la'));
+    const sp = new SearchPage(boardPage);
+    await sp.navigateToGlobalSearch();
+    const help = boardPage.locator('.global-search-instructions');
+    await expect(help).toContainText('habet:-debitum');
+    await expect(help).toContainText('sine die debito');
+    await expect(help).toContainText('Pro ordine descendente');
+    await expect(help).toContainText('cuilibet condicionum');
+    await expect(help).toContainText('omnibus operatoribus');
+    await expect(help).toContainText('Praedefinite chartae in archivo non quaeruntur.');
+    await expect(help).not.toContainText('Latine:');
+  });
+
+  test('Latin overdue predicate excludes future cards', async ({ boardPage, board, user }) => {
+    db.updateOne('users', { _id: user.id }, { $set: { 'profile.language': 'la' } });
+    db.updateOne('cards', { boardId: board.boardId, title: 'Alpha Card' }, { $set: { dueAt: new Date(Date.now() - 86400000) } });
+    db.updateOne('cards', { boardId: board.boardId, title: 'Beta Card' }, { $set: { dueAt: new Date(Date.now() + 7 * 86400000) } });
+    await boardPage.reload();
+    await expect(boardPage.locator('html')).toHaveAttribute('lang', 'la');
+    const sp = new SearchPage(boardPage);
+    await sp.navigateToGlobalSearch();
+    await sp.globalSearch('debitum:praeteritum');
+    await expect.poll(() => sp.globalSearchResultTitles(), { timeout: 20000 }).toContain('Alpha Card');
+    expect(await sp.globalSearchResultTitles()).not.toContain('Beta Card');
+    await expect(boardPage.locator('.global-search-error-messages')).toHaveCount(0);
+  });
+
+  test('Latin title operator finds a matching card and excludes other titles', async ({ boardPage, user }) => {
+    db.updateOne('users', { _id: user.id }, { $set: { 'profile.language': 'la' } });
+    await boardPage.reload();
+    await expect(boardPage.locator('html')).toHaveAttribute('lang', 'la');
+    const sp = new SearchPage(boardPage);
+    await sp.navigateToGlobalSearch();
+    await sp.globalSearch('tituluschartae:"Alpha Card"');
+    await expect.poll(() => sp.globalSearchResultTitles(), { timeout: 20000 }).toContain('Alpha Card');
+    expect(await sp.globalSearchResultTitles()).not.toContain('Beta Card');
+    await expect(boardPage.locator('.global-search-error-messages')).toHaveCount(0);
+  });
+
+  test('Veps overdue search uses the translated predicate and excludes future cards', async ({ boardPage, board, user }) => {
+    db.updateOne('users', { _id: user.id }, { $set: { 'profile.language': 've-PP' } });
+    db.updateOne('cards', { boardId: board.boardId, title: 'Alpha Card' }, { $set: { dueAt: new Date(Date.now() - 86400000) } });
+    db.updateOne('cards', { boardId: board.boardId, title: 'Beta Card' }, { $set: { dueAt: new Date(Date.now() + 7 * 86400000) } });
+    await boardPage.reload();
+    await expect(boardPage.locator('html')).toHaveAttribute('lang', 've-PP');
+    const sp = new SearchPage(boardPage);
+    await sp.navigateToGlobalSearch();
+    await sp.globalSearch('märaig:möhäline');
+    await expect.poll(() => sp.globalSearchResultTitles(), { timeout: 20000 }).toContain('Alpha Card');
+    expect(await sp.globalSearchResultTitles()).not.toContain('Beta Card');
+    await expect(boardPage.locator('.global-search-error-messages')).toHaveCount(0);
+  });
+
+  test('Corsican overdue search uses the translated predicate and excludes future cards', async ({ boardPage, board, user }) => {
+    db.updateOne('users', { _id: user.id }, { $set: { 'profile.language': 'co' } });
+    db.updateOne('cards', { boardId: board.boardId, title: 'Alpha Card' }, { $set: { dueAt: new Date(Date.now() - 86400000) } });
+    db.updateOne('cards', { boardId: board.boardId, title: 'Beta Card' }, { $set: { dueAt: new Date(Date.now() + 7 * 86400000) } });
+    await boardPage.reload();
+    await expect(boardPage.locator('html')).toHaveAttribute('lang', 'co');
+    const sp = new SearchPage(boardPage);
+    await sp.navigateToGlobalSearch();
+    await sp.globalSearch('scadenza:scadutu');
+    await expect.poll(() => sp.globalSearchResultTitles(), { timeout: 20000 }).toContain('Alpha Card');
+    expect(await sp.globalSearchResultTitles()).not.toContain('Beta Card');
+    await expect(boardPage.locator('.global-search-error-messages')).toHaveCount(0);
+  });
+
+  test('Corsican search help explains absence, sorting and case-insensitive text', async ({ boardPage, user }) => {
+    db.updateOne('users', { _id: user.id }, { $set: { 'profile.language': 'co' } });
+    await boardPage.reload();
+    await expect(boardPage.locator('html')).toHaveAttribute('lang', 'co');
+    const sp = new SearchPage(boardPage);
+    await sp.navigateToGlobalSearch();
+    const help = boardPage.locator('.global-search-instructions');
+    await expect(help).toContainText('has:-due');
+    await expect(help).toContainText('senza data di scadenza');
+    await expect(help).toContainText('Per un urdinamentu discendente');
+    await expect(help).toContainText('ùn distinguenu micca e maiuscule da e minuscule');
+    await expect(help).not.toContainText('Per impostazione predefinita');
+  });
+
+  test('Southern Sotho search help explains positive and negative integer values', async ({ boardPage }) => {
+    await boardPage.evaluate(() => Meteor.callAsync('setLanguage', 'st'));
+    const sp = new SearchPage(boardPage);
+    await sp.navigateToGlobalSearch();
+    const help = boardPage.locator('.global-search-instructions');
+    await expect(help).toContainText('palo e felletseng e kgolo ho 0');
+    await expect(help).toContainText('kapa e ka tlase ho 0');
+    await expect(help).not.toContainText('nomoro e felletseng e ntle');
+    await expect(help).toContainText('has:-due');
+  });
+
   test('global search returns cards matching the query and excludes non-matching cards', async ({ boardPage, board }) => {
     const sp = new SearchPage(boardPage);
     await sp.navigateToGlobalSearch();
@@ -60,6 +153,19 @@ test.describe('Search', () => {
     expect(leaked.length).toBe(0);
   });
 
+  test('public boards are searchable only by their active members', async ({ page, user, user2, board }) => {
+    db.updateOne('boards', { _id: board.id }, { $set: { permission: 'public' } });
+    await loginWithToken(page, user2.id, user2.token);
+    const sp = new SearchPage(page);
+    await sp.navigateToGlobalSearch();
+    await sp.globalSearch('Alpha Card');
+    expect(await sp.globalSearchResultTitles()).not.toContain('Alpha Card');
+    await loginWithToken(page, user.id, user.token);
+    await sp.navigateToGlobalSearch();
+    await sp.globalSearch('Alpha Card');
+    await expect.poll(() => sp.globalSearchResultTitles()).toContain('Alpha Card');
+  });
+
   test('changing card status in global search results keeps the card visible', async ({ boardPage, board }) => {
     const sp = new SearchPage(boardPage);
     const bp = new BoardPage(boardPage);
@@ -84,6 +190,11 @@ test.describe('Search', () => {
     const sp = new SearchPage(boardPage);
     const cardTitles = ['Alpha Card', 'Beta Card', 'Gamma Card'];
 
+    // Enter Global Search once. Re-entering the same route does not recreate
+    // its Blaze instance; doing it between queries can leave the previous
+    // subscription/result paired with the newly filled input.
+    await sp.navigateToGlobalSearch();
+
     for (const title of cardTitles) {
       // Fire the search once per term, then poll only the result read. The
       // global-search page shows the boards/lists help block by default, so
@@ -91,7 +202,6 @@ test.describe('Search', () => {
       // results render. Re-navigating/re-searching on every poll iteration kept
       // reading each fresh search too early; polling a single search lets the
       // round-trip settle (matching the resilient pattern of the tests above).
-      await sp.navigateToGlobalSearch();
       await sp.globalSearch(title);
 
       await expect
@@ -126,6 +236,24 @@ test.describe('Search', () => {
     expect(alphaFound).toBe(true);
   });
 
+  // #2171: a board search shows each card found ON the board - scrolled into
+  // view and highlighted - and Enter again steps to the next one.
+  test('board search reveals the card found on the board, and Enter steps on', async ({ boardPage }) => {
+    const sp = new SearchPage(boardPage);
+    await sp.openBoardSearch();
+    await sp.boardSearch('Card');
+    const counter = boardPage.locator('.board-sidebar .search-step');
+    await expect(counter).toContainText(/1\D+\d/, { timeout: 10000 });
+    const highlighted = boardPage.locator('.board-canvas .js-minicard.is-search-highlight');
+    await expect(highlighted).toHaveCount(1, { timeout: 10000 });
+    await expect(highlighted).toBeInViewport();
+    const first = await highlighted.getAttribute('data-card-id');
+    await boardPage.locator('form.js-search-term-form input[type=text]').first().press('Enter');
+    await expect(counter).toContainText(/2\D+\d/, { timeout: 10000 });
+    await expect.poll(() => boardPage.locator('.board-canvas .js-minicard.is-search-highlight').getAttribute('data-card-id'), { timeout: 10000 })
+      .not.toBe(first);
+  });
+
   test('filter sidebar filters cards by title fragment', async ({ boardPage, board }) => {
     const sp = new SearchPage(boardPage);
     await sp.openFilterSidebar();
@@ -157,24 +285,13 @@ test.describe('Search', () => {
     const labelId = `lbl_${Date.now()}`;
     const labelName = 'E2E Label Alpha';
 
-    db.mongoEval(`
-      const boardId = ${JSON.stringify(board.boardId)};
-      const labelId = ${JSON.stringify(labelId)};
-      const labelName = ${JSON.stringify(labelName)};
+    db.updateOne('boards', { _id: board.boardId },
+      { $set: { labels: [{ _id: labelId, name: labelName, color: 'green' }] } });
+    db.updateMany('cards', { boardId: board.boardId }, { $set: { labelIds: [] } });
+    db.updateOne('cards', { boardId: board.boardId, title: 'Alpha Card' },
+      { $set: { labelIds: [labelId] } });
 
-      db.boards.updateOne(
-        { _id: boardId },
-        { $set: { labels: [{ _id: labelId, name: labelName, color: 'green' }] } }
-      );
-
-      db.cards.updateMany({ boardId }, { $set: { labelIds: [] } });
-      db.cards.updateOne(
-        { boardId, title: 'Alpha Card' },
-        { $set: { labelIds: [labelId] } }
-      );
-    `);
-
-    await boardPage.reload({ waitUntil: 'networkidle' });
+    await boardPage.reload({ waitUntil: 'domcontentloaded' });
 
     const sp = new SearchPage(boardPage);
     await sp.openFilterSidebar();
@@ -185,8 +302,16 @@ test.describe('Search', () => {
       .first();
 
     await expect(labelFilter).toBeVisible({ timeout: 10_000 });
+    await boardPage.evaluate(() => {
+      window._wekanBoardViewBeforeFilter = Blaze.getView(document.querySelector('.board-wrapper'));
+    });
     await labelFilter.click();
-    await boardPage.waitForTimeout(800);
+    await expect.poll(() => new URL(boardPage.url()).searchParams.get('label'))
+      .toBe(labelName);
+    await expect.poll(() => boardPage.evaluate(() =>
+      window._wekanBoardViewBeforeFilter === Blaze.getView(document.querySelector('.board-wrapper')),
+    )).toBe(true);
+    await expect(boardPage.locator('.board-sidebar')).toBeVisible();
 
     // Ensure selected-state indicator is rendered on the clicked label filter.
     await expect(labelFilter.locator('i.fa-check').first()).toBeVisible({ timeout: 10_000 });
@@ -196,6 +321,173 @@ test.describe('Search', () => {
     await expect(boardPage.locator('.js-minicard').filter({ hasText: 'Beta Card' })).not.toBeVisible({ timeout: 10_000 });
     await expect(boardPage.locator('.js-minicard').filter({ hasText: 'Gamma Card' })).not.toBeVisible({ timeout: 10_000 });
 
+    await boardPage.evaluate(() => { window._wekanFilterResetDocument = true; });
+    await sp.clearFilters();
+    await expect.poll(() => boardPage.evaluate(() => window._wekanFilterResetDocument)).toBe(true);
+    await expect.poll(() => new URL(boardPage.url()).searchParams.get('label'))
+      .toBeNull();
+    await expect.poll(() => boardPage.evaluate(() =>
+      window._wekanBoardViewBeforeFilter === Blaze.getView(document.querySelector('.board-wrapper')),
+    )).toBe(true);
+  });
+
+  test('#6629: Board Table view applies the active label filter', async ({ boardPage, board }) => {
+    const labelId = `lbl_${Date.now()}`;
+    const labelName = 'Table Filter Label';
+    db.updateOne('boards', { _id: board.boardId },
+      { $set: { labels: [{ _id: labelId, name: labelName, color: 'green' }] } });
+    db.updateMany('cards', { boardId: board.boardId }, { $set: { labelIds: [] } });
+    db.updateOne('cards', { boardId: board.boardId, title: 'Alpha Card' },
+      { $set: { labelIds: [labelId] } });
+    await boardPage.reload({ waitUntil: 'domcontentloaded' });
+
+    // A board-view change reloads the page and clears the in-memory Filter.
+    // Enter Table view first, then activate the filter under test.
+    await boardPage.locator('.js-toggle-board-view').first().click();
+    await boardPage.locator('.pop-over .js-open-table-view').click();
+    await expect(boardPage.locator('.my-cards-board-table')).toBeVisible({
+      timeout: 10_000,
+    });
+
+    const sp = new SearchPage(boardPage);
+    await sp.openFilterSidebar();
+    const labelFilter = boardPage.locator('.js-toggle-label-filter')
+      .filter({ hasText: labelName }).first();
+    await labelFilter.click();
+    await expect(labelFilter.locator('i.fa-check').first())
+      .toBeVisible({ timeout: 10_000 });
+
+    await expect(boardPage.locator('.my-cards-board-table tbody tr'))
+      .toHaveCount(1);
+    await expect(boardPage.locator('.my-cards-board-table tbody'))
+      .toContainText('Alpha Card');
+    await expect(boardPage.locator('.my-cards-board-table tbody'))
+      .not.toContainText('Beta Card');
+
     await sp.clearFilters();
   });
+
+  test('#6632: Table view uses full width and remembers wrapped card titles', async ({
+    boardPage,
+    board,
+  }) => {
+    const longTitle = 'A very long card title '.repeat(12).trim();
+    db.updateOne(
+      'cards',
+      { boardId: board.boardId, title: 'Alpha Card' },
+      { $set: { title: longTitle } },
+    );
+    await boardPage.reload({ waitUntil: 'domcontentloaded' });
+    await boardPage.locator('.js-toggle-board-view').first().click();
+    await boardPage.locator('.pop-over .js-open-table-view').click();
+
+    const table = boardPage.locator('.table-view-table');
+    const titleCell = table.locator('.table-view-cell-card-title').first();
+    await expect(table).toBeVisible({ timeout: 10_000 });
+    const widths = await table.evaluate(element => ({
+      table: element.getBoundingClientRect().width,
+      parent: element.parentElement.getBoundingClientRect().width,
+    }));
+    expect(widths.table).toBeGreaterThan(widths.parent * 0.9);
+    await expect(titleCell).toHaveAttribute('title', longTitle);
+    await expect(titleCell.locator('.viewer p')).toHaveCSS('white-space', 'nowrap');
+    await expect(titleCell.locator('.viewer p')).toHaveCSS('text-overflow', 'ellipsis');
+
+    await boardPage.locator('.js-table-view-toggle-card-title-wrap').click();
+    await expect(titleCell.locator('.viewer p')).toHaveCSS('white-space', 'normal');
+    await boardPage.reload({ waitUntil: 'domcontentloaded' });
+    await expect(
+      boardPage.locator('.table-view-cell-card-title .viewer p').first(),
+    ).toHaveCSS('white-space', 'normal');
+  });
+
+  test('#6633: Table view headers toggle ascending and descending sorting', async ({
+    boardPage,
+  }) => {
+    await boardPage.locator('.js-toggle-board-view').first().click();
+    await boardPage.locator('.pop-over .js-open-table-view').click();
+    const titles = boardPage.locator(
+      '.table-view-cell-card-title .viewer p',
+    );
+    await expect(titles.first()).toHaveText('Alpha Card', { timeout: 10_000 });
+
+    await boardPage
+      .locator('.js-table-view-sort[data-field="title"]')
+      .click();
+    await expect(titles.first()).toHaveText('Gamma Card');
+    await expect(
+      boardPage.locator(
+        '.js-table-view-sort[data-field="title"] i.fa-sort-desc',
+      ),
+    ).toBeVisible();
+
+    await boardPage
+      .locator('.js-table-view-sort[data-field="listTitle"]')
+      .click();
+    await expect(
+      boardPage.locator(
+        '.js-table-view-sort[data-field="listTitle"] i.fa-sort-asc',
+      ),
+    ).toBeVisible();
+  });
+
+  test('#6634: Table view optionally groups cards by swimlane and remembers it', async ({
+    boardPage,
+    board,
+  }) => {
+    const secondSwimlaneId = db.uid('swim');
+    const now = new Date();
+    db.insertOne('swimlanes', {
+      _id: secondSwimlaneId,
+      title: 'Urgent Lane',
+      boardId: board.boardId,
+      archived: false,
+      type: 'swimlane',
+      height: -1,
+      sort: 100,
+      createdAt: now,
+      modifiedAt: now,
+    });
+    db.updateOne(
+      'cards',
+      { boardId: board.boardId, title: 'Gamma Card' },
+      { $set: { swimlaneId: secondSwimlaneId } },
+    );
+    await boardPage.reload({ waitUntil: 'domcontentloaded' });
+    await boardPage.locator('.js-toggle-board-view').first().click();
+    await boardPage.locator('.pop-over .js-open-table-view').click();
+
+    const headers = boardPage.locator('.table-view-swimlane-group');
+    await expect(boardPage.locator('.table-view-table')).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(headers).toHaveCount(0);
+    await boardPage.locator('.js-table-view-toggle-swimlane-groups').click();
+    await expect(headers).toHaveCount(2);
+    await expect(headers.nth(0)).toContainText('Default');
+    await expect(headers.nth(1)).toContainText('Urgent Lane');
+    await expect(boardPage.locator('.table-view-table tbody tr:not(.table-view-swimlane-group)'))
+      .toHaveCount(3);
+
+    await boardPage.reload({ waitUntil: 'domcontentloaded' });
+    await expect(boardPage.locator('.table-view-swimlane-group')).toHaveCount(2);
+    await expect(boardPage.locator('.js-table-view-toggle-swimlane-groups'))
+      .toHaveAttribute('aria-pressed', 'true');
+  });
+});
+
+
+test('Haitian attachment search accepts the corrected predicate and negation', async ({ boardPage: page }) => {
+  await page.evaluate(() => Meteor.callAsync('setLanguage', 'ht'));
+  const sp = new SearchPage(page);
+  await sp.navigateToGlobalSearch();
+  const help = page.locator('.global-search-instructions');
+  await expect(help).toContainText('pyès-atache');
+  await expect(help).not.toContainText('pyès-jwenn');
+  await sp.globalSearch('gen:-pyès-atache');
+  await expect.poll(() => sp.globalSearchResultTitles(), { timeout: 20000 }).toContain('Alpha Card');
+  await expect(page.locator('.global-search-error-messages')).toHaveCount(0);
+  await sp.globalSearch('gen:pyès-atache');
+  await expect.poll(() => sp.globalSearchResultTitles(), { timeout: 20000 }).not.toContain('Alpha Card');
+  await expect(page.locator('.global-search-error-messages')).toHaveCount(0);
 });

@@ -1,6 +1,9 @@
+import { titleSortIndexes } from '/models/lib/multilineTitles';
+import { titlesFromComposer } from '/client/components/forms/multilineTitleChoice';
 import { TAPi18n } from '/imports/i18n';
 import { ReactiveCache } from '/imports/reactiveCache';
 import { SWIMLANE_COLORS } from '/models/metadata/colors';
+import { isHexColor, toHex } from '/models/lib/contrastColor';
 import Swimlanes from '/models/swimlanes';
 import { Utils } from '/client/lib/utils';
 const { calculateIndexData } = Utils;
@@ -28,7 +31,7 @@ Template.swimlaneHeader.events({
     swimlaneHeaderCollapsed(!swimlaneHeaderCollapsed());
   },
   'click .js-open-swimlane-menu': Popup.open('swimlaneAction'),
-  'click .js-open-add-swimlane-menu': Popup.open('swimlaneAdd'),
+  'click .js-open-add-swimlane-menu': Popup.open('swimlaneAdd', { titleKey: 'add-swimlane' }),
   async submit(event, tpl) {
     event.preventDefault();
     const newTitle = tpl.$('.list-name-input').val().trim();
@@ -41,7 +44,7 @@ Template.swimlaneHeader.events({
 
 Template.swimlaneFixedHeader.helpers({
   isBoardAdmin() {
-    return ReactiveCache.getCurrentUser().isBoardAdmin();
+    return ReactiveCache.getCurrentUser()?.isBoardAdmin();
   },
   collapseSwimlane() {
     const swimlane = Template.currentData();
@@ -97,7 +100,27 @@ Template.editSwimlaneTitleForm.helpers({
 });
 
 Template.swimlaneActionPopup.events({
-  'click .js-add-swimlane': Popup.open('swimlaneAdd'),
+  'click .js-swimlane-history'(event) {
+    Popup.open('history', { titleKey: 'history' })(event, {
+      dataContextIfCurrentDataIsUndefined: { scope: 'swimlane', scopeId: this._id },
+    });
+  },
+  // Copy the swimlane's own address. `absoluteUrl` so what lands in the
+  // clipboard can be pasted anywhere - a relative path is only a link inside
+  // this page. The popup stays open long enough to show "Copied"; it is the
+  // confirmation, and a menu that vanishes the instant you click leaves you
+  // wondering whether anything happened. models/lib/boardItemUrl.js
+  'click .js-copy-swimlane-link'(event, tpl) {
+    event.preventDefault();
+    const swimlane = Template.currentData();
+    if (!swimlane) return;
+    const url = swimlane.absoluteUrl();
+    if (!url) return;
+    Utils.showCopied(Utils.copyTextToClipboard(url), tpl.$('.copied-tooltip'));
+  },
+  'click .js-export-swimlane': Popup.open('exportSwimlane'),
+  'click .js-import-swimlane': Popup.open('importSwimlane'),
+  'click .js-add-swimlane': Popup.open('swimlaneAdd', { titleKey: 'add-swimlane' }),
   'click .js-add-list-from-swimlane': Popup.open('addList'),
   'click .js-set-swimlane-color': Popup.open('setSwimlaneColor'),
   'click .js-set-swimlane-height': Popup.open('setSwimlaneHeight'),
@@ -107,11 +130,25 @@ Template.swimlaneActionPopup.events({
   }),
   'click .js-move-swimlane': Popup.open('moveSwimlane'),
   'click .js-copy-swimlane': Popup.open('copySwimlane'),
+  // #1172: star/unstar this swimlane for the current user only.
+  async 'click .js-star-swimlane-item'(event) {
+    event.preventDefault();
+    const swimlane = Template.currentData();
+    if (!swimlane) return;
+    await Meteor.callAsync('toggleSwimlaneStar', swimlane._id);
+  },
 });
 
 Template.swimlaneActionPopup.helpers({
   isCommentOnly() {
     return ReactiveCache.getCurrentUser().isCommentOnly();
+  },
+
+  // #1172: same per-user star shape as boards/lists.
+  isSwimlaneItemStarred() {
+    const swimlane = Template.currentData();
+    const user = ReactiveCache.getCurrentUser();
+    return !!(swimlane && user && user.hasStarredSwimlane(swimlane._id));
   },
 });
 
@@ -123,33 +160,50 @@ Template.swimlaneAddPopup.events({
   async submit(event, tpl) {
     event.preventDefault();
     const currentBoard = Utils.getCurrentBoard();
-    const nextSwimlane = currentBoard.nextSwimlane(tpl.currentSwimlane);
+    const above = tpl.find('.js-swimlane-placement:checked')?.value === 'above';
+    const lanes = currentBoard.swimlanes();
+    const currentIndex = lanes.findIndex(lane => lane._id === tpl.currentSwimlane?._id);
+    // The empty-board composer has a board context rather than a swimlane.
+    const insertionIndex = currentIndex < 0 ? lanes.length : currentIndex + (above ? 0 : 1);
+    const previous = lanes[insertionIndex - 1];
+    const next = lanes[insertionIndex];
     const titleInput = tpl.find('.swimlane-name-input');
-    const title = titleInput.value.trim();
-    const sortValue = calculateIndexData(
-      tpl.currentSwimlane,
-      nextSwimlane,
-      1,
-    );
+    const titles = titlesFromComposer(titleInput);
+    if (!titles.length || tpl.creatingSwimlanes) return;
+    const indexes = titleSortIndexes(previous?.sort, next?.sort, titles.length);
     const swimlaneType = currentBoard.isTemplatesBoard()
       ? 'template-swimlane'
       : 'swimlane';
 
-    if (title) {
-      await Swimlanes.insertAsync({
-        title,
-        boardId: Session.get('currentBoard'),
-        sort: sortValue.base || 0,
-        type: swimlaneType,
-      });
+    tpl.creatingSwimlanes = true;
+    titleInput.disabled = true;
+    let created = 0;
+    try {
+      for (const title of titles) {
+        await Swimlanes.insertAsync({
+          title,
+          boardId: Session.get('currentBoard'),
+          sort: indexes[created],
+          type: swimlaneType,
+        });
 
+        created += 1;
+      }
       titleInput.value = '';
       titleInput.focus();
+      Popup.back();
+    } catch (error) {
+      titleInput.value = titles.slice(created).join('\n');
+      console.error('Failed to create swimlane:', error);
+    } finally {
+      tpl.creatingSwimlanes = false;
+      titleInput.disabled = false;
+      titleInput.focus();
+      titleInput.dispatchEvent(new Event('input', { bubbles: true }));
     }
     // XXX ideally, we should move the popup to the newly
     // created swimlane so a user can add more than one swimlane
     // with a minimum of interactions
-    Popup.back();
   },
   'click .js-swimlane-template': Popup.open('searchElement'),
 });
@@ -166,6 +220,10 @@ Template.setSwimlaneColorPopup.helpers({
   isSelected(color) {
     return Template.instance().currentColor.get() === color;
   },
+  // #5514: current color as a '#rrggbb' hex for the native color wheel <input>.
+  currentColorHex() {
+    return toHex(Template.instance().currentColor.get()) || '#0079bf';
+  },
 });
 
 Template.setSwimlaneColorPopup.events({
@@ -177,6 +235,13 @@ Template.setSwimlaneColorPopup.events({
   'click .js-palette-color'(event, tpl) {
     const paletteData = Blaze.getData(event.currentTarget);
     tpl.currentColor.set(paletteData?.color);
+  },
+  // #5514: picking from the native color wheel stores a custom hex.
+  'input .js-swimlane-color-wheel'(event, tpl) {
+    const value = event.currentTarget.value;
+    if (isHexColor(value)) {
+      tpl.currentColor.set(value);
+    }
   },
   async 'click .js-submit'(event, tpl) {
     event.preventDefault();

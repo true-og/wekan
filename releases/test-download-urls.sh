@@ -4,11 +4,12 @@
 # Uses HTTP HEAD requests — nothing is downloaded.
 #
 # Summary of what the snap bundles per architecture:
-#   amd64, arm64        — MongoDB 7.x prebuilt native binary + mongosh + db-tools
+#   amd64, arm64        — MongoDB 7 server (amd64/arm64); mongo-tools + FerretDB from wekan forks (all arches)
 #   armhf, s390x, ppc64el — MongoDB 7.x amd64 binary run via qemu-x86_64-static
 #                           (MongoDB Community Edition has no prebuilt builds for these arches)
 # Note: on any platform whose CPU lacks instructions required by MongoDB (e.g. AVX),
 #       mongodb-control automatically falls back to running via qemu-x86_64-static.
+#       Node.js 26 ships no linux-armv7l binary, so no Node URL is checked for armhf.
 #
 # Snap base:   core24 (Ubuntu 24.04 LTS — core26 is edge-only, not released yet)
 # Docker base: ubuntu:24.04 (current LTS, support until 2029;
@@ -37,38 +38,41 @@ check() {
 
 echo "=== MongoDB 7.0.14 (amd64 and arm64 native; amd64 also used via QEMU for armhf/s390x/ppc64el) ==="
 check "MongoDB 7.0.14  amd64 (x86_64, ubuntu2204)" \
-  "https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-ubuntu2204-7.3.4.tgz"
+  "https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-ubuntu2204-7.0.48.tgz"
 check "MongoDB 7.0.14  arm64 (aarch64, ubuntu2204)" \
-  "https://fastdl.mongodb.org/linux/mongodb-linux-aarch64-ubuntu2204-7.3.4.tgz"
+  "https://fastdl.mongodb.org/linux/mongodb-linux-aarch64-ubuntu2204-7.0.48.tgz"
 echo "  NOTE  MongoDB Community has no prebuilt builds for s390x, ppc64le, or arm/v7."
 echo "        The amd64 binary above is also used on those arches via qemu-x86_64-static."
 echo ""
 
-echo "=== mongosh 2.8.2 (x64 for amd64/armhf/s390x/ppc64el via QEMU; arm64 native) ==="
-check "mongosh 2.8.2  x64 (amd64 + armhf/s390x/ppc64el via QEMU)" \
-  "https://downloads.mongodb.com/compass/mongosh-2.8.3-linux-x64.tgz"
-check "mongosh 2.8.2  arm64" \
-  "https://downloads.mongodb.com/compass/mongosh-2.8.3-linux-arm64.tgz"
+# mongosh is no longer used (WeKan uses the bundled Node.js + `mongodb` driver).
+
+echo "=== MongoDB Database Tools (wekan/mongo-tools-patches, per-arch, newest release) ==="
+for a in amd64 arm64 s390x ppc64le riscv64; do
+  check "mongo-tools-$a (wekan/mongo-tools-patches, all eight in one)" \
+    "https://github.com/wekan/mongo-tools-patches/releases/latest/download/mongo-tools-$a"
+done
 echo ""
 
-echo "=== mongodb-database-tools 100.13.0 (x86_64 for amd64/armhf/s390x/ppc64el; arm64 native) ==="
-check "db-tools 100.13.0  x86_64 (amd64 + armhf/s390x/ppc64el via QEMU)" \
-  "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-ubuntu2404-x86_64-100.17.0.tgz"
-check "db-tools 100.13.0  arm64" \
-  "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-ubuntu2404-arm64-100.17.0.tgz"
+echo "=== FerretDB v1 (wekan/FerretDB, per-arch, newest release) ==="
+# The SQLite-only ferretdb-sqlite-<arch> every platform takes, or the full
+# ferretdb-<arch> of the newest release until one has it - the same choice the
+# release workflows make (releases/ferretdb-asset.sh prints which).
+for a in amd64 arm64 s390x ppc64le riscv64; do
+  url="$(bash "$(dirname "$0")/ferretdb-asset.sh" --url "$a")"
+  check "${url##*/} (wekan/FerretDB)" "$url"
+done
 echo ""
 
-echo "=== Node.js 24.15.0 (all snap architectures) ==="
-check "Node.js 24.15.0  linux-x64     (amd64)" \
-  "https://nodejs.org/dist/v24.16.0/node-v24.16.0-linux-x64.tar.gz"
-check "Node.js 24.15.0  linux-arm64   (arm64)" \
-  "https://nodejs.org/dist/v24.16.0/node-v24.16.0-linux-arm64.tar.gz"
-check "Node.js 24.15.0  linux-armv7l  (armhf)" \
-  "https://nodejs.org/dist/v24.16.0/node-v24.16.0-linux-armv7l.tar.gz"
-check "Node.js 24.15.0  linux-s390x   (s390x)" \
-  "https://nodejs.org/dist/v24.16.0/node-v24.16.0-linux-s390x.tar.gz"
-check "Node.js 24.15.0  linux-ppc64le (ppc64el)" \
-  "https://nodejs.org/dist/v24.16.0/node-v24.16.0-linux-ppc64le.tar.gz"
+echo "=== Node.js 26.17.0 (snap architectures with upstream Node builds) ==="
+check "Node.js 26.17.0  linux-x64     (amd64)" \
+  "https://nodejs.org/dist/v26.13.0/node-v26.13.0-linux-x64.tar.gz"
+check "Node.js 26.17.0  linux-arm64   (arm64)" \
+  "https://nodejs.org/dist/v26.13.0/node-v26.13.0-linux-arm64.tar.gz"
+check "Node.js 26.17.0  linux-s390x   (s390x)" \
+  "https://nodejs.org/dist/v26.13.0/node-v26.13.0-linux-s390x.tar.gz"
+check "Node.js 26.17.0  linux-ppc64le (ppc64el)" \
+  "https://nodejs.org/dist/v26.13.0/node-v26.13.0-linux-ppc64le.tar.gz"
 echo ""
 
 echo "=== Results ==="

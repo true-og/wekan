@@ -1,0 +1,193 @@
+/* Shared look for EVERY prev/next pagination control in WeKan.
+   Admin Panel reports, People/Org/Team/Domain, All Boards, Board Table view,
+   Archived boards and the Cron settings tables all page the same way, so they
+   all get the same themed buttons here instead of each stylesheet inventing its
+   own greys.
+
+   Why this file exists at all: the global button rules in
+   client/components/forms/forms.css set
+
+     button          { background: var(--theme-accent, #000) }
+     button:focus    { background: var(--theme-accent, #222) }
+     button:active   { background: var(--theme-accent, #111) }
+     button:active:hover { background: #e6e6e6 }
+
+   With no custom theme colour chosen those fall back to BLACK / dark grey /
+   grey. `button:focus` and `button:active` have the same specificity as a
+   `.some-pagination button` rule, and `button:active:hover` has a HIGHER one, so
+   the per-page pagination rules lost as soon as the button was clicked: pressing
+   "next" left the button sitting there with a black or grey background until it
+   lost focus. Every state is therefore spelled out below, at a specificity that
+   beats the global button rules, and every colour comes from the theme accent
+   (Member Settings -> Change color sets --theme-accent on :root) with the WeKan
+   blue as the fallback. */
+
+/* FILLED with the theme, and the arrows white on it. These were an outline on
+   transparent, which put the theme colour only in a 1px border and the glyph -
+   so on a light accent there was almost nothing to see, and on any accent the
+   pager read as a pair of ghosts beside solidly themed chrome.
+
+   `--theme-accent-fill` rather than `--theme-accent`: the accent is ONE colour
+   and a colour-slide theme's fill is a gradient, so a button reading the accent
+   came out flat while the header above it slid
+   (models/lib/themeAccents.js publishes both). The double fallback keeps a
+   theme that publishes no fill on its accent, and no theme at all on the WeKan
+   blue. */
+.table-page-pagination button,
+.boards-pagination button,
+.table-view-pagination button,
+.cron-settings .pagination button {
+  min-width: 32px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: var(--theme-accent-fill, var(--theme-accent, #01628c));
+  /* No `background-image: none` after that shorthand. It was there to defeat
+     the global button gradient, but a `background` shorthand ALREADY resets
+     background-image - and once the fill became a colour-SLIDE the reset wiped
+     the gradient the line above had just set, so clearorange's pager had no
+     background at all while its header slid. */
+  color: #fff;
+  font-weight: 700;
+  line-height: 1.3;
+  cursor: pointer;
+  box-shadow: none;
+}
+
+/* Hover, keyboard focus and the pressed state all use the accent as the FILL,
+   so a clicked "next" button reads as themed instead of black. :focus-visible is
+   listed separately so a mouse click does not leave a permanent focus ring, but
+   keyboard users still get one. */
+.table-page-pagination button:hover:not(.disabled),
+.table-page-pagination button:focus:not(.disabled),
+.table-page-pagination button:active:not(.disabled),
+.boards-pagination button:hover:not(.disabled),
+.boards-pagination button:focus:not(.disabled),
+.boards-pagination button:active:not(.disabled),
+.table-view-pagination button:hover:not(.disabled),
+.table-view-pagination button:focus:not(.disabled),
+.table-view-pagination button:active:not(.disabled),
+.cron-settings .pagination button:hover,
+.cron-settings .pagination button:focus,
+.cron-settings .pagination button:active {
+  background: var(--theme-accent-fill, var(--theme-accent, #01628c));
+  border-color: rgba(0, 0, 0, 0.25);
+  /* The fill IS the resting state now, so pressing cannot be "fill it in".
+     Darkening the same fill keeps the theme - and keeps a slide sliding, which
+     swapping in a flat colour would not. */
+  filter: brightness(0.88);
+  color: #fff;
+  box-shadow: none;
+}
+
+/* forms.css turns a held-down button grey (#e6e6e6) with a higher specificity
+   than a plain `.pagination button` rule - keep the accent instead. */
+.table-page-pagination button:active:hover,
+.table-page-pagination button:active:focus,
+.boards-pagination button:active:hover,
+.boards-pagination button:active:focus,
+.table-view-pagination button:active:hover,
+.table-view-pagination button:active:focus,
+.cron-settings .pagination button:active:hover,
+.cron-settings .pagination button:active:focus {
+  background: var(--theme-accent, #01628c);
+  color: #fff;
+}
+
+/* The current page in a numbered pager. */
+.table-page-pagination button.active,
+.boards-pagination button.active,
+.table-view-pagination button.active {
+  background: var(--theme-accent-fill, var(--theme-accent, #01628c));
+  border-color: rgba(0, 0, 0, 0.25);
+  /* The fill IS the resting state now, so pressing cannot be "fill it in".
+     Darkening the same fill keeps the theme - and keeps a slide sliding, which
+     swapping in a flat colour would not. */
+  filter: brightness(0.88);
+  color: #fff;
+}
+
+/* Disabled = the same themed outline, faded. Not a grey block. */
+/* A disabled pager still has to look like the THEME. It is filled with the
+   theme colour, and dimming it is what takes the theme back out: at 0.4 the
+   belize blue #2573a7 arrived on the page's grey as rgb(122,170,202), a pale
+   wash with no family resemblance to the header above it - and on a one-page
+   list, where BOTH arrows are disabled, that is the whole pager.
+
+   0.85 keeps the colour recognisable, rgb(68,142,191), while still being
+   visibly flatter than an enabled button beside it, which is the only thing
+   this rule is for. The `pointer-events: none` below is what actually makes it
+   unusable; the dimming only has to SAY so. docs/Features/General/Theme/Change-Color.md */
+.table-page-pagination button.disabled,
+.boards-pagination button.disabled,
+.table-view-pagination button.disabled {
+  background: var(--theme-accent-fill, var(--theme-accent, #01628c));
+  border-color: transparent;
+  color: #fff;
+  opacity: 0.85;
+  pointer-events: none;
+}
+
+/* The ACTION buttons of the shared controls row (docs/Features/General/Table-Page.md):
+   Admin Panel / People's "Unlock all users" and "Teams". They sit in the same row
+   as the pager and are bare <button>s too, so without a rule here they fell
+   through to the forms.css fallbacks above and came out BLACK - then dark grey
+   while focused, then grey while held down. Filled with the accent (they are
+   actions, not navigation), every state spelled out for the same specificity
+   reason, and the WeKan blue when no per-user theme colour is set. */
+.table-page-controls button.js-table-page-action,
+.file-status-audit .file-status-audit-actions button,
+.table-page .table-page-attachment-actions button,
+.table-page .table-page-attachment-actions a {
+  border: 1px solid var(--theme-accent, #01628c);
+  border-radius: 6px;
+  background: var(--theme-accent-fill, var(--theme-accent, #01628c));
+  color: #fff;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: none;
+  text-decoration: none;
+}
+
+.table-page-controls button.js-table-page-action:hover,
+.table-page-controls button.js-table-page-action:focus,
+.table-page-controls button.js-table-page-action:active,
+.table-page-controls button.js-table-page-action:active:hover,
+.table-page-controls button.js-table-page-action:active:focus,
+.file-status-audit .file-status-audit-actions button:hover,
+.file-status-audit .file-status-audit-actions button:focus,
+.file-status-audit .file-status-audit-actions button:active,
+.file-status-audit .file-status-audit-actions button:active:hover,
+.file-status-audit .file-status-audit-actions button:active:focus,
+.table-page .table-page-attachment-actions button:hover,
+.table-page .table-page-attachment-actions button:focus,
+.table-page .table-page-attachment-actions button:active,
+.table-page .table-page-attachment-actions button:active:hover,
+.table-page .table-page-attachment-actions button:active:focus,
+.table-page .table-page-attachment-actions a:hover,
+.table-page .table-page-attachment-actions a:focus,
+.table-page .table-page-attachment-actions a:active {
+  background: var(--theme-accent-fill, var(--theme-accent, #005377));
+  border-color: var(--theme-accent, #005377);
+  color: #fff;
+  box-shadow: none;
+  filter: brightness(0.88);
+}
+
+.file-status-audit .file-status-audit-actions button:disabled {
+  opacity: 0.85;
+  cursor: not-allowed;
+}
+
+/* "3 / 42" between the buttons: inherit the surrounding text colour so it stays
+   readable in both the light and the dark theme (it used to be hard-coded #333,
+   which disappears on a dark background). */
+.table-page-page-info,
+.boards-page-info,
+.table-view-page-info,
+.cron-settings .pagination .page-info {
+  min-width: 72px;
+  text-align: center;
+  color: inherit;
+}

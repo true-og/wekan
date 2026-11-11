@@ -1,0 +1,123 @@
+template(name="boardChartView")
+  .stats-view
+    .stats-view-content.chart-view-content
+      .stats-view-title
+        +viewer
+          | {{ chartTitle }}
+      .chart-export-buttons(data-report-options="{{reportOptionsJson}}")
+        a.chart-export-button.js-export-chart(href="#" data-chart-key="{{chartKey}}")
+          i.fa.fa-share-square-o
+          | {{_ 'export'}}
+
+      if isPulse
+        +archiveContributions
+
+      if flowNote
+        p.chart-method-note {{flowNote}}
+      if isMonteCarlo
+        form.js-flow-options.chart-options
+          label
+            | {{_ 'flow-target-count'}}
+            input(type="number" name="targetCount" min="1" max="10000" required value="{{reportOptions.targetCount}}")
+          label
+            | {{_ 'flow-target-date'}}
+            input(type="date" name="targetDate" required value="{{reportOptions.targetDate}}")
+          label
+            | {{_ 'flow-history-days'}}
+            input(type="number" name="historyDays" min="7" max="365" required value="{{reportOptions.historyDays}}")
+          button.primary(type="submit") {{_ 'apply'}}
+      if isSizeCycleTime
+        form.js-flow-options.chart-options
+          label
+            | {{_ 'flow-size-source'}}
+            select(name="sizeField")
+              option(value="poker" selected="{{sizeSelected 'poker'}}") {{_ 'poker-question'}}
+              each field in sizeFields
+                option(value="{{field._id}}" selected="{{sizeSelected field._id}}") {{field.name}}
+          button.primary(type="submit") {{_ 'apply'}}
+
+      if hasError
+        p.chart-error(role="alert") {{_ 'flow-error'}}
+      else if isLoading
+        p.stats-view-placeholder-note {{_ 'loading'}}
+      else if hasNoData
+        p.stats-view-placeholder-note {{_ 'no-results'}}
+      else
+        .chart-canvas-wrapper
+          canvas.js-chart-canvas(role="img" aria-label="{{chartTitle}}")
+        if hasSecondaryChart
+          .chart-canvas-wrapper
+            canvas.js-chart-secondary(role="img" aria-label="{{chartTitle}}")
+
+        if forecastNote
+          p.stats-view-placeholder-note.chart-forecast-note {{ forecastNote }}
+
+        table.stats-view-table.chart-data-table
+          thead
+            tr
+              each header in tableHeaders
+                th
+                  +viewer
+                    = header
+          tbody
+            each row in tableRows
+              tr
+                each cell in row
+                  td
+                    +viewer
+                      = cell
+
+      if detailTable.rows.length
+        details.chart-details
+          summary {{_ 'flow-details'}}
+          table.stats-view-table.chart-data-table
+            thead
+              tr
+                each header in detailTable.headers
+                  th= header
+            tbody
+              each row in detailTable.rows
+                tr
+                  each cell in row
+                    td
+                      +viewer
+                        = cell
+
+template(name="archiveContributions")
+  section.archive-contributions
+    h3 {{_ 'archived'}} · {{_ 'cards'}} · UTC
+    form.js-archive-year.chart-options
+      label
+        | {{_ 'predicate-year'}}
+        input(type="number" name="year" min="1900" max="9998" required value="{{year}}")
+      button.primary(type="submit") {{_ 'apply'}}
+    if error
+      p.chart-error(role="alert") {{_ 'flow-error'}}
+    else if ready
+      .archive-grid-scroll
+        table.archive-grid
+          caption {{_ 'month'}} / {{_ 'day'}} · UTC
+          thead
+            tr
+              th(scope="col") {{_ 'day'}}
+              each month in months
+                th(scope="col")= month
+          tbody
+            each row in rows
+              tr
+                th(scope="row")= row.day
+                each cell in row.cells
+                  td.archive-cell
+                    if cell
+                      button.archive-day(type="button" class="archive-level-{{cell.level}}" data-date="{{cell.date}}" aria-label="{{cell.description}}" aria-describedby="archive-tip-{{cell.date}}")= cell.count
+                      .archive-tooltip(id="archive-tip-{{cell.date}}" role="tooltip" class="{{tooltipClass cell.date}}")
+                        strong {{cell.date}} UTC · {{_ 'cards'}}: {{cell.count}}
+                        each label in cell.labels
+                          span.card-label(class="{{labelColorClass label.color}}" style="{{labelColorStyle label.color}}")= label.name
+      .archive-day-detail(role="status" aria-live="polite")
+        with selected
+          strong {{date}} UTC · {{_ 'cards'}}: {{count}}
+          each label in labels
+            span.card-label(class="{{labelColorClass label.color}}" style="{{labelColorStyle label.color}}")= label.name
+    else
+      p {{_ 'loading'}}

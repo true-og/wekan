@@ -1,8 +1,193 @@
+/* Rules is now a fullscreen board-scoped page (below the single top bar),
+ * no longer a wide modal. .rules-page centers the content and gives it room. */
+.rules-page {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 9px 14px 36px;
+}
+.rules-page h2 {
+  margin-bottom: 9px;
+}
+.rules-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 9px;
+}
+.rules-toolbar button {
+  cursor: pointer;
+}
 .rules-list {
   overflow: hidden;
-  overflow-y: scroll;
-  max-height: 50vh;
-  padding-right: 0.7vw;
+  overflow-y: auto;
+  max-height: 65vh;
+  padding-inline-end: 10px;
+}
+.rules-lists-item .js-rule-select {
+  float: inline-start;
+  margin: 6px 8px 0 0;
+}
+/* #6749: the rule selection checkboxes are NATIVE inputs, and forms.css hides
+   every native checkbox app-wide (WeKan draws its own .materialCheckBox) with
+   display: none, visibility: hidden AND a -9999px offset. So the boxes were
+   never on screen: "Select all" / "Unselect all" changed their state, but there
+   was nothing to see change, and no rule could be ticked one at a time for
+   "Delete selected" / "Export selected" either. Undo all three parts of that
+   rule here, plus the 41px form-field height forms.css gives every input. The
+   selector carries the attribute so it outranks `[type="checkbox"]:checked`. */
+.rules-lists-item input.js-rule-select[type="checkbox"] {
+  display: inline-block;
+  visibility: visible;
+  position: static;
+  inset-inline-start: auto;
+  width: 16px;
+  height: 16px;
+  min-height: 0;
+  flex: 0 0 16px;
+  padding: 0;
+  margin: 0;
+  appearance: auto;
+  -webkit-appearance: checkbox;
+  cursor: pointer;
+}
+.rules-lists-item .js-edit-rule-input {
+  width: 60%;
+}
+/* Visual workflow view */
+.rules-workflow .workflow-group {
+  margin-bottom: 18px;
+}
+.rules-workflow .workflow-group-title {
+  border-bottom: 2px solid #cfcfcf;
+  padding-bottom: 4px;
+  margin-bottom: 9px;
+}
+.rules-workflow .workflow-rule {
+  display: flex;
+  align-items: stretch;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.rules-workflow .workflow-node {
+  flex: 1 1 200px;
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  padding: 8px 10px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+}
+.rules-workflow .workflow-node-when {
+  border-inline-start: 4px solid #1565c0;
+}
+.rules-workflow .workflow-node-then {
+  border-inline-start: 4px solid #2e7d32;
+}
+.rules-workflow .workflow-node-label {
+  display: block;
+  font-size: calc(11px * var(--wekan-ui-font-scale, 1));
+  text-transform: uppercase;
+  color: #888;
+}
+.rules-workflow .workflow-node-text {
+  font-size: calc(14px * var(--wekan-ui-font-scale, 1));
+}
+.rules-workflow .workflow-arrow {
+  display: flex;
+  align-items: center;
+  font-size: calc(20px * var(--wekan-ui-font-scale, 1));
+  color: #888;
+}
+/* Drag-and-drop workflow editor */
+.rules-workflow .workflow-help {
+  color: var(--wekan-quiet-text, #5a5c61);
+  font-size: calc(13px * var(--wekan-ui-font-scale, 1));
+  margin-bottom: 9px;
+}
+.rules-workflow .workflow-builder {
+  background: #f7f7f7;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 14px;
+}
+.rules-workflow .workflow-builder-row {
+  display: flex;
+  align-items: stretch;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.rules-workflow .workflow-slot {
+  flex: 1 1 220px;
+  min-height: 52px;
+  border: 2px dashed #b0b0b0;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  padding: 6px 10px;
+  background: #fff;
+}
+.rules-workflow .workflow-slot-placeholder {
+  color: #999;
+  font-style: italic;
+}
+.rules-workflow .workflow-slot-clear {
+  margin-inline-start: auto;
+  color: #b00;
+  cursor: pointer;
+  padding-inline-start: 8px;
+}
+.rules-workflow .workflow-builder-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.rules-workflow .workflow-builder-controls input {
+  flex: 1 1 240px;
+}
+.rules-workflow .workflow-palettes {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.rules-workflow .workflow-palette {
+  flex: 1 1 240px;
+}
+.rules-workflow .workflow-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #fff;
+  border: 1px solid #cfcfcf;
+  border-radius: 16px;
+  padding: 6px 12px;
+  margin: 0 6px 6px 0;
+  cursor: grab;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+}
+.rules-workflow .workflow-chip:active {
+  cursor: grabbing;
+}
+.rules-workflow .js-trigger-chip {
+  border-inline-start: 4px solid #1565c0;
+}
+.rules-workflow .js-action-chip {
+  border-inline-start: 4px solid #2e7d32;
+}
+.rules-workflow .workflow-existing-title {
+  margin-top: 9px;
+}
+.rules-workflow .workflow-rule {
+  position: relative;
+}
+.rules-workflow .workflow-rule-delete {
+  display: flex;
+  align-items: center;
+  color: #b00;
+  padding-inline-start: 8px;
 }
 .rules-lists-item {
   display: block;
@@ -12,7 +197,7 @@
 }
 .rules-lists-item p {
   display: inline-block;
-  float: left;
+  float: inline-start;
   margin: revert;
 }
 .hide-element {
@@ -23,7 +208,7 @@
 }
 .rules-btns-group {
   position: absolute;
-  right: 0;
+  inset-inline-end: 0;
   top: 50%;
   transform: translateY(-50%);
 }
@@ -33,18 +218,18 @@
 .rules-add {
   display: block;
   overflow: auto;
-  margin-top: 2vh;
-  margin-bottom: 0.7vh;
+  margin-top: 18px;
+  margin-bottom: 6px;
 }
 .rules-add input {
   display: inline-block;
-  float: right;
+  float: inline-end;
   margin: auto;
-  margin-right: 1.3vw;
+  margin-inline-end: 18px;
 }
 .rules-add button {
   display: inline-block;
-  float: right;
+  float: inline-end;
   margin: auto;
 }
 .rules-back {
@@ -55,11 +240,38 @@
 }
 .rules-back button {
   display: inline-block;
-  float: right;
+  float: inline-end;
   margin: auto;
-  margin-right: 14px;
+  margin-inline-end: 14px;
 }
 .rules-back .js-goback .fa-arrow-left {
+  color: #fff !important;
+}
+/* #6852: Back to the board, at the top of the Rules page. */
+.rules-back-to-board {
+  margin-block: 8px;
+  margin-inline: 14px;
+}
+/* A link, so it opens the board as a link does (also in a new tab), drawn as
+   the primary buttons around it: forms.css styles only button.primary. */
+.rules-back-to-board .js-rules-back-to-board {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 20px;
+  border-radius: 3px;
+  background: var(--theme-accent, #005377);
+  box-shadow: 0 1px 0 #4d4d4d;
+  color: #fff;
+  font-weight: 700;
+  text-decoration: none;
+}
+.rules-back-to-board .js-rules-back-to-board:hover,
+.rules-back-to-board .js-rules-back-to-board:focus {
+  background: var(--theme-accent, #004766);
+  color: #fff;
+}
+.rules-back-to-board .js-rules-back-to-board .fa-arrow-left {
   color: #fff !important;
 }
 .flex,
@@ -72,7 +284,7 @@
   display: flex;
 }
 .triggers-content {
-  color: #727479;
+  color: var(--wekan-quiet-text, #5a5c61);
   background: #dedede;
 }
 .triggers-content .triggers-body {
@@ -92,7 +304,7 @@
   width: 50px;
   height: 50px;
   text-align: center;
-  font-size: 25px;
+  font-size: calc(25px * var(--wekan-ui-font-scale, 1));
   position: relative;
 }
 .triggers-content .triggers-body .triggers-side-menu ul li i {
@@ -115,7 +327,7 @@
   width: 95%;
 }
 .triggers-content .triggers-body .triggers-side-menu ul li a span {
-  font-size: 13px;
+  font-size: calc(13px * var(--wekan-ui-font-scale, 1));
 }
 .triggers-content .triggers-body .triggers-main-body {
   padding: 0.1em 1em;
@@ -134,14 +346,14 @@
   position: absolute;
   top: 50%;
   transform: translateY(-50%);
-  left: 10px;
+  inset-inline-start: 10px;
 }
 .triggers-content .triggers-body .triggers-main-body .trigger-item .trigger-content .trigger-text {
-  font-size: 16px;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1));
   display: inline-block;
 }
 .triggers-content .triggers-body .triggers-main-body .trigger-item .trigger-content .trigger-inline-button {
-  font-size: 16px;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1));
   display: inline;
   padding: 6px;
   border: 1px solid #eee;
@@ -153,7 +365,7 @@
   box-shadow: 0 0 0 2px #666 inset;
 }
 .triggers-content .triggers-body .triggers-main-body .trigger-item .trigger-content .trigger-text.trigger-text-email {
-  margin-left: 5px;
+  margin-inline-start: 5px;
   margin-top: 10px;
   margin-bottom: 10px;
 }
@@ -164,7 +376,7 @@
   width: auto;
   height: 30px;
   margin: 0px;
-  margin-left: 5px;
+  margin-inline-start: 5px;
 }
 .triggers-content .triggers-body .triggers-main-body .trigger-item .trigger-content .trigger-dropdown input {
   display: inline-block;
@@ -172,8 +384,8 @@
   margin: 0;
 }
 .triggers-content .triggers-body .triggers-main-body .trigger-item .trigger-content-mail {
-  left: 20px;
-  right: 100px;
+  inset-inline-start: 20px;
+  inset-inline-end: 100px;
 }
 .triggers-content .triggers-body .triggers-main-body .trigger-item .trigger-button {
   position: absolute;
@@ -185,8 +397,8 @@
   border-radius: 4px;
   box-shadow: inset -1px -1px 3px rgba(0,0,0,0.05);
   text-align: center;
-  font-size: 20px;
-  right: 10px;
+  font-size: calc(20px * var(--wekan-ui-font-scale, 1));
+  inset-inline-end: 10px;
 }
 .triggers-content .triggers-body .triggers-main-body .trigger-item .trigger-button i {
   position: absolute;
@@ -203,18 +415,170 @@
   top: 30px;
 }
 .triggers-content .triggers-body .triggers-main-body .trigger-item .trigger-button.trigger-button-person {
-  right: -40px;
+  inset-inline-end: -40px;
 }
 .triggers-content .triggers-body .triggers-main-body .trigger-item .trigger-button.trigger-button-color {
   top: unset;
   position: unset;
   transform: unset;
-  font-size: 16px;
+  font-size: calc(16px * var(--wekan-ui-font-scale, 1));
   width: auto;
-  padding-left: 10px;
-  padding-right: 10px;
+  padding-inline-start: 10px;
+  padding-inline-end: 10px;
   height: 40px;
 }
 .triggers-content .triggers-body .triggers-main-body .trigger-item.trigger-item-mail {
   height: 300px;
+}
+/* Rules import/export popup */
+.rules-import-export h3 {
+  margin: 0.6em 0 0.3em;
+  font-size: calc(15px * var(--wekan-ui-font-scale, 1));
+}
+.rules-import-export .rules-ie-hint {
+  font-size: calc(12px * var(--wekan-ui-font-scale, 1));
+  color: var(--wekan-quiet-text, #5a5c61);
+  margin-bottom: 0.3em;
+}
+.rules-import-export .rules-ie-textarea {
+  width: 100%;
+  box-sizing: border-box;
+}
+.rules-import-export .rules-ie-btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.rules-import-export .rules-ie-btns button {
+  flex: 1 1 auto;
+}
+.rules-import-export .rules-ie-message {
+  margin-top: 0.6em;
+  padding: 6px 8px;
+  background: #e8f0fe;
+  border-radius: 4px;
+  font-size: calc(13px * var(--wekan-ui-font-scale, 1));
+}
+
+/* Rule titles and controls must participate in layout instead of overlapping. */
+.rules-page { box-sizing: border-box; width: 100%; min-width: 0; }
+.rules-page h2, .rules-page p, .rules-page .workflow-node-text { overflow-wrap: anywhere; }
+.rules-page .rules-list { max-height: none; overflow: visible; padding: 0; }
+.rules-page .rules-lists-item { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 10px 0; overflow: visible; }
+.rules-page .rules-lists-item p { flex: 1 1 200px; min-width: 0; margin: 0; float: none; }
+.rules-page .rules-btns-group { position: static; transform: none; display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.rules-page button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; height: auto; min-height: 32px; }
+.rules-page .rules-add { display: flex; flex-wrap: wrap; gap: 8px; overflow: visible; }
+.rules-page .rules-add textarea { flex: 1 1 240px; min-width: 0; }
+.rules-page .rules-add button { float: none; }
+.rules-page .triggers-content { color: #333; }
+.rules-page .triggers-content .triggers-body { align-items: flex-start; min-width: 0; }
+.rules-page .triggers-content .triggers-main-body { min-width: 0; box-sizing: border-box; }
+.rules-page .triggers-content .triggers-body .triggers-main-body .trigger-item { height: auto; min-height: 80px; display: flex; align-items: center; flex-wrap: wrap; gap: 10px; overflow: visible; color: #333; }
+.rules-page .triggers-content .triggers-main-body .trigger-item .trigger-content { position: static; transform: none; flex: 1 1 200px; min-width: 0; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.rules-page .triggers-content .trigger-item .trigger-dropdown { min-width: 0; max-width: 100%; }
+.rules-page .triggers-content .trigger-item .trigger-dropdown :is(textarea,input,select) { box-sizing: border-box; max-width: 100%; margin: 0; }
+.rules-page .triggers-content .triggers-body .triggers-main-body .trigger-item .trigger-button { position: relative; inset: auto; transform: none; flex: 0 0 auto; margin: 0; }
+.rules-page .triggers-content .trigger-item .trigger-text { overflow-wrap: anywhere; max-width: 100%; }
+.rules-page .workflow-node, .rules-page .workflow-slot, .rules-page .workflow-chip { min-width: 0; max-width: 100%; box-sizing: border-box; color: #333; overflow-wrap: anywhere; }
+.rules-page .workflow-builder { color: #333; }
+.rules-page .workflow-builder-controls textarea { flex: 1 1 200px; min-width: 0; }
+.rules-blocks-toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin: 12px 0; }
+.rules-blocks-toolbar label { flex: 1 1 220px; min-width: 0; }
+.rules-blocks-toolbar select, .rules-blocks textarea { width: 100%; max-width: 100%; box-sizing: border-box; }
+.rules-blocks-workspace { position: relative; width: 100%; height: 520px; min-height: 320px; border: 1px solid #aaa; }
+.rules-blocks-workspace .blocklyToolbox { color: #222; }
+@media (max-width: 600px) {
+  .rules-page { padding-inline: 8px; }
+  .rules-page .triggers-content .triggers-body { flex-direction: column; }
+  .rules-page .triggers-side-menu ul { display: flex; flex-wrap: wrap; }
+  .rules-page .triggers-content .triggers-main-body { padding: 6px; }
+  .rules-page .rules-btns-group { flex-basis: 100%; }
+  .rules-blocks-workspace { height: 440px; }
+}
+
+/* Icons on themed action buttons must share their readable foreground. */
+.rules-page button.primary i.fa { color: inherit; }
+
+/* Native, keyboard-accessible attachment choice in the mail action form. */
+.trigger-content-mail #email-attachments,
+.trigger-content-mail #email-discussion,
+.trigger-content-mail #email-card-details {
+  display: inline-block;
+  visibility: visible;
+  position: static;
+  inset-inline-start: auto;
+  width: 16px;
+  height: 16px;
+  min-height: 0;
+  padding: 0;
+  margin-inline-end: 6px;
+  appearance: auto;
+}
+/* #3195: insert a variable into the text field last focused. */
+.rule-variable-picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5em;
+  margin: 0 0 10px;
+  color: #6b778c;
+  font-size: 0.9em;
+}
+.rule-variable-picker select {
+  width: auto;
+  max-width: 100%;
+  margin: 0;
+}
+/* #4294: which variables trigger fields accept. */
+.rules-vars-hint {
+  margin: 0 0 10px;
+  color: #6b778c;
+  font-size: 0.9em;
+}
+
+/* Suggested rules (ruleSuggestions.jade), above the rule list. */
+.rule-suggestions {
+  margin: 0 0 16px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: #fff8e1;
+  border: 1px solid #f0d78c;
+}
+.rule-suggestions-title {
+  margin: 0 0 6px;
+  font-size: 1.05em;
+}
+.rule-suggestions-title .fa {
+  margin-inline-end: 6px;
+}
+.rule-suggestions-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.rule-suggestion {
+  padding: 6px 0;
+  border-top: 1px solid rgba(0, 0, 0, 0.08);
+}
+.rule-suggestion:first-child {
+  border-top: 0;
+}
+.rule-suggestion-text {
+  overflow-wrap: anywhere;
+}
+.rule-suggestion-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+.rule-suggestion-buttons button {
+  margin: 0;
+  padding: 4px 12px;
+}
+.rule-suggestion-buttons button:not(.primary) {
+  color: #333;
+  background: #fff;
+  border: 1px solid #bbb;
 }

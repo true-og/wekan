@@ -1,6 +1,7 @@
 import { TAPi18n } from '/imports/i18n';
 import Cards from '/models/cards';
 import { getCurrentCardIdFromContext } from '/client/lib/currentCard';
+import { backIfOwnPopup } from '/client/lib/popupBack';
 
 function getCardId() {
   return getCurrentCardIdFromContext();
@@ -9,6 +10,7 @@ function getCardId() {
 Template.editCardSpentTimePopup.onCreated(function () {
   this.error = new ReactiveVar('');
   this.card = Cards.findOne(getCardId());
+  this.overtime = new ReactiveVar(this.card?.getIsOvertime() || false);
 });
 
 Template.editCardSpentTimePopup.helpers({
@@ -19,8 +21,7 @@ Template.editCardSpentTimePopup.helpers({
     return Cards.findOne(getCardId());
   },
   getIsOvertime() {
-    const card = Cards.findOne(getCardId());
-    return card?.getIsOvertime ? card.getIsOvertime() : false;
+    return Template.instance().overtime.get();
   },
 });
 
@@ -32,14 +33,11 @@ Template.editCardSpentTimePopup.events({
     if (!card) return;
 
     const spentTime = parseFloat(evt.target.time.value);
-    let isOvertime = false;
-    if ($('#overtime').attr('class').indexOf('is-checked') >= 0) {
-      isOvertime = true;
-    }
+    const isOvertime = tpl.overtime.get();
     if (spentTime >= 0) {
       card.setSpentTime(spentTime);
       card.setIsOvertime(isOvertime);
-      Popup.back();
+      backIfOwnPopup(evt, 'editCardSpentTimePopup');
     } else {
       tpl.error.set('invalid-time');
       evt.target.time.focus();
@@ -51,14 +49,11 @@ Template.editCardSpentTimePopup.events({
     if (!card) return;
     card.setSpentTime(null);
     card.setIsOvertime(false);
-    Popup.back();
+    backIfOwnPopup(evt, 'editCardSpentTimePopup');
   },
-  'click a.js-toggle-overtime'(evt) {
-    const card = Cards.findOne(getCardId());
-    if (!card) return;
-    card.setIsOvertime(!card.getIsOvertime());
-    $('#overtime .materialCheckBox').toggleClass('is-checked');
-    $('#overtime').toggleClass('is-checked');
+  'click a.js-toggle-overtime'(evt, tpl) {
+    evt.preventDefault();
+    tpl.overtime.set(!tpl.overtime.get());
   },
 });
 

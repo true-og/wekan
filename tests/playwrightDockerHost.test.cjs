@@ -1,0 +1,228 @@
+'use strict';
+
+const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
+
+const build = fs.readFileSync(path.join(__dirname, '..', 'build.sh'), 'utf8');
+let passed = 0;
+function test(name, fn) {
+  fn();
+  passed += 1;
+  console.log(`  ok - ${name}`);
+}
+
+console.log('playwrightDockerHost:');
+
+test('Docker is discovered directly or through the Flatpak host bridge', () => {
+  assert.match(build, /function docker_available\(\)/);
+  assert.match(build, /command -v flatpak-spawn/);
+  assert.match(build, /flatpak-spawn --host sh -lc 'command -v docker/);
+});
+
+test('Docker commands use the shared host-aware wrapper', () => {
+  assert.match(build, /function docker_exec\(\)/);
+  assert.match(build, /flatpak-spawn --host docker "\$@"/);
+  assert.match(build, /docker_exec run --rm --init --ipc=host --network host/);
+  assert.match(build, /docker_exec pull "mcr\.microsoft\.com\/playwright:/);
+});
+
+test('the Playwright runner fails clearly only when neither route exists', () => {
+  const runner = build.slice(
+    build.indexOf('function run_playwright_docker'),
+    build.indexOf('function run_playwright_webkit_docker'),
+  );
+  assert.match(runner, /if ! docker_available; then/);
+  assert.doesNotMatch(runner, /command -v docker/);
+});
+
+test("the runner installs local browsers and falls back per browser", () => {
+  assert.ok(build.includes("function ensure_playwright_test_dependencies()"));
+  assert.ok(build.includes("function ensure_native_playwright_browser()"));
+  assert.ok(build.includes("$WEKAN_DIR/.tools/ms-playwright"));
+  assert.ok(build.includes("! native_browser_can_launch \"$browser\" && docker_available"));
+  const config = fs.readFileSync(path.join(__dirname, "playwright", "playwright.config.js"), "utf8");
+  assert.ok(config.includes("LOCAL_BROWSER_CACHE"));
+  assert.ok(config.includes("ms-playwright"));
+  assert.ok(build.includes("function native_browser_is_installed()"));
+  assert.ok(build.includes("WEKAN_PLAYWRIGHT_PROJECT=\"$browser\""));
+  assert.ok(config.includes("SELECTED_BROWSER"));
+  assert.ok(/SELECTED_BROWSER[\s\S]*name: SELECTED_BROWSER/.test(config));
+});
+
+
+test('browser retry policy preserves normal runs and stops immediately in bail mode', () => {
+  const source = fs.readFileSync(path.join(__dirname, 'playwright', 'playwright.config.js'), 'utf8');
+  const vm = require('node:vm');
+  function config(env) {
+    const sandbox = {
+      module: { exports: {} }, __dirname: path.join(__dirname, 'playwright'),
+      process: { env: { WEKAN_PLAYWRIGHT_PROBE: '0', WEKAN_PLAYWRIGHT_ALL: '1', ...env } },
+      require: name => name === '@playwright/test'
+        ? { defineConfig: value => value, devices: {} }
+        : name === './helpers/browser-launch.cjs' ? { browserLaunchOptions: () => ({}) } : require(name),
+    };
+    vm.runInNewContext(source, sandbox);
+    return sandbox.module.exports;
+  }
+  assert.strictEqual(config({}).projects.find(project => project.name === 'webkit').retries, 1);
+  assert.strictEqual(config({ CI: '1' }).retries, 2, 'normal CI retains its retries');
+  assert.strictEqual(config({}).use.trace, 'on-first-retry');
+  for (const CI of ['', '1']) {
+    const value = config({ CI, WEKAN_TEST_BAIL: '1' });
+    assert.strictEqual(value.retries, 0, 'bail stops at the first failure');
+    assert.strictEqual(value.maxFailures, 1);
+    assert.strictEqual(value.use.trace, 'retain-on-failure', 'first failure retains evidence without retrying');
+    assert.ok(value.projects.every(project => !project.retries), 'no project can override bail with a retry');
+    assert.deepStrictEqual(Array.from(value.projects, project => project.name), ['chromium', 'firefox', 'webkit']);
+  }
+});
+
+
+test('macOS Docker pins only gateway Mongo connections and preserves URI options', () => {
+  const { execFileSync } = require('node:child_process');
+  const root = path.resolve(__dirname, '..');
+  const temp = fs.mkdtempSync(path.join(root, '.tools/tmp/playwright-docker-uri-'));
+  const runner = build.slice(build.indexOf('function run_playwright_docker'),
+    build.indexOf('function run_playwright_webkit_docker'));
+  const script = `
+    docker_available() { return 0; }
+    ensure_playwright_test_dependencies() { return 0; }
+    uname() { printf Darwin; }
+    # A port forwarder is ready at once; anything else asks the Playwright version.
+    node() { case "$1" in *docker-smtp-proxy.cjs) printf 'ready\\n' > "$4"; echo "FORWARD $3" >> "$TMPDIR/forwarded";; *) printf 1.63.0;; esac; }
+    mkdir -p "$WEKAN_DIR/.tools/tmp"
+    docker_exec() { printf '%s\\n' "$@"; }
+    ${runner}
+    run_playwright_docker firefox --list
+  `;
+  try {
+    for (const [uri, expected] of [
+      ['mongodb://127.0.0.1:3101/meteor', 'mongodb://host.docker.internal:3101/meteor?directConnection=true'],
+      ['mongodb://localhost:3101/meteor?replicaSet=meteor', 'mongodb://host.docker.internal:3101/meteor?replicaSet=meteor&directConnection=true'],
+      ['mongodb://localhost:3101/meteor?directConnection=false', 'mongodb://host.docker.internal:3101/meteor?directConnection=false'],
+      ['mongodb://database.example/meteor', 'mongodb://database.example/meteor'],
+    ]) {
+      const output = execFileSync('bash', ['-c', script], { encoding: 'utf8',
+        env: { ...process.env, TMPDIR: temp, WEKAN_DIR: temp, WEKAN_FILES_PATH_HOST: temp, WEKAN_MONGO_URL: uri, WEKAN_TEST_SMTP_PORT: '' } });
+      assert.ok(output.split('\n').includes(`WEKAN_MONGO_URL=${expected}`), output);
+    }
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
+test('the macOS container uses the bridge network, Linux keeps the host network', () => {
+  // Docker Desktop's host network lost about 1 connect in 75 to
+  // host.docker.internal, and a page whose document was one of them waited
+  // 60 s for nothing (three Firefox failures in one EVERYTHING run). From the
+  // bridge network: none in 1000. On Linux the host network is the real one.
+  const { execFileSync } = require('node:child_process');
+  const root = path.resolve(__dirname, '..');
+  const temp = fs.mkdtempSync(path.join(root, '.tools/tmp/playwright-docker-net-'));
+  const runner = build.slice(build.indexOf('function run_playwright_docker'),
+    build.indexOf('function run_playwright_webkit_docker'));
+  const own = runner.slice(0, runner.indexOf('function run_node_e2e_docker'));
+  assert.doesNotMatch(own, /--network host/, 'the network is chosen per platform, not written in');
+  const args = os => {
+    const script = `
+      docker_available() { return 0; }
+      ensure_playwright_test_dependencies() { return 0; }
+      uname() { printf ${os}; }
+      # A port forwarder is ready at once; anything else asks the Playwright version.
+    node() { case "$1" in *docker-smtp-proxy.cjs) printf 'ready\\n' > "$4"; echo "FORWARD $3" >> "$TMPDIR/forwarded";; *) printf 1.63.0;; esac; }
+      mkdir -p "$WEKAN_DIR/.tools/tmp"
+      docker_exec() { printf '%s\\n' "$@"; }
+      ${runner}
+      run_playwright_docker firefox --list
+    `;
+    const out = execFileSync('bash', ['-c', script], { encoding: 'utf8',
+      env: { ...process.env, TMPDIR: temp, WEKAN_DIR: temp, WEKAN_FILES_PATH_HOST: temp,
+        WEKAN_BASE_URL: 'http://localhost:3000', WEKAN_TEST_SMTP_PORT: '' } }).split('\n');
+    return out;
+  };
+  try {
+    const mac = args('Darwin');
+    assert.strictEqual(mac[mac.indexOf('--network') + 1], 'bridge');
+    assert.ok(mac.includes('WEKAN_DOCKER_HOST_PROXY_PORT=3000'), 'the bridge container still proxies localhost');
+    assert.ok(!mac.includes('host'), 'negative: no host network on macOS');
+    const linux = args('Linux');
+    assert.strictEqual(linux[linux.indexOf('--network') + 1], 'host');
+    assert.ok(linux.includes('WEKAN_DOCKER_HOST_PROXY_PORT='), 'Linux needs no proxy');
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
+test('the container sees the repo and the files root at their own host paths', () => {
+  // A spec and the server share files by path: admin-continuous-backup writes
+  // a key file for the server and reads the stream the server wrote. With the
+  // repo mounted at /repo, each side was handed a path the other did not have.
+  const { execFileSync } = require('node:child_process');
+  const root = path.resolve(__dirname, '..');
+  const temp = fs.mkdtempSync(path.join(root, '.tools/tmp/playwright-docker-paths-'));
+  const files = path.join(temp, 'files');
+  const runner = build.slice(build.indexOf('function run_playwright_docker'),
+    build.indexOf('function run_node_e2e_docker'));
+  assert.doesNotMatch(runner, /:\/repo\b|\/wekan-files/, 'negative: no container-only path');
+  try {
+    for (const os of ['Darwin', 'Linux']) {
+      const script = `
+        docker_available() { return 0; }
+        ensure_playwright_test_dependencies() { return 0; }
+        uname() { printf ${os}; }
+        # A port forwarder is ready at once; anything else asks the Playwright version.
+    node() { case "$1" in *docker-smtp-proxy.cjs) printf 'ready\\n' > "$4"; echo "FORWARD $3" >> "$TMPDIR/forwarded";; *) printf 1.63.0;; esac; }
+        mkdir -p "$WEKAN_DIR/.tools/tmp"
+        docker_exec() { printf '%s\\n' "$@"; }
+        ${runner}
+        run_playwright_docker firefox --list
+      `;
+      const out = execFileSync('bash', ['-c', script], { encoding: 'utf8',
+        env: { ...process.env, TMPDIR: temp, WEKAN_DIR: temp, WEKAN_FILES_PATH_HOST: files,
+          WEKAN_TEST_SMTP_PORT: '' } }).split('\n');
+      const after = flag => out.filter((v, i) => out[i - 1] === flag);
+      assert.ok(after('-v').includes(`${temp}:${temp}`), `${os}: the repo at its own path`);
+      assert.ok(after('-v').includes(`${files}:${files}`), `${os}: the files root at its own path`);
+      assert.ok(after('-e').includes(`WEKAN_FILES_PATH=${files}`), `${os}: the specs are told that path`);
+      assert.deepStrictEqual(after('-w'), [path.join(temp, 'tests', 'playwright')]);
+      assert.ok(after('-e').includes(`HOME=${temp}/.tools/tmp`));
+    }
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
+test('on macOS the SMTP port and the mock-server pool are forwarded into the container', () => {
+  // WeKan, outside the container, fetches from the list-sync specs' mock
+  // Jira/GitLab inside it; Docker Desktop keeps the container's loopback from
+  // the host, so those fetches failed until the ports were forwarded.
+  const { execFileSync } = require('node:child_process');
+  const root = path.resolve(__dirname, '..');
+  const runner = build.slice(build.indexOf('function run_playwright_docker'),
+    build.indexOf('function run_node_e2e_docker'));
+  for (const [os, smtp, pool, forwarded, named] of [
+    ['Darwin', '2525', '', ['2525', '39101', '39102', '39103', '39104'], '39101 39102 39103 39104'],
+    ['Darwin', '', '40001 40002', ['40001', '40002'], '40001 40002'],
+    ['Linux', '2525', '', [], ''],
+  ]) {
+    const temp = fs.mkdtempSync(path.join(root, '.tools/tmp/playwright-docker-fwd-'));
+    try {
+      const script = `
+        mkdir -p "$WEKAN_DIR/.tools/tmp"
+        docker_available() { return 0; }
+        ensure_playwright_test_dependencies() { return 0; }
+        uname() { printf ${os}; }
+        node() { case "$1" in *docker-smtp-proxy.cjs) printf 'ready\\n' > "$4"; echo "$3" >> "$WEKAN_DIR/forwarded";; *) printf 1.63.0;; esac; }
+        docker_exec() { printf '%s\\n' "$@"; }
+        ${runner}
+        run_playwright_docker firefox --list
+      `;
+      const env = { ...process.env, TMPDIR: temp, WEKAN_DIR: temp, WEKAN_FILES_PATH_HOST: temp, WEKAN_TEST_SMTP_PORT: smtp };
+      delete env.WEKAN_TEST_REVERSE_PORTS;
+      if (pool) env.WEKAN_TEST_REVERSE_PORTS = pool;
+      const out = execFileSync('bash', ['-c', script], { encoding: 'utf8', env }).split('\n');
+      const file = path.join(temp, 'forwarded');
+      const got = fs.existsSync(file) ? fs.readFileSync(file, 'utf8').trim().split('\n').filter(Boolean) : [];
+      assert.deepStrictEqual(got, forwarded, `${os}: the ports forwarded from the host`);
+      assert.ok(out.includes(`WEKAN_TEST_REVERSE_PORTS=${named}`), `${os}: the pool named to the specs`);
+      assert.deepStrictEqual(fs.readdirSync(path.join(temp, '.tools/tmp')), [], 'the ready files are removed');
+    } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+  }
+});
+
+console.log(`\n${passed} tests passed`);

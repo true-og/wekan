@@ -1,0 +1,378 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { Meteor } from 'meteor/meteor';
+import { EJSON } from 'meteor/ejson';
+import { Random } from 'meteor/random';
+import Boards from '/models/boards';
+import Cards from '/models/cards';
+import Lists from '/models/lists';
+import Swimlanes from '/models/swimlanes';
+import ScrumSprints from '/models/scrumSprints';
+import ScrumReleases from '/models/scrumReleases';
+import ScrumEvents from '/models/scrumEvents';
+import ChangeHistory from '/models/changeHistory';
+import CustomFields from '/models/customFields';
+import ScrumHistoryPending, { ScrumHistoryCompletions } from './scrumHistoryPending';
+import { canUpdateCard } from '/server/permissions/cards';
+import { allowIsBoardMemberWithWriteAccess } from '/server/lib/utils';
+import { withoutRecording, isRecordingSuppressed } from './historyRecordingScope';
+import { setScrumHistoryRecorder, setScrumHistoryBatchRunner, setScrumHistoryBatchNamer, withScrumBoardLock, assertNoPendingScrumImport } from '/server/scrum';
+const { assignedOnlyCardScope } = require('/models/lib/boardCardScope');
+const { METADATA_TYPES, historyDocument, historyRecords, historySide, historyParts } = require('/models/lib/scrumHistory');
+const { calculateObjectSize } = require('bson');
+import { ROLLOVER_PENDING } from './scrumRolloverStore';
+const { normalizeScrumMetadata, normalizeScrumSettings, DEFAULT_SCRUM_SETTINGS, cardReleaseIds } = require('/models/lib/scrum');
+const collections = { board: Boards, card: Cards, list: Lists, swimlane: Swimlanes,
+  'scrum-sprint': ScrumSprints, 'scrum-release': ScrumReleases, 'scrum-event': ScrumEvents };
+const { recordScrumRestoreOnce } = require('./scrumHistoryRestoreWriter');
+const { finishScrumHistory, verifyScrumHistorySource, verifyScrumHistorySourceState } = require('./scrumHistoryFinalizer');
+const { ensureScrumHistoryOperation, claimScrumHistoryWorker, assertScrumHistoryWorker } = require('./scrumHistoryOwnership');
+const { scrumHistoryWriteState, inspectScrumHistoryWrites, verifyScrumHistoryWrites, plannedIncarnations } = require('./scrumHistoryWriteState');
+const { scrumHistoryWriteSelector } = require('./scrumHistoryWriteSelector');
+const { readScrumHistoryRequestCompletion } = require('./scrumHistoryCompletion');
+const { RETRY_FAILURES } = require('./scrumHistoryRecovery');
+const batches = new AsyncLocalStorage();
+const conflict = () => { throw new Meteor.Error('scrum-conflict', 'Scrum data changed. Reload History before retrying.'); };
+
+// `batchId`, when given, names a logical change recorded over several
+// batches - a sprint close and its background rollover, chunk by chunk - so
+// undo and redo walk all of it; its rows always carry it.
+async function recordBatch(boardId, userId, changes, givenBatchId = null) {
+  if (!userId || !changes.length || isRecordingSuppressed()) return;
+  const records = historyRecords(changes).filter(row => !EJSON.equals(row.before, row.after));
+  if (!records.length) return;
+  const parts = historyParts(records, doc => (doc ? calculateObjectSize(doc) : 0));
+  if (parts.length > 1 || givenBatchId) {
+    // One logical change in several rows (models/lib/scrumHistory.js
+    // historyParts), written in order on distinct milliseconds so the undo
+    // stack keeps their order.
+    const batchId = givenBatchId || Random.id();
+    for (let index = 0; index < parts.length; index += 1) {
+      // Distinct milliseconds also from an earlier batch of the same change.
+      if (index || givenBatchId) await nextMillisecond();
+      const id = await ChangeHistory.record({ boardId, entityType: 'scrum', entityId: boardId, group: 'scrum',
+        cardId: null, listId: null, swimlaneId: null, changeType: 'edited', batchId,
+        previousContent: historySide(parts[index], 'before'), newContent: historySide(parts[index], 'after'), userId });
+      if (!id) throw new Meteor.Error('scrum-history-failed', 'The change was saved but its History record could not be written.');
+    }
+    return;
+  }
+  const single = records.length === 1 ? records[0] : null;
+  const source = changes.find(change => change.entityId === single?.id);
+  const card = single?.type === 'card' ? source.newContent || source.previousContent : null;
+  const id = await ChangeHistory.record({ boardId, entityType: 'scrum', entityId: single?.id || boardId,
+    group: 'scrum', cardId: card?._id || null, listId: card?.listId || (single?.type === 'list' ? single.id : null),
+    swimlaneId: card?.swimlaneId || (single?.type === 'swimlane' ? single.id : null),
+    changeType: single && !single.before ? 'added' : single && !single.after ? 'removed' : 'edited',
+    previousContent: historySide(records, 'before'), newContent: historySide(records, 'after'), userId });
+  if (!id) throw new Meteor.Error('scrum-history-failed', 'The change was saved but its History record could not be written.');
+}
+const nextMillisecond = async () => {
+  const now = Date.now();
+  while (Date.now() === now) await new Promise(resolve => setTimeout(resolve, 1));
+};
+// What a batch keeps of a change until it is recorded: the History content
+// and the location a single-card row shows, not the whole document, since a
+// sprint close may carry tens of thousands of cards.
+const slim = (type, doc) => doc && METADATA_TYPES.has(type)
+  ? { ...historyDocument(type, doc), listId: doc.listId, swimlaneId: doc.swimlaneId } : doc;
+Meteor.startup(() => {
+  setScrumHistoryRecorder(async change => {
+    if (isRecordingSuppressed()) return;
+    const batch = batches.getStore();
+    if (batch) batch.push({ ...change, previousContent: slim(change.entityType, change.previousContent),
+      newContent: slim(change.entityType, change.newContent) });
+    else await recordBatch(change.boardId, change.userId, [change]);
+  });
+  setScrumHistoryBatchRunner((boardId, userId, operation, { batchId = null } = {}) => batches.run(Object.assign([], { batchId }), async () => {
+    try { return await operation(); }
+    finally { const store = batches.getStore(); await recordBatch(boardId, userId, store, store.batchId); }
+  }));
+  // A running operation names its batch once it knows it continues later.
+  setScrumHistoryBatchNamer(batchId => { const store = batches.getStore(); if (store) store.batchId = batchId; });
+});
+
+function recordList(content) {
+  if (!content || !Array.isArray(content.records) || !content.records.length) throw new Meteor.Error('invalid-scrum-history');
+  const seen = new Set();
+  for (const row of content.records) {
+    if (!row || !collections[row.type] || typeof row.id !== 'string' || seen.has(`${row.type}:${row.id}`)) throw new Meteor.Error('invalid-scrum-history');
+    seen.add(`${row.type}:${row.id}`);
+  }
+  return content.records;
+}
+export async function scrumHistorySnapshot(row) {
+  const records = recordList(row.newContent || row.previousContent);
+  return { records: await Promise.all(records.map(async entry => ({ type: entry.type, id: entry.id,
+    document: historyDocument(entry.type, await collections[entry.type].findOneAsync(entry.id)) }))) };
+}
+// Every target of a row read at once, in the targets' order: one query per
+// record type, not one per record. A sprint close carries up to a thousand
+// records a row, and their one-by-one reads were most of an undo's time.
+async function readTargets(targets) {
+  const byType = new Map();
+  for (const entry of targets) {
+    if (!byType.has(entry.type)) byType.set(entry.type, new Set());
+    byType.get(entry.type).add(entry.id);
+  }
+  const found = new Map();
+  for (const [type, ids] of byType) {
+    for (const doc of await collections[type].find({ _id: { $in: [...ids] } }).fetchAsync()) found.set(`${type}:${doc._id}`, doc);
+  }
+  return targets.map(entry => found.get(`${entry.type}:${entry.id}`));
+}
+async function validateTargets(board, userId, records, current) {
+  const final = new Map(records.map(entry => [`${entry.type}:${entry.id}`, entry.document]));
+  // A sprint or release that thousands of cards name is read once, not once
+  // a card. Like the rest of this preflight it is not an atomic snapshot; the
+  // writes are guarded one by one.
+  const looked = new Map();
+  async function reference(type, id) {
+    if (!id) return;
+    const key = `${type}:${id}`;
+    let doc;
+    if (final.has(key)) doc = final.get(key);
+    else {
+      if (!looked.has(key)) looked.set(key, await collections[type].findOneAsync(id));
+      doc = looked.get(key);
+    }
+    if (!doc || doc.boardId !== board._id) throw new Meteor.Error('invalid-scrum-reference', 'A referenced Scrum record is no longer on this board.');
+  }
+  for (let index = 0; index < records.length; index += 1) {
+    const entry = records[index]; const doc = current[index]; const target = entry.document;
+    if (doc && (entry.type === 'board' ? doc._id : doc.boardId) !== board._id) conflict();
+    if (target && (target._id !== entry.id || target.boardId !== board._id)) conflict();
+    if (entry.type === 'card') {
+      const scope = assignedOnlyCardScope(board, userId);
+      if (!doc || (scope && !(doc.assignees || []).includes(userId)) || !await canUpdateCard(userId, doc, ['scrum'], { $set: { scrum: target?.scrum || {} } })) throw new Meteor.Error('not-authorized');
+    } else if (['list', 'swimlane'].includes(entry.type)) {
+      if (!allowIsBoardMemberWithWriteAccess(userId, board)) throw new Meteor.Error('not-authorized');
+    } else if (!board.hasAdmin(userId)) throw new Meteor.Error('not-authorized');
+    if (METADATA_TYPES.has(entry.type)) {
+      if (!doc || !target) conflict();
+      if (entry.type === 'board') normalizeScrumSettings(target.scrum);
+      else normalizeScrumMetadata(entry.type, target.scrum);
+    }
+    const metadata = METADATA_TYPES.has(entry.type) ? target?.scrum : target;
+    await reference('scrum-sprint', metadata?.sprintId);
+    // Every release of a card (models/lib/scrum.js cardReleaseIds), a
+    // swimlane's one: each must still be this board's.
+    for (const id of cardReleaseIds(metadata)) await reference('scrum-release', id);
+    for (const id of metadata?.pastSprintIds || []) await reference('scrum-sprint', id);
+    if (entry.type === 'board' && target?.scrum?.estimateSource === 'customField') {
+      if (!await CustomFields.findOneAsync({ _id: target.scrum.estimateCustomFieldId, boardIds: board._id, type: 'number' })) throw new Meteor.Error('invalid-scrum-reference');
+    }
+    if (entry.type === 'scrum-event' && target) {
+      for (const id of target.followUpCardIds || []) if (!await Cards.findOneAsync({ _id: id, boardId: board._id })) throw new Meteor.Error('invalid-scrum-reference');
+    }
+    // Never delete a planning record still referenced outside this operation.
+    if (!target && ['scrum-sprint', 'scrum-release'].includes(entry.type)) {
+      const field = entry.type === 'scrum-sprint' ? 'sprintId' : 'releaseId';
+      for (const type of ['card', 'swimlane', ...(field === 'sprintId' ? ['scrum-event'] : [])]) {
+        const selector = type === 'scrum-event' ? { sprintId: entry.id } : { [`scrum.${field}`]: entry.id };
+        if (type === 'card' && field === 'sprintId') {
+          delete selector['scrum.sprintId']; selector.$or = [{ 'scrum.sprintId': entry.id }, { 'scrum.pastSprintIds': entry.id }];
+        }
+        if (type === 'card' && field === 'releaseId') {
+          delete selector['scrum.releaseId']; selector.$or = [{ 'scrum.releaseId': entry.id }, { 'scrum.releaseIds': entry.id }];
+        }
+        const refs = await collections[type].find({ boardId: board._id, ...selector }).fetchAsync();
+        for (const ref of refs) {
+          const key = `${type}:${ref._id}`;
+          if (!final.has(key)) conflict();
+          const after = final.get(key); const meta = METADATA_TYPES.has(type) ? after?.scrum : after;
+          if (meta?.[field] === entry.id || (field === 'sprintId' && meta?.pastSprintIds?.includes(entry.id)) ||
+            (field === 'releaseId' && cardReleaseIds(meta).includes(entry.id))) conflict();
+        }
+      }
+    }
+  }
+  const settings = { ...DEFAULT_SCRUM_SETTINGS, ...(final.get(`board:${board._id}`)?.scrum || board.scrum || {}) };
+  const active = await ScrumSprints.find({ boardId: board._id, state: 'active' }).fetchAsync();
+  const sprints = new Map(active.map(s => [s._id, s]));
+  for (const entry of records.filter(r => r.type === 'scrum-sprint')) sprints.set(entry.id, entry.document);
+  for (const sprint of sprints.values()) if (sprint?.state === 'active' && sprint.startSnapshot) {
+    for (const [setting, stored] of [['estimateSource','estimateSource'],['estimateCustomFieldId','estimateCustomFieldId'],['estimateUnit','unit'],['completionPolicy','completionPolicy']]) {
+      if ((settings[setting] ?? null) !== (sprint.startSnapshot[stored] ?? null)) conflict();
+    }
+  }
+}
+
+export async function applyScrumHistory(row, content, direction, request) {
+  return withScrumBoardLock(row.boardId, async () => {
+    const userId = Meteor.userId();
+    const board = await Boards.findOneAsync(row.boardId);
+    if (!userId || !board) throw new Meteor.Error('not-authorized');
+    const operationId = request?._id;
+    if (request) {
+      if (request.userId !== userId || request.boardId !== row.boardId || request.direction !== direction ||
+          request.selection.rowId !== row._id || request.selection.sourceHash !== row.integrityHash) conflict();
+      if (!allowIsBoardMemberWithWriteAccess(userId, board)) throw new Meteor.Error('not-authorized');
+      // Check inside the board queue too: another call may have completed after
+      // this worker read the request but before it acquired the local lock.
+      if (await readScrumHistoryRequestCompletion(ScrumHistoryCompletions, request)) {
+        const pending = await ScrumHistoryPending.findOneAsync(row.boardId);
+        if (pending?.operationId === operationId) {
+          await finishScrumHistory({ history: ChangeHistory, pending: ScrumHistoryPending,
+            completions: ScrumHistoryCompletions, row, journal: pending });
+        }
+        return true;
+      }
+    }
+    // Whole, with the row's hash, when the operation begins; by its identity
+    // fields before each write after that.
+    const assertSource = async () => {
+      const current = await ChangeHistory.findOneAsync(row._id);
+      try { verifyScrumHistorySource(current, row, direction); } catch (error) { conflict(); }
+    };
+    const assertSourceState = async () => {
+      const current = await ChangeHistory.findOneAsync(row._id, { fields: { _id: 1, integrityHash: 1, boardId: 1, userId: 1, superseded: 1 } });
+      try { verifyScrumHistorySourceState(current, row, direction); } catch (error) { conflict(); }
+    };
+    await assertSource();
+    const targets = recordList(content);
+    let journal = await ScrumHistoryPending.findOneAsync(row.boardId);
+    if (journal && (journal.rowId !== row._id || journal.direction !== direction || journal.userId !== userId ||
+        (operationId && journal.operationId !== operationId) || !EJSON.equals(journal.content, content))) conflict();
+    // A board administrator or an operator is resolving it (scrumHistoryRecovery.js).
+    if (journal?.resolving) {
+      throw new Meteor.Error('scrum-history-pending', 'The interrupted Scrum History operation is being resolved by a board administrator.');
+    }
+    let worker = null;
+    try {
+      if (!journal) {
+        if (await ScrumSprints.findOneAsync({ boardId: row.boardId, ...ROLLOVER_PENDING })) conflict();
+        const current = await readTargets(targets);
+        await validateTargets(board, userId, targets, current);
+        await assertNoPendingScrumImport(row.boardId);
+        const live = { records: targets.map((entry, index) => ({ type: entry.type, id: entry.id, document: historyDocument(entry.type, current[index]) })) };
+        const expected = direction === 'undo' ? row.newContent : row.previousContent;
+        if (direction !== 'restore' && !EJSON.equals(live, expected)) conflict();
+        journal = { _id: row.boardId, rowId: row._id, direction, userId, operationId: operationId || Random.id(), content: EJSON.clone(content),
+          before: live, revisions: current.map((doc,index) => doc ? (METADATA_TYPES.has(targets[index].type) ? doc.scrumRevision || 0 : doc.revision || 0) : null),
+          // Which lifetime of each record this plan was made against, and which
+          // one a record it creates will have (scrumHistoryWriteState.js).
+          incarnations: plannedIncarnations({ targets, current, newId: () => Random.id() }) };
+        await ScrumHistoryPending.insertAsync(journal);
+      } else {
+        const current = await readTargets(targets);
+        await validateTargets(board, userId, targets, current);
+        await assertNoPendingScrumImport(row.boardId);
+      }
+      await assertSource();
+      journal = await ensureScrumHistoryOperation(ScrumHistoryPending, journal);
+      // This worker's claim on the operation; a newer resume displaces it.
+      worker = await claimScrumHistoryWorker(ScrumHistoryPending, journal);
+      const assertCurrent = async () => {
+        await assertScrumHistoryWorker(ScrumHistoryPending, journal, worker);
+        await assertSourceState();
+      };
+      const verifyWrites = async (entries = targets, before = journal.before.records, revisions = journal.revisions,
+        incarnations = journal.incarnations) => {
+        try { await verifyScrumHistoryWrites({ targets: entries, before, revisions, incarnations, assertCurrent,
+          read: entry => collections[entry.type].findOneAsync(entry.id), readMany: readTargets }); }
+        catch (error) { conflict(); }
+      };
+      // Refuse already-visible conflicts anywhere in the saved batch before
+      // advancing its first unfinished write. Per-write guards remain necessary
+      // because this read-only preflight is not an atomic database snapshot.
+      try { await inspectScrumHistoryWrites({ targets, before: journal.before.records,
+        revisions: journal.revisions, incarnations: journal.incarnations, assertCurrent,
+        read: entry => collections[entry.type].findOneAsync(entry.id), readMany: readTargets }); }
+      catch (error) { conflict(); }
+      await withoutRecording(async () => {
+        // Each write is fenced by the ownership check right before it; the
+        // read it is computed from comes first, so the check also covers it.
+        for (let index = 0; index < targets.length; index += 1) {
+          const entry = targets[index]; const collection = collections[entry.type];
+          const current = await collection.findOneAsync(entry.id);
+          const before = journal.before.records[index];
+          if (before?.type !== entry.type || before?.id !== entry.id) conflict();
+          const originalRevision = journal.revisions[index];
+          let state;
+          const incarnation = journal.incarnations?.[index];
+          try { state = scrumHistoryWriteState({ type: entry.type, current,
+            before: before.document, after: entry.document, revision: originalRevision, incarnation }); }
+          catch (error) { conflict(); }
+          if (state === 'applied') continue;
+          const metadata = METADATA_TYPES.has(entry.type);
+          const selector = current ? scrumHistoryWriteSelector(entry.type, current) : null;
+          await assertCurrent();
+          if (!entry.document) {
+            if (!await collection.removeAsync(selector)) conflict();
+          } else if (metadata) {
+            if (!await collection.updateAsync(selector, { $set: { scrum: EJSON.clone(entry.document.scrum), scrumRevision: originalRevision + 1 } })) conflict();
+          } else if (!current) {
+            await collection.insertAsync({ ...EJSON.clone(entry.document), revision: 1, updatedAt: new Date(), updatedBy: userId,
+              ...(incarnation?.after ? { incarnation: incarnation.after } : {}) });
+          } else {
+            const { _id, ...fields } = EJSON.clone(entry.document);
+            // `incarnation` is not History content (historyDocument leaves it
+            // out) and must survive an update: it is the same record.
+            const unset = Object.fromEntries(Object.keys(current).filter(key => !['_id','revision','updatedAt','updatedBy','incarnation'].includes(key) && !(key in fields)).map(key => [key,'']));
+            const modifier = { $set: { ...fields, revision: originalRevision + 1, updatedAt: new Date(), updatedBy: userId } };
+            if (Object.keys(unset).length) modifier.$unset = unset;
+            if (!await collection.updateAsync(selector, modifier)) conflict();
+          }
+          // The write landed as planned. Ownership is not asked again here:
+          // the next write's fence and the whole batch's readback below ask it.
+          try {
+            const written = await collection.findOneAsync(entry.id);
+            if (scrumHistoryWriteState({ type: entry.type, current: written, before: before.document, after: entry.document,
+              revision: originalRevision, incarnation }) !== 'applied') conflict();
+          } catch (error) { conflict(); }
+        }
+      });
+      // Keep recovery durable until BOTH the timeline and the undo-stack flag
+      // are saved. A retry after either write uses the same operation ID.
+      const authors = direction === 'restore' ? [...new Set([row.userId, userId])] : [userId];
+      for (const author of authors) {
+        await verifyWrites();
+        await recordScrumRestoreOnce(ChangeHistory, {
+          boardId: row.boardId, swimlaneId: row.swimlaneId, listId: row.listId, cardId: row.cardId,
+          entityType: row.entityType, entityId: row.entityId, group: row.group,
+          changeType: 'restored', previousContent: journal.before, newContent: content,
+          userId: author, restoredFromId: row._id, restoredByUserId: userId,
+          isCheckpoint: direction !== 'restore', batchId: journal.operationId,
+        }).catch(() => {
+          throw new Meteor.Error('scrum-history-pending',
+            'History could not be verified or saved. The recovery checkpoint was retained.');
+        });
+      }
+      await verifyWrites();
+      await finishScrumHistory({ history: ChangeHistory, pending: ScrumHistoryPending,
+        completions: ScrumHistoryCompletions, row, journal }).catch(() => {
+        throw new Meteor.Error('scrum-history-pending',
+          'History finalization could not be verified. Retry the pending operation.');
+      });
+      return true;
+    } catch (error) {
+      await recordScrumHistoryFailure(journal, worker, error);
+      throw error;
+    }
+  });
+}
+
+// A retry that failed for a reason the next retry would meet again marks its
+// checkpoint, so a board administrator can resolve it
+// (scrumHistoryRecovery.js). Only the checkpoint this call worked on, and only
+// while this worker still holds it: a displaced worker's failure is not the
+// checkpoint's. Never in the way of the error itself.
+async function recordScrumHistoryFailure(journal, worker, error) {
+  if (!(error instanceof Meteor.Error) || !RETRY_FAILURES.has(error.error) ||
+      typeof journal?.operationId !== 'string' || !journal.operationId) return;
+  try {
+    await ScrumHistoryPending.rawCollection().updateOne({ _id: journal._id, rowId: journal.rowId, userId: journal.userId,
+      direction: journal.direction, operationId: journal.operationId, ...(worker ? { worker } : {}),
+      resolving: { $exists: false } },
+    { $set: { lastFailure: { at: new Date(), error: error.error, reason: String(error.reason || '').slice(0, 300) } } });
+  } catch (failure) { /* the retry's own error is the one returned */ }
+}
+
+export async function pendingScrumHistoryRow(boardId, userId, direction) {
+  const journal = await ScrumHistoryPending.findOneAsync(boardId);
+  if (!journal) return null;
+  if (journal.userId !== userId || journal.direction !== direction) conflict();
+  const row = await ChangeHistory.findOneAsync(journal.rowId);
+  if (!row) conflict();
+  return row;
+}

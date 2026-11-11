@@ -11,6 +11,7 @@ const getReactiveCache = () => require('/imports/reactiveCache').ReactiveCache;
 // Lazy getter — avoids circular dependency (i18n/tap → reactiveCache → settings)
 const getTAPi18n = () => require('/imports/i18n').TAPi18n;
 const { SimpleSchema } = require('/imports/simpleSchema');
+const { deliverySchemaFields } = require('/models/lib/notificationDelivery');
 const InvitationCodes = require('/models/invitationCodes').default;
 //var nodemailer = require('nodemailer');
 
@@ -27,6 +28,133 @@ Settings.attachSchema(
       defaultValue: false,
     },
     disableForgotPassword: {
+      type: Boolean,
+      optional: true,
+      defaultValue: false,
+    },
+    // Admin Panel / Features: when true, all links (markdown [label](url) and raw
+    // HTML <a href> tags) are rendered as plain, non-clickable text in every rich
+    // text field. Default false keeps links clickable.
+    renderLinksAsPlainText: {
+      type: Boolean,
+      optional: true,
+      defaultValue: false,
+    },
+    // Admin Panel / Features: when true, rich text is never rendered as markdown or
+    // HTML — the entire raw source is shown as escaped plain text, so hidden links,
+    // HTML comments (<!-- -->), JavaScript and any other code are always visible,
+    // not clickable, and not running. Default false renders markdown normally.
+    alwaysShowCodeAsText: {
+      type: Boolean,
+      optional: true,
+      defaultValue: false,
+    },
+    // Admin Panel / Features (issue #3069): autolink bare `<prefix>NNNN` tokens
+    // (e.g. "#1234") found in card descriptions/comments to an external issue
+    // tracker. externalLinkPatternPrefix is the literal token prefix (commonly
+    // "#"); externalLinkPatternUrl is the URL template containing "{number}",
+    // which is replaced with the digits that followed the prefix. Either left
+    // empty disables the feature (no-op). See models/lib/externalLinkAutolink.js
+    // for the pure matching/URL-building function this setting drives.
+    externalLinkPatternPrefix: {
+      type: String,
+      optional: true,
+    },
+    externalLinkPatternUrl: {
+      type: String,
+      optional: true,
+    },
+    // #1463: further autolink rules, one "<token> = <url>" per line with
+    // {number} and {identifier}, and identifier abbreviations "TK=Task".
+    // See models/lib/externalLinkRules.js.
+    externalLinkRules: {
+      type: String,
+      optional: true,
+      max: 20000,
+    },
+    externalLinkIdentifierAliases: {
+      type: String,
+      optional: true,
+      max: 5000,
+    },
+    // Admin Panel / Features / Notifications (issue #5820).
+    // disableActivities: stop recording AND showing all activity-feed entries.
+    // disableNotifications: never send watch notifications.
+    // disableWatch: turn off the watch feature (users can still track via activities
+    //   if activities are enabled, but cannot subscribe to watch notifications).
+    // All default false (current behaviour).
+    disableActivities: {
+      type: Boolean,
+      optional: true,
+      defaultValue: false,
+    },
+    // Sync activation (server/lib/syncActivation.js): stored rule,
+    // notification and webhook effects for SCHEDULED Sync runs. Off by default.
+    enableSyncCronEffects: {
+      type: Boolean,
+      optional: true,
+      defaultValue: false,
+    },
+    disableNotifications: {
+      type: Boolean,
+      optional: true,
+      defaultValue: false,
+    },
+    disableWatch: {
+      type: Boolean,
+      optional: true,
+      defaultValue: false,
+    },
+    // Admin Panel / Features / Delete (soft delete, docs/Features/Undo/Undo.md).
+    // When true, a Global Admin may PERMANENTLY (physically) delete soft-deleted
+    // content from the Delete panel's category table. Off by default — ordinary
+    // deletes are always soft/restorable, and GDPR/account erasure is separate.
+    enablePermanentDelete: {
+      type: Boolean,
+      optional: true,
+      defaultValue: false,
+    },
+    // Admin Panel / Features: master switches that disable ALL export / ALL import
+    // features (every format and endpoint). Default false (enabled).
+    disableAllExport: {
+      type: Boolean,
+      optional: true,
+      defaultValue: false,
+    },
+    disableAllImport: {
+      type: Boolean,
+      optional: true,
+      defaultValue: false,
+    },
+    // Admin Panel / Features: when true, avatars (user profile pictures) are never
+    // included when EXPORTING a board (WeKan JSON / CSV export). Default false.
+    disableExportAvatars: {
+      type: Boolean,
+      optional: true,
+      defaultValue: false,
+    },
+    // Admin Panel / Features: when true, avatars are never imported — from WeKan
+    // JSON import, Trello import, or external identity providers (LDAP/OIDC/OAuth2
+    // login avatar sync). Default false.
+    disableImportAvatars: {
+      type: Boolean,
+      optional: true,
+      defaultValue: false,
+    },
+    // Admin Panel / Features: when true, user identity fields (username, fullname,
+    // initials) are replaced with counter placeholders (user1, user2, ...) as a
+    // board is EXPORTED, so exported data carries no real user identities. Default
+    // false exports real user data.
+    anonymizeExportUsers: {
+      type: Boolean,
+      optional: true,
+      defaultValue: false,
+    },
+    // Admin Panel / Features: when true, user identity fields (username, fullname,
+    // initials) are replaced with counter placeholders (user1, user2, ...) as a
+    // board is IMPORTED, so the imported board carries no real user identities.
+    // Default false imports real user data.
+    anonymizeImportUsers: {
       type: Boolean,
       optional: true,
       defaultValue: false,
@@ -59,7 +187,79 @@ Settings.attachSchema(
       type: String,
       optional: true,
     },
+    'mailServer.enabled': {
+      type: Boolean,
+      optional: true,
+      defaultValue: false,
+    },
+    'mailServer.service': {
+      type: String,
+      optional: true,
+      defaultValue: 'SMTP',
+    },
+    // Keys are Nodemailer service names (dots are stored as U+FF0E). Keeping
+    // these maps black-boxed lets the bundled service catalogue evolve without
+    // widening the browser publication: passwords live in their own unpublished
+    // map, while configurations contain only non-secret form values.
+    'mailServer.configurations': {
+      type: Object,
+      optional: true,
+      blackbox: true,
+    },
+    'mailServer.passwords': {
+      type: Object,
+      optional: true,
+      blackbox: true,
+    },
+    'mailServer.passwordSet': {
+      type: Object,
+      optional: true,
+      blackbox: true,
+    },
+    // Email to card (#794): Admin Panel -> Notification Settings -> Inbound
+    // email. On/off, the board-address domain, the provider webhook's secret
+    // and the IMAP mailboxes polled, with their passwords. Never published:
+    // the Admin Panel reads it through getInboundMailSettings, which leaves the
+    // secret and the passwords out (server/emailToCard.js,
+    // models/lib/emailToCard.js inboundMailAdminView).
+    inboundMail: {
+      type: Object,
+      optional: true,
+      blackbox: true,
+    },
+    // Email bounces (#794): Admin Panel -> E-mail -> Bounces. { enabled,
+    // rules: { hard|soft|auto-reply|complaint: { actions, threshold } },
+    // sesTopicArns } - what to do with mail that comes back, and which Amazon
+    // SNS topics may report it (models/lib/emailBounce.js, server/emailBounces.js).
+    emailBounces: {
+      type: Object,
+      optional: true,
+      blackbox: true,
+    },
     productName: {
+      type: String,
+      optional: true,
+    },
+    themeColor: {
+      /**
+       * The site theme, set in Admin Panel / Settings / Visibility / Change color.
+       * It is the layer between WeKan's default theme and a user's own override
+       * (docs/Theme/Theme.md): whoever has not picked a theme of their own sees
+       * this one. On a multitenancy host the Organization's own value replaces it
+       * (models/lib/tenants.js BRANDING_FIELDS).
+       */
+      type: String,
+      optional: true,
+    },
+    themeCustomColors: {
+      /**
+       * The custom colours of that theme: one for a flat theme, two for a clear
+       * (gradient) one.
+       */
+      type: Array,
+      optional: true,
+    },
+    'themeCustomColors.$': {
       type: String,
       optional: true,
     },
@@ -83,7 +283,112 @@ Settings.attachSchema(
       type: Boolean,
       optional: true,
     },
+    // #6736: Admin Panel / Settings / Visibility / Features
+    // (models/lib/instanceFeatures.js). Explicit decisions per feature key.
+    featureStates: {
+      type: Object,
+      optional: true,
+      blackbox: true,
+    },
+    // Admin Panel / Settings / Global Webhooks / Internal destinations
+    // (models/lib/internalWebhookHosts.js): hosts on WeKan's own network that
+    // outgoing webhooks may reach. Empty: none. Never published; read and
+    // saved by site admins through methods (server/webhookInternalHosts.js).
+    webhookInternalHosts: {
+      type: Array,
+      optional: true,
+    },
+    'webhookInternalHosts.$': {
+      type: String,
+    },
+    // #2290: the login and registration webhook (models/lib/accountWebhook.js):
+    // { url, token, onLogin, onRegister, fields }. Never published.
+    accountWebhook: {
+      type: Object,
+      optional: true,
+      blackbox: true,
+    },
+    // #2460: SQRL sign-in (server/sqrl.js). Off by default.
+    sqrlEnabled: {
+      type: Boolean,
+      optional: true,
+    },
+    // #4198: public boards publish their card activity over ActivityPub
+    // (models/lib/activityPub.js). Off by default.
+    activityPubEnabled: {
+      type: Boolean,
+      optional: true,
+    },
+    // #2217: boards may show their Rules to members, read-only
+    // (models/lib/rulesReadOnly.js). Off by default.
+    rulesReadOnlyForMembers: {
+      type: Boolean,
+      optional: true,
+    },
+    // Admin Panel / Settings / Visibility / Optional APIs
+    // (models/lib/optionalApis.js): { trello, jira, github, gitea } - each
+    // compatible API is off unless ticked here.
+    optionalApis: {
+      type: Object,
+      optional: true,
+      blackbox: true,
+    },
+    // Keep features added by a later update off until an administrator enables them.
+    featureApprovalRequired: {
+      type: Boolean,
+      optional: true,
+    },
+    // The feature catalog as of the last save; a key not in it is new.
+    featureKnownKeys: {
+      type: Array,
+      optional: true,
+    },
+    'featureKnownKeys.$': {
+      type: String,
+    },
+    // Site admins see disabled features, to try them before enabling.
+    featurePreviewAdmins: {
+      type: Boolean,
+      optional: true,
+    },
+    // Admin Panel / Settings / Visibility / Features: the card fields shown
+    // on every board (models/lib/cardFieldVisibility.js), { '<field key>':
+    // true|false }. Missing means shown. Visibility only: no board setting or
+    // card data changes.
+    cardFieldStates: {
+      type: Object,
+      optional: true,
+      blackbox: true,
+    },
+    // How a board loads its cards: 'all' (default — every card into minimongo)
+    // or 'lazy' (only the visible per-list window, via a windowed publication).
+    // Seeded from the CARDS_LOADING env var; changeable in Admin Panel.
+    cardsLoading: {
+      type: String,
+      optional: true,
+      allowedValues: ['all', 'lazy'],
+    },
+    // Legacy persisted name: enables the global date-format default.
+    hideDateFormat: {
+      type: Boolean,
+      optional: true,
+    },
+    globalDateFormat: {
+      type: String,
+      optional: true,
+      allowedValues: ['YYYY-MM-DD', 'DD-MM-YYYY', 'MM-DD-YYYY',
+      'YYYY-MM-DD-date-only', 'DD-MM-YYYY-date-only', 'MM-DD-YYYY-date-only'],
+    },
     hideBoardMemberList: {
+      type: Boolean,
+      optional: true,
+    },
+    // Hide the activity feed on EVERY board, instance-wide. Read once from this
+    // global setting instead of being written into every board document: the old
+    // implementation bulk-updated showActivities:false on all boards, which could
+    // not be undone (the previous per-board values were gone) and did nothing for
+    // boards created afterwards.
+    hideBoardActivitiesOnAllBoards: {
       type: Boolean,
       optional: true,
     },
@@ -100,6 +405,10 @@ Settings.attachSchema(
       optional: true,
     },
     textBelowCustomLoginLogo: {
+      type: String,
+      optional: true,
+    },
+    loginBackgroundColor: {
       type: String,
       optional: true,
     },
@@ -128,6 +437,20 @@ Settings.attachSchema(
       optional: true,
     },
     legalNotice: {
+      type: String,
+      optional: true,
+    },
+    // Board visibility popup / create-board popup: the sub-name text shown under
+    // "Private" and "Public". Empty (the default) falls back to the i18n
+    // 'private-desc' / 'public-desc' strings unchanged - see
+    // imports/i18n/lib/visibilityDesc.js. Set by an admin who wants "Public" to
+    // mean something else on their instance, e.g. "public within our
+    // organization" rather than public on the internet (issue #4421).
+    customPrivateBoardDesc: {
+      type: String,
+      optional: true,
+    },
+    customPublicBoardDesc: {
       type: String,
       optional: true,
     },
@@ -186,12 +509,145 @@ Settings.attachSchema(
       optional: true,
       defaultValue: false,
     },
+    // #6116, split in two so each restriction sits with the thing it is about -
+    // Admin Panel / People / Organizations and / Teams. A candidate may be added to
+    // a board when they share at least one of the ENABLED kinds with the user doing
+    // the adding: an Organization when the first is on, a Team when the second is.
+    // With both on that is "an Organization OR a Team", which is exactly what the
+    // single `boardMembersFromSameOrgOrTeamOnly` meant - and is what an existing
+    // install is migrated to (see server/models/settings.js). Both false is the
+    // unrestricted default.
+    boardMembersFromSameOrgOnly: {
+      type: Boolean,
+      optional: true,
+      defaultValue: false,
+    },
+    boardMembersFromSameTeamOnly: {
+      type: Boolean,
+      optional: true,
+      defaultValue: false,
+    },
+    // The setting the two above replace. Kept in the schema so an install that
+    // still has it stored is valid, and so the migration can read it; nothing
+    // writes it any more.
+    boardMembersFromSameOrgOrTeamOnly: {
+      type: Boolean,
+      optional: true,
+      defaultValue: false,
+    },
+    // Admin-level default for the 3-tier Notification Settings system (see
+    // models/lib/notificationSettings.js): the base decision used when neither a
+    // board nor a member has overridden a given notification service. Follows
+    // the same nullable-override precedence used by the board/member allowsX
+    // toggles elsewhere in this schema — see resolveNotificationSetting().
+    notifyDefaultTray: {
+      type: Boolean,
+      optional: true,
+      defaultValue: true,
+    },
+    notifyDefaultEmail: {
+      type: Boolean,
+      optional: true,
+      defaultValue: true,
+    },
+    // #3695 / #5171: the instance default notification delivery per channel
+    // (email, tray, webhook). Unset keys use the built-in behaviour, which is
+    // what WeKan did before these settings. See models/lib/notificationDelivery.js.
+    ...deliverySchemaFields('notificationDelivery'),
+    // #2022: admin-customizable templates for WeKan's transactional emails.
+    // Each is OPTIONAL and unset by default, so an install that has never
+    // touched Admin Panel -> Email Templates sends the exact hardcoded/i18n
+    // content it always has (server/models/settings.js's sendInvitationEmail,
+    // server/notifications/email.js's activity-notification buffer). Only
+    // when an admin fills one of these in is it used, with
+    // models/lib/ruleVarsSubstitute.js's substituteVars() - the same
+    // `{token}` substitution the #3304 rule "send email" action uses -
+    // filling in the tokens documented next to each field below. Deliberately
+    // NOT included: password-reset / account-verification emails, which stay
+    // hardcoded (see docs/Security note in server/models/settings.js).
+    // Tokens: {email} {inviter} {user} {icode} {url}
+    inviteEmailSubjectTemplate: {
+      type: String,
+      optional: true,
+    },
+    inviteEmailBodyTemplate: {
+      type: String,
+      optional: true,
+    },
+    // Tokens: {board} {card} {list} {username} {url} {comment} {action}
+    activityEmailSubjectTemplate: {
+      type: String,
+      optional: true,
+    },
+    activityEmailBodyTemplate: {
+      type: String,
+      optional: true,
+    },
     supportTitle: {
       type: String,
       optional: true,
     },
     supportPageText: {
       type: String,
+      optional: true,
+    },
+    // Admin Panel override of the SAML_* environment variables
+    // (models/lib/samlConfig.js is the catalog).
+    saml: { type: Object, optional: true, blackbox: true },
+    // Every LDAP_* login setting, keyed as in models/lib/authConfigCatalog.js
+    // (`enabled`, `host`, ... `bindPassword` keep the names they were first
+    // stored under). Blackbox like `saml`: the catalog validates what is
+    // written (saveAuthConfigSettings), and server/publications/settings.js
+    // publishes field by field, so `ldap.bindPassword` never reaches a client.
+    ldap: { type: Object, optional: true, blackbox: true },
+    // The other login methods' overrides, same contract (#6744 follow-up:
+    // every login environment variable is overridable in Admin Panel / People).
+    // `oidc.secret` is the one secret among them and is never published.
+    oidc: { type: Object, optional: true, blackbox: true },
+    cas: { type: Object, optional: true, blackbox: true },
+    headerLogin: { type: Object, optional: true, blackbox: true },
+    loginOptions: { type: Object, optional: true, blackbox: true },
+    // Admin Panel / Attachments overrides (models/lib/authConfigCatalog.js):
+    // attachment retention (#6789) and backup options (#6790).
+    attachmentRetention: { type: Object, optional: true, blackbox: true },
+    backupOptions: { type: Object, optional: true, blackbox: true },
+    inboundMailLimits: { type: Object, optional: true, blackbox: true },
+    windowsSso: { type: Object, optional: true, blackbox: true },
+    // Admin Panel override of the OAUTH_<PROVIDER>_* environment variables for
+    // Meteor's own accounts-* login services (Google, GitHub, Facebook,
+    // X/Twitter, Meteor Developer, Weibo, Meetup - models/lib/oauthProviders.js
+    // is the catalog). Same contract as `ldap` above: everything OPTIONAL and
+    // unset by default so an env-var-only install is unchanged, and per
+    // provider ONLY `enabled`, `id`, `loginStyle` and the derived boolean
+    // `secretSet` are published (server/publications/settings.js) - the
+    // `secret` itself never leaves the server, exactly like ldap.bindPassword.
+    oauthProviders: {
+      type: Object,
+      optional: true,
+      blackbox: true,
+    },
+    // OAUTH_PROVIDERS_LOGIN_STYLE ('redirect', the default, | 'popup') for
+    // every provider.
+    oauthProvidersLoginStyle: {
+      type: String,
+      optional: true,
+      allowedValues: ['popup', 'redirect'],
+    },
+    // OAUTH_PROVIDERS_MERGE_EXISTING_USERS: attach a provider login to the
+    // existing account that has the same verified email instead of a new one.
+    oauthProvidersMergeExistingUsers: {
+      type: Boolean,
+      optional: true,
+    },
+    // OAUTH_PROVIDERS_ALLOWED_EMAIL_DOMAINS (#1904): comma-separated domains
+    // provider logins are restricted to; empty or unset allows every domain.
+    oauthProvidersAllowedEmailDomains: {
+      type: String,
+      optional: true,
+    },
+    // PASSWORDLESS_ENABLED: Meteor's accounts-passwordless one-time email code.
+    passwordlessEnabled: {
+      type: Boolean,
       optional: true,
     },
     createdAt: {

@@ -1,0 +1,84 @@
+{
+  "board": {
+    "name": "Audit Kanboard"
+  },
+  "columns": [
+    {
+      "id": "1",
+      "title": "Audit list",
+      "position": "1"
+    }
+  ],
+  "swimlanes": [
+    {
+      "id": "1",
+      "name": "Default"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "1",
+      "title": "Audit task – Å 中文",
+      "description": "First line: café, comma, and \"quotes\".\nSecond line: 日本語.",
+      "column_id": "1",
+      "column_name": "Audit list",
+      "swimlane_id": "1",
+      "swimlane_name": "Default",
+      "date_due": "1790771696",
+      "tags": [
+        "Audit label"
+      ],
+      "comments": [
+        {
+          "id": "1",
+          "comment": "Audit comment",
+          "username": "kanboard-user",
+          "date_creation": "1790771696"
+        }
+      ],
+      "files": [
+        {
+          "id": "1",
+          "name": "audit.txt",
+          "path": "tasks/audit.txt",
+          "size": 25
+        }
+      ],
+      "category_id": "4",
+      "color_id": "deep_orange",
+      "is_active": "1",
+      "priority": "2",
+      "date_started": "1788220800",
+      "time_spent": "1.5",
+      "time_estimated": "3",
+      "creator_username": "kanboard-creator",
+      "url": "https://kanboard.example/task/1",
+      "subtasks": [
+        {
+          "id": "1",
+          "title": "Audit subtask done",
+          "status": "2"
+        },
+        {
+          "id": "2",
+          "title": "Audit subtask open",
+          "status": "0"
+        }
+      ],
+      "links": [
+        {
+          "id": "1",
+          "task_id": "2",
+          "label": "relates to"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": "4",
+      "name": "Audit category",
+      "color_id": "blue"
+    }
+  ]
+}

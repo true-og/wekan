@@ -15,3 +15,10 @@ WRITABLE_PATH="$SNAP_COMMON/files"
 mkdir -p "$WRITABLE_PATH/attachments"
 mkdir -p "$WRITABLE_PATH/avatars"
 chmod -R 777 "$WRITABLE_PATH"
+
+# There is nothing to choose: WeKan runs on FerretDB. A fresh install starts
+# there, and an install that finds MongoDB data left by an older WeKan migrates
+# it - text data into FerretDB's SQLite, CollectionFS and Meteor-Files
+# attachments onto the filesystem - on the first start, automatically.
+# bin/database-role and bin/migration-pending work that out from the data, so
+# there is no setting to get wrong here.

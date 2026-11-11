@@ -1,10 +1,11 @@
 import { ReactiveCache } from '/imports/reactiveCache';
 import { TAPi18n } from '/imports/i18n';
 import { Utils } from '/client/lib/utils';
+import { filterAndSortDueCards } from '/client/components/main/dueCardsLogic';
 
 // const subManager = new SubsManager();
 
-Template.dueCardsHeaderBar.helpers({
+Template.dueCardsControls.helpers({
   dueCardsView() {
     // eslint-disable-next-line no-console
     // console.log('sort:', Utils.dueCardsView());
@@ -12,17 +13,20 @@ Template.dueCardsHeaderBar.helpers({
   },
 });
 
-Template.dueCardsHeaderBar.events({
+Template.dueCardsControls.events({
   'click .js-due-cards-view-change': Popup.open('dueCardsViewChange'),
 });
 
 Template.dueCards.onCreated(function () {
+  const PAGE_SIZE = 200;
   this._cachedCards = null;
   this._cachedTimestamp = null;
   this.subscriptionHandle = null;
   this.isLoading = new ReactiveVar(true);
   this.hasResults = new ReactiveVar(false);
   this.searching = new ReactiveVar(false);
+  this.page = new ReactiveVar(0);
+  this.pageSize = PAGE_SIZE;
 
   const tpl = this;
 
@@ -70,44 +74,17 @@ Template.dueCards.onCreated(function () {
     // Filter cards based on user view preference
     const allUsers = dueCardsView() === 'all';
     const currentUser = ReactiveCache.getCurrentUser();
-    let filteredCards = cards;
 
     if (process.env.DEBUG === 'true') {
       console.log('dueCards client: current user:', currentUser ? currentUser._id : 'none');
       console.log('dueCards client: showing all users:', allUsers);
     }
 
-    if (!allUsers && currentUser) {
-      filteredCards = cards.filter(card => {
-        const isMember = card.members && card.members.includes(currentUser._id);
-        const isAssignee = card.assignees && card.assignees.includes(currentUser._id);
-        const isAuthor = card.userId === currentUser._id;
-        const matches = isMember || isAssignee || isAuthor;
-
-        if (process.env.DEBUG === 'true' && matches) {
-          console.log('dueCards client: card matches user:', card.title, { isMember, isAssignee, isAuthor });
-        }
-
-        return matches;
-      });
-    }
-
-    // Normalize dueAt to timestamps for stable client-side ordering
-    const future = new Date('2100-12-31').getTime();
-    const toTime = v => {
-      if (v === null || v === undefined || v === '') return future;
-      if (v instanceof Date) return v.getTime();
-      const t = new Date(v);
-      if (!isNaN(t.getTime())) return t.getTime();
-      return future;
-    };
-
-    filteredCards.sort((a, b) => {
-      const x = toTime(a.dueAt);
-      const y = toTime(b.dueAt);
-      if (x > y) return 1;
-      if (x < y) return -1;
-      return 0;
+    // Filter (by user unless "all") and sort ascending by due date. No cap is
+    // applied so every due card is shown (issues #5999 / #5930).
+    const filteredCards = filterAndSortDueCards(cards, {
+      allUsers,
+      userId: currentUser ? currentUser._id : null,
     });
 
     if (process.env.DEBUG === 'true') {
@@ -132,10 +109,16 @@ Template.dueCards.onCreated(function () {
   // Subscribe to the optimized due cards publication
   this.autorun(() => {
     const allUsers = dueCardsView() === 'all';
+    const page = tpl.page.get();
     if (tpl.subscriptionHandle) {
       tpl.subscriptionHandle.stop();
     }
-    tpl.subscriptionHandle = Meteor.subscribe('dueCards', allUsers);
+    tpl.subscriptionHandle = Meteor.subscribe(
+      'dueCards',
+      allUsers,
+      PAGE_SIZE,
+      page * PAGE_SIZE,
+    );
 
     // Update loading state based on subscription
     tpl.autorun(() => {
@@ -200,6 +183,27 @@ Template.dueCards.helpers({
       }
       return result;
     }
+  },
+  hasPreviousPage() {
+    return Template.instance().page.get() > 0;
+  },
+  hasNextPage() {
+    const tpl = Template.instance();
+    const cards = tpl.dueCardsList ? tpl.dueCardsList() : [];
+    return cards.length === tpl.pageSize;
+  },
+});
+
+Template.dueCards.events({
+  'click .js-due-cards-previous-page'(event, tpl) {
+    event.preventDefault();
+    tpl._cachedCards = null;
+    tpl.page.set(Math.max(0, tpl.page.get() - 1));
+  },
+  'click .js-due-cards-next-page'(event, tpl) {
+    event.preventDefault();
+    tpl._cachedCards = null;
+    tpl.page.set(tpl.page.get() + 1);
   },
 });
 

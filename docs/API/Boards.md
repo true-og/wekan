@@ -10,7 +10,7 @@ curl -H "Authorization: Bearer a6DM_gOPRwBdynfXaGBaiiEwTiAuigR_Fj_81QmNpnf" \
 
 ## Add/Remove Board Member and Change Role
 
-[Add/Remove Board Member and Change Role admin/normal/nocomments/commentonly](REST-API-Role).
+[Add/Remove Board Member and Change Role admin/normal/nocomments/commentonly](Role.md).
 
 ## The admin takes the ownership of ALL boards of the user (archived and not archived) where the user is admin on.
 
@@ -53,4 +53,4 @@ curl  -H "Authorization: Bearer t7iYB86mXoLfP_XsMegxF41oKT7iiA9lDYiKVtXcctl" \
 
 ## In Wekan code
 
-If you believe that code is the best documentation, be our guest: [models/cards.js](https://github.com/wekan/wekan/blob/main/models/boards.js "Board API code")
+If you believe that code is the best documentation, be our guest: [models/cards.js](../../models/boards.js "Board API code")

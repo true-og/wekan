@@ -1,11 +1,18 @@
-import { ReactiveCache } from '/imports/reactiveCache';
 import { Meteor } from 'meteor/meteor';
-import { WebApp } from 'meteor/webapp';
+import { Tracker } from 'meteor/tracker';
+import { Blaze } from 'meteor/blaze';
 import { FlowRouter } from 'meteor/ostrio:flow-router-extra';
 
 // Sandstorm context is detected using the METEOR_SETTINGS environment variable
 // in the package definition.
 const isSandstorm = Meteor.settings?.public?.sandstorm;
+
+// The server half - login headers, Powerbox identity claims, activity events -
+// is server/sandstorm.js. This file is imported by BOTH the client
+// (client/imports.js) and the server (server/imports.js): the code below that
+// talks to the Sandstorm shell, and the isSandstorm template helper, are
+// client code, and before this was imported by the client they never ran in a
+// browser at all.
 
 // In sandstorm we only have one board per sandstorm instance. Since we want to
 // keep most of our code unchanged, we simply hard-code a board `_id` and
@@ -24,349 +31,6 @@ const sandstormBoard = {
   permission: 'public',
 };
 
-if (isSandstorm && Meteor.isServer) {
-  const fs = require('fs');
-  const Capnp = Npm.require('capnp');
-  const Package = Capnp.importSystem('sandstorm/package.capnp');
-  const Powerbox = Capnp.importSystem('sandstorm/powerbox.capnp');
-  const Identity = Capnp.importSystem('sandstorm/identity.capnp');
-  const SandstormHttpBridge = Capnp.importSystem(
-    'sandstorm/sandstorm-http-bridge.capnp',
-  ).SandstormHttpBridge;
-
-  let httpBridge = null;
-  let capnpConnection = null;
-
-  const bridgeConfig = Capnp.parse(
-    Package.BridgeConfig,
-    fs.readFileSync('/sandstorm-http-bridge-config'),
-  );
-
-  function getHttpBridge() {
-    if (!httpBridge) {
-      capnpConnection = Capnp.connect('unix:/tmp/sandstorm-api');
-      httpBridge = capnpConnection.restore(null, SandstormHttpBridge);
-    }
-    return httpBridge;
-  }
-
-  Meteor.methods({
-    async sandstormClaimIdentityRequest(token, descriptor) {
-      check(token, String);
-      check(descriptor, String);
-
-      const parsedDescriptor = Capnp.parse(
-        Powerbox.PowerboxDescriptor,
-        Buffer.from(descriptor, 'base64'),
-        { packed: true },
-      );
-
-      const tag = Capnp.parse(
-        Identity.Identity.PowerboxTag,
-        parsedDescriptor.tags[0].value,
-      );
-      const permissions = [];
-      if (tag.permissions[1]) {
-        permissions.push('configure');
-      }
-
-      if (tag.permissions[0]) {
-        permissions.push('participate');
-      }
-
-      const sessionId = this.connection.sandstormSessionId();
-      const httpBridge = getHttpBridge();
-      const session = httpBridge.getSessionContext(sessionId).context;
-      const api = httpBridge.getSandstormApi(sessionId).api;
-
-      const response = await session.claimRequest(token);
-      const identity = response.cap.castAs(Identity.Identity);
-      const [identityIdResult, profileResult] = await Promise.all([
-        api.getIdentityId(identity),
-        identity.getProfile(),
-        httpBridge.saveIdentity(identity),
-      ]);
-      const identityId = identityIdResult.id.toString('hex').slice(0, 32);
-      const profile = profileResult.profile;
-      const pictureResponse = await profile.picture.getUrl();
-      const sandstormInfo = {
-        id: identityId,
-        name: profile.displayName.defaultText,
-        permissions,
-        picture: `${pictureResponse.protocol}://${pictureResponse.hostPath}`,
-        preferredHandle: profile.preferredHandle,
-        pronouns: profile.pronouns,
-      };
-
-      const login = await Accounts.updateOrCreateUserFromExternalService(
-        'sandstorm',
-        sandstormInfo,
-        { profile: { name: sandstormInfo.name } },
-      );
-
-      await updateUserPermissions(login.userId, permissions);
-    },
-  });
-
-  async function reportActivity(sessionId, path, type, users, caption) {
-    const httpBridge = getHttpBridge();
-    const session = httpBridge.getSessionContext(sessionId).context;
-    const maybeUsers = await Promise.all(
-      users.map(async (user) => {
-        try {
-          const response = await httpBridge.getSavedIdentity(user.id);
-          // Call getProfile() to make sure that the identity successfully resolves.
-          // (In C++ we would instead call whenResolved() here.)
-          const identity = response.identity;
-          await identity.getProfile();
-          return {
-            identity,
-            mentioned: !!user.mentioned,
-            subscribed: !!user.subscribed,
-          };
-        } catch (e) {
-          // Ignore identities that fail to restore. Either they were added before we set
-          // `saveIdentityCaps` to true, or they have lost access to the board.
-          return undefined;
-        }
-      }),
-    );
-    const resolvedUsers = maybeUsers.filter(u => !!u);
-    const event = { path, type, users: resolvedUsers };
-    if (caption) {
-      event.notification = { caption };
-    }
-    await session.activity(event);
-  }
-
-  Meteor.startup(() => {
-    Activities.after.insert(async (userId, doc) => {
-      // HACK: We need the connection that's making the request in order to read the
-      // Sandstorm session ID.
-      const invocation = DDP._CurrentInvocation.get(); // eslint-disable-line no-undef
-      if (invocation) {
-        const sessionId = invocation.connection.sandstormSessionId();
-
-        const eventTypes = bridgeConfig.viewInfo.eventTypes;
-
-        const defIdx = eventTypes.findIndex(
-          def => def.name === doc.activityType,
-        );
-        if (defIdx >= 0) {
-          const users = {};
-          async function ensureUserListed(userId) {
-            if (!users[userId]) {
-              const user = await Meteor.users.findOneAsync(userId);
-              if (user) {
-                users[userId] = { id: user.services.sandstorm.id };
-              } else {
-                return false;
-              }
-            }
-            return true;
-          }
-
-          async function mentionedUser(userId) {
-            if (await ensureUserListed(userId)) {
-              users[userId].mentioned = true;
-            }
-          }
-
-          async function subscribedUser(userId) {
-            if (await ensureUserListed(userId)) {
-              users[userId].subscribed = true;
-            }
-          }
-
-          let path = '';
-          let caption = null;
-
-          if (doc.cardId) {
-            path = `b/sandstorm/libreboard/${doc.cardId}`;
-            const card = ReactiveCache.getCard(doc.cardId);
-            if (card && card.members) {
-              for (const memberId of card.members) {
-                await subscribedUser(memberId);
-              }
-            }
-          }
-
-          if (doc.memberId) {
-            await mentionedUser(doc.memberId);
-          }
-
-          if (doc.activityType === 'addComment') {
-            const comment = ReactiveCache.getCardComment(doc.commentId);
-            caption = { defaultText: comment.text };
-            const activeMembers = ReactiveCache.getBoard(sandstormBoard._id).activeMembers()
-              .map(x => x.userId);
-            const mentions = comment.text.match(/\B@([\w.]*)/g) || [];
-            for (const username of mentions) {
-              const user = await Meteor.users.findOneAsync({
-                username: username.slice(1),
-              });
-              if (user && activeMembers.indexOf(user._id) !== -1) {
-                await mentionedUser(user._id);
-              }
-            }
-          }
-
-          await reportActivity(sessionId, path, defIdx, Object.values(users), caption);
-        }
-      }
-    });
-  });
-
-  async function updateUserPermissions(userId, permissions) {
-    const isActive = permissions.indexOf('participate') > -1;
-    const isAdmin = permissions.indexOf('configure') > -1;
-    const isCommentOnly = false;
-    const isNoComments = false;
-    const isWorker = false;
-    const permissionDoc = {
-      userId,
-      isActive,
-      isAdmin,
-      isNoComments,
-      isCommentOnly,
-      isWorker,
-    };
-
-    const boardMembers = ReactiveCache.getBoard(sandstormBoard._id).members;
-    const memberIndex = boardMembers.map(x => x.userId).indexOf(userId);
-
-    let modifier;
-    if (memberIndex > -1)
-      modifier = { $set: { [`members.${memberIndex}`]: permissionDoc } };
-    else if (!isActive) modifier = {};
-    else modifier = { $push: { members: permissionDoc } };
-
-    await Boards.updateAsync(sandstormBoard._id, modifier);
-  }
-
-  WebApp.handlers.get('/', (req, res) => {
-    // Redirect the user to the hard-coded board. On the first launch the user
-    // will be redirected to the board before its creation. But that's not a
-    // problem thanks to the reactive board publication. We used to do this
-    // redirection on the client side but that was sometimes visible on loading,
-    // and the home page was accessible by pressing the back button of the
-    // browser, a server-side redirection solves both of these issues.
-    //
-    // XXX Maybe the sandstorm http-bridge could provide some kind of "home URL"
-    // in the manifest?
-    const base = req.headers['x-sandstorm-base-path'];
-    const { _id, slug } = sandstormBoard;
-    const boardPath = FlowRouter.path('board', { id: _id, slug });
-
-    res.writeHead(301, {
-      Location: base + boardPath,
-    });
-    res.end();
-  });
-
-  // On the first launch of the instance a user is automatically created thanks
-  // to the `accounts-sandstorm` package. After its creation we insert the
-  // unique board document. Note that when the `Users.after.insert` hook is
-  // called, the user is inserted into the database but not connected. So
-  // despite the appearances `userId` is null in this block.
-  Users.after.insert(async (userId, doc) => {
-    if (!ReactiveCache.getBoard(sandstormBoard._id)) {
-      await Boards.insertAsync(sandstormBoard, { validate: false });
-      await Swimlanes.insertAsync({
-        title: 'Default',
-        boardId: sandstormBoard._id,
-      });
-      await Activities.updateAsync(
-        { activityTypeId: sandstormBoard._id },
-        { $set: { userId: doc._id } },
-      );
-    }
-
-    // We rely on username uniqueness for the user mention feature, but
-    // Sandstorm doesn't enforce this property -- see #352. Our strategy to
-    // generate unique usernames from the Sandstorm `preferredHandle` is to
-    // append a number that we increment until we generate a username that no
-    // one already uses (eg, 'max', 'max1', 'max2').
-    function generateUniqueUsername(username, appendNumber) {
-      return username + String(appendNumber === 0 ? '' : appendNumber);
-    }
-
-    const username = doc.services.sandstorm.preferredHandle;
-    let appendNumber = 0;
-    while (
-      await Meteor.users.findOneAsync({
-        _id: { $ne: doc._id },
-        username: generateUniqueUsername(username, appendNumber),
-      })
-    ) {
-      appendNumber += 1;
-    }
-
-    await Users.updateAsync(doc._id, {
-      $set: {
-        username: generateUniqueUsername(username, appendNumber),
-        'profile.fullname': doc.services.sandstorm.name,
-        'profile.avatarUrl': doc.services.sandstorm.picture,
-      },
-    });
-
-    await updateUserPermissions(doc._id, doc.services.sandstorm.permissions);
-  });
-
-  Meteor.startup(async () => {
-    await Users.find().observeChangesAsync({
-      async changed(userId, fields) {
-        const sandstormData = (fields.services || {}).sandstorm || {};
-        if (sandstormData.name) {
-          await Users.updateAsync(userId, {
-            $set: { 'profile.fullname': sandstormData.name },
-          });
-        }
-
-        if (sandstormData.picture) {
-          await Users.updateAsync(userId, {
-            $set: { 'profile.avatarUrl': sandstormData.picture },
-          });
-        }
-
-        if (sandstormData.permissions) {
-          await updateUserPermissions(userId, sandstormData.permissions);
-        }
-      },
-    });
-  });
-
-  // Wekan v0.8 didn’t implement the Sandstorm sharing model and instead kept
-  // the visibility setting (“public” or “private”) in the UI as does the main
-  // Meteor application. We need to enforce “public” visibility as the sharing
-  // is now handled by Sandstorm.
-  // See https://github.com/wekan/wekan/issues/346
-  // Migration disabled - using backward compatibility approach
-  /*
-  Migrations.add('enforce-public-visibility-for-sandstorm', () => {
-    Boards.update('sandstorm', { $set: { permission: 'public' } });
-  });
-  */
-
-  // Monkey patch to work around the problem described in
-  // https://github.com/sandstorm-io/meteor-accounts-sandstorm/pull/31
-  const _httpMethods = HTTP.methods;
-  HTTP.methods = newMethods => {
-    Object.keys(newMethods).forEach(key => {
-      if (newMethods[key].auth) {
-        newMethods[key].auth = async function() {
-          const sandstormID = this.req.headers['x-sandstorm-user-id'];
-          const user = await Meteor.users.findOneAsync({
-            'services.sandstorm.id': sandstormID,
-          });
-          return user && user._id;
-        };
-      }
-    });
-    _httpMethods(newMethods);
-  };
-}
-
 if (isSandstorm && Meteor.isClient) {
   let rpcCounter = 0;
   const rpcs = {};
@@ -377,17 +41,21 @@ if (isSandstorm && Meteor.isClient) {
       return;
     }
 
+    // Only the Sandstorm shell's replies to our RPCs are ours. Other frames and
+    // browser extensions post messages too; throwing on them (as this used to)
+    // was harmless only while this file never ran in a browser.
     if (
       event.source !== window.parent ||
+      !event.data ||
       typeof event.data !== 'object' ||
       typeof event.data.rpcId !== 'number'
     ) {
-      throw new Error(`got unexpected postMessage: ${event}`);
+      return;
     }
 
     const handler = rpcs[event.data.rpcId];
     if (!handler) {
-      throw new Error(`no such rpc ID for event ${event}`);
+      return;
     }
 
     delete rpcs[event.data.rpcId];
@@ -435,32 +103,148 @@ if (isSandstorm && Meteor.isClient) {
     });
   }
 
-  window.sandstormRequestIdentity = function() {
-    doRequest(powerboxDescriptors.identity, response => {
+  // Opens the Sandstorm Powerbox to pick a person, then makes them a member of
+  // boardId (the sidebar's members widget passes the open board): the server
+  // redeems the request and invites them through inviteUserToBoard, with the
+  // same permission checks as WeKan's own member picker.
+  window.sandstormRequestIdentity = function(boardId) {
+    return doRequest(powerboxDescriptors.identity, response => {
       Meteor.call(
         'sandstormClaimIdentityRequest',
         response.token,
         response.descriptor,
+        boardId,
+        error => {
+          if (error) {
+            console.error('Sandstorm Powerbox: could not add the person:', error);
+            window.alert(error.reason || error.message || String(error));
+          }
+        },
       );
     });
+  };
+
+  // External HTTP APIs a user can let this grain reach, the way the Sandstorm
+  // WordPress app reaches wordpress.org for plugin updates: an ApiSession
+  // Powerbox request for the service's canonicalUrl. Each descriptor is built
+  // by apiSessionDescriptor() on the server side, and
+  // tests/sandstormApiEgress.test.cjs rebuilds it from
+  // imports/sandstorm/egress.mjs EXTERNAL_APIS so the two cannot drift.
+  const externalApiDescriptors = {
+    // apiSessionDescriptor('https://api.trello.com/1')
+    trello: 'EA1QAQEAABEBF1EEAQH_x80lxnnjecgAQAMRCcoAAf9odHRwczovLwJhcGkudHJlbGxvLmNvbS8xAAA=',
+  };
+
+  // Ask the user, through the Powerbox, to let this grain reach an external
+  // API; the server redeems the claim and keeps the access token for this
+  // user. Resolves true when granted, false when the user closed the Powerbox.
+  window.sandstormRequestExternalApi = function(service, saveLabel) {
+    const descriptor = externalApiDescriptors[service];
+    if (!descriptor) return Promise.reject(new Error(`Unknown external API: ${service}`));
+    return sendRpc('powerboxRequest', {
+      query: [descriptor],
+      saveLabel: { defaultText: saveLabel },
+    }).then(response => {
+      if (response.canceled) return false;
+      return Meteor.callAsync('sandstormClaimApiGrant', service, response.token).then(() => true);
+    });
+  };
+
+  // An outgoing webhook's own address, through the Powerbox: the server builds
+  // the query for exactly that URL (imports/sandstorm/egress.mjs
+  // webhookGrantFor), and keeps the access token for the webhook, not the user.
+  // Resolves true when granted, false when the user closed the Powerbox.
+  window.sandstormRequestWebhook = function(integrationId, saveLabel) {
+    return Meteor.callAsync('sandstormWebhookDescriptor', integrationId)
+      .then(({ descriptor }) => sendRpc('powerboxRequest', {
+        query: [descriptor],
+        saveLabel: { defaultText: saveLabel },
+      }))
+      .then(response => {
+        if (response.canceled) return false;
+        return Meteor.callAsync('sandstormClaimWebhookGrant', integrationId, response.token).then(() => true);
+      });
+  };
+
+  // A list's sync tracker, through the Powerbox: the server builds the query
+  // for the tracker's API root and keeps the grant for that destination.
+  window.sandstormRequestListSync = function(listId, saveLabel) {
+    return Meteor.callAsync('sandstormSyncDescriptor', listId)
+      .then(({ descriptor }) => sendRpc('powerboxRequest', {
+        query: [descriptor],
+        saveLabel: { defaultText: saveLabel },
+      }))
+      .then(response => {
+        if (response.canceled) return false;
+        return Meteor.callAsync('sandstormClaimSyncGrant', listId, response.token).then(() => true);
+      });
+  };
+
+  // #1188: share a page of this grain - Sandstorm's Share Access dialog, whose
+  // link opens the grain at that page (models/lib/sandstormShare.js). Returns
+  // false when the address has no path the shell would accept.
+  window.sandstormShareUrl = function(url) {
+    const { startSharingMessage } = require('/models/lib/sandstormShare');
+    const message = startSharingMessage(url);
+    if (!message) return false;
+    window.parent.postMessage(message, '*');
+    return true;
   };
 
   // Since the Sandstorm grain is displayed in an iframe of the Sandstorm shell,
   // we need to explicitly expose meta data like the page title or the URL path
   // so that they could appear in the browser window.
-  // See https://docs.sandstorm.io/en/latest/developing/path/
+  // See https://docs.sandstorm.org/en/latest/developing/path/
   function updateSandstormMetaData(msg) {
     return window.parent.postMessage(msg, '*');
   }
 
+  // Keep the Sandstorm shell's grain URL in sync with the in-app route. The shell
+  // listens for a { setPath } postMessage and rewrites the outer grain URL to
+  // /grain/<id><path> via history.replaceState (see the setPath handler in
+  // sandstorm shell/imports/client/grain-client.js — it requires the path to start
+  // with "/"). Use TWO mechanisms for reliability:
+  //   1. FlowRouter.triggers.enter fires with the fresh entering path on every
+  //      navigation. This is exactly what the last working Sandstorm build (v6.15)
+  //      used, and it is event-driven so it does not depend on FlowRouter's reactive
+  //      internals being ready at module-load time.
+  //   2. A reactive autorun on watchPathChange() as a backup, wrapped in
+  //      Meteor.startup so FlowRouter is fully initialised before it establishes its
+  //      reactive dependency (a bare top-level autorun could run before FlowRouter's
+  //      path tracking was ready and then never re-run, leaving the grain URL stuck
+  //      on the root — the "URL doesn't update when switching boards" symptom).
   FlowRouter.triggers.enter([
     ({ path }) => {
-      updateSandstormMetaData({ setPath: path });
+      updateSandstormMetaData({ setPath: path || '/' });
     },
   ]);
 
+  Meteor.startup(() => {
+    Tracker.autorun(() => {
+      FlowRouter.watchPathChange();
+      const current = FlowRouter.current();
+      updateSandstormMetaData({ setPath: (current && current.path) || '/' });
+    });
+
+    // Reflect the page title into the Sandstorm shell too. Runs after startup and
+    // reactively on route change (watchPathChange) so the grain tab title tracks the
+    // current board; document.title itself is not a reactive source.
+    Tracker.autorun(() => {
+      FlowRouter.watchPathChange();
+      updateSandstormMetaData({ setTitle: document.title });
+    });
+  });
+
+  // Sandstorm auto-logs the user in asynchronously via connection.setUserId()
+  // (which bypasses accounts-base's normal login flow, so no Accounts.onLogin
+  // fires). The home route's renderBoardList() runs once and, finding
+  // Meteor.userId() still null, redirects to the sign-in page ('atSignIn') — where
+  // the user is then stranded even though login completes moments later. Reactively
+  // bounce back to the boards list once the Sandstorm login lands.
   Tracker.autorun(() => {
-    updateSandstormMetaData({ setTitle: document.title });
+    if (Meteor.userId() && FlowRouter.getRouteName() === 'atSignIn') {
+      FlowRouter.go('home');
+    }
   });
 
   // Runtime redirection from the home page to the unique board -- since the

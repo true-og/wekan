@@ -1,9 +1,9 @@
+import { requireBoardMutation } from '/models/lib/boardMutationGuard';
 import { ReactiveCache } from '/imports/reactiveCache';
 import { Meteor } from 'meteor/meteor';
 import { MongoInternals } from 'meteor/mongo';
 import { check } from 'meteor/check';
 import { isFileValid } from './fileValidation';
-import { isSvgFile, sanitizeSvgFileSync } from './lib/sanitizeSvg';
 import { createBucket } from './lib/grid/createBucket';
 import fs from 'fs';
 import path from 'path';
@@ -16,6 +16,8 @@ import Attachments, { normalizeRemovedFiles } from './attachments';
 import Boards from '/models/boards';
 import { allowIsBoardMember } from '/server/lib/utils';
 import { ensureIndex } from '/server/lib/mongoStartup';
+const { isFilesRoot } = require('/models/lib/filesRoot');
+const { readableWithoutMembership } = require('/models/lib/boardPermission');
 
 // ---------------------------------------------------------------------------
 // Server-only configuration
@@ -33,7 +35,7 @@ function parseNonNegativeInt(value, fallback = 0) {
   return parsed;
 }
 
-async function getAttachmentUploadMaxBytes() {
+export async function getAttachmentUploadMaxBytes() {
   try {
     const settings = await AttachmentStorageSettings.findOneAsync({});
     const configuredLimit = settings?.limitSettings?.attachmentsUploadMaxBytes;
@@ -61,7 +63,7 @@ const attachmentBucket = createBucket('attachments');
 // - Docker (WRITABLE_PATH=/data): /data/files/attachments
 // - Snap (WRITABLE_PATH=$SNAP_COMMON/files): $SNAP_COMMON/files/attachments
 const basePath = process.env.WRITABLE_PATH || process.cwd();
-const endsWithFiles = basePath.endsWith('/files') || basePath.endsWith('\\files');
+const endsWithFiles = isFilesRoot(basePath);
 const storagePath = endsWithFiles
   ? path.join(basePath, 'attachments')
   : path.join(basePath, 'files', 'attachments');
@@ -102,32 +104,118 @@ Attachments.storagePath = function () {
   return fileStoreStrategyFactory.storagePath;
 };
 
-Attachments.onAfterUpload = async function (fileObj) {
-  // Sanitize SVG uploads in place before they are validated or moved to any
-  // storage backend. This strips scripts, event handlers, javascript: URIs and
-  // XML DOCTYPE/ENTITY (XML loop) constructs, so SVG images can be uploaded
-  // safely instead of being rejected. Runs for every upload regardless of the
-  // configured storage backend.
-  if (isSvgFile(fileObj.type, fileObj.name)) {
-    let svgSanitized = false;
-    Object.keys(fileObj.versions).forEach(versionName => {
-      const version = fileObj.versions[versionName];
-      const newSize = sanitizeSvgFileSync(version && version.path);
-      if (newSize !== null) {
-        version.size = newSize;
-        svgSanitized = true;
-      }
-    });
-    if (svgSanitized) {
+// UploadBleed: the upload pipeline inserts server-side, past the allow rules,
+// so this is where an upload is authorized - on every chunk, after the shared
+// file-name sanitizing (models/attachments.js). The decision is
+// models/lib/attachmentUploadAuth.js; a card attachment's board, list and
+// swimlane are its card's, whatever the client sent (StampBleed).
+const sharedOnBeforeUpload = Attachments.onBeforeUpload;
+Attachments.onBeforeUpload = async function (file) {
+  const shared = sharedOnBeforeUpload ? sharedOnBeforeUpload.call(this, file) : true;
+  if (shared !== true) return shared;
+  const { uploadDecision } = require('/models/lib/attachmentUploadAuth');
+  const { canEditCardOrLinkedCard } = require('/server/lib/linkedCardPermission');
+  const { allowIsBoardMemberWithWriteAccess } = require('/server/lib/utils');
+  const Cards = require('/models/cards').default;
+  const meta = (file && file.meta && typeof file.meta === 'object') ? file.meta : {};
+  let uploadsBlocked = false;
+  try {
+    const settings = await AttachmentStorageSettings.findOneAsync({});
+    uploadsBlocked = settings?.limitSettings?.attachmentsUploadBlocked === true;
+  } catch (e) { /* unreadable setting: uploads stay as they were */ }
+  const card = this.userId && typeof meta.cardId === 'string' && meta.cardId
+    ? await Cards.findOneAsync(meta.cardId) : null;
+  const board = this.userId && !meta.cardId && typeof meta.boardId === 'string' && meta.boardId
+    ? await Boards.findOneAsync(meta.boardId) : null;
+  const decision = uploadDecision({
+    userId: this.userId,
+    meta,
+    card,
+    // Recorded below once per upload, not by the helper on every chunk.
+    mayEditCard: Boolean(card) && await canEditCardOrLinkedCard(this.userId, card, undefined, { recordDenial: false }),
+    board,
+    mayWriteBoard: Boolean(board) && allowIsBoardMemberWithWriteAccess(this.userId, board),
+    uploadsBlocked,
+  });
+  if (!decision.allow) {
+    // Recorded once per upload, at its start (chunk -1), not per chunk.
+    if (decision.key && this.chunkId === -1) {
       try {
-        await Attachments.updateAsync(
-          { _id: fileObj._id },
-          { $set: { versions: fileObj.versions } },
-        );
-      } catch (error) {
-        console.error('[onAfterUpload] Failed to persist sanitized SVG versions:', error);
-      }
+        require('/server/lib/securityLog').record({
+          key: decision.key, action: 'blocked', source: 'upload:attachments',
+          userId: this.userId || undefined,
+          detail: `Upload refused: ${decision.reason}`,
+        });
+      } catch (e) { /* logging must never break the guard */ }
     }
+    return decision.reason;
+  }
+  if (decision.stamp) {
+    file.meta = { ...meta, ...decision.stamp };
+  }
+  return true;
+};
+
+Attachments.onAfterUpload = async function (fileObj) {
+  // Detect and sanitize known exploits from the uploaded file IN PLACE, while it
+  // is still on the local filesystem staging area and BEFORE it is validated or
+  // moved to any final storage backend (filesystem final location, S3, GridFS...).
+  // Today this strips scripts, event handlers, javascript: URIs and XML
+  // DOCTYPE/ENTITY (XML loop / billion-laughs) constructs from SVG uploads, so SVG
+  // images upload safely instead of being rejected. General for every upload,
+  // regardless of the configured storage backend.
+  const { sanitizeUploadedFileExploits } = require('./lib/sanitizeUploadedFile');
+  if (await sanitizeUploadedFileExploits(fileObj)) {
+    try {
+      await Attachments.updateAsync(
+        { _id: fileObj._id },
+        { $set: { versions: fileObj.versions } },
+      );
+    } catch (error) {
+      console.error('[onAfterUpload] Failed to persist sanitized versions:', error);
+    }
+    // Log to Admin Panel / Problems: who uploaded, what was removed, when, where.
+    try {
+      await require('/server/lib/filenameSanitizeLog').logContentSanitized({
+        fileObj, source: 'attachmentUpload',
+      });
+    } catch (e) { /* best effort */ }
+  }
+
+  // Filename hardening for EVERY upload, on all storage backends:
+  //   1. Reject a filename that itself looks like an exploit (HTML/JS/XML/etc.).
+  //   2. Normalize + correct the stored name: URL-decode, fold confusable
+  //      homoglyphs, remove invisible characters, strip exploit markup, and fix
+  //      the EXTENSION to match the real detected file type — so double-clicking
+  //      the downloaded file opens the right application — capped to a portable
+  //      length. Uses the general, storage-agnostic detector (streams only a
+  //      small header to WRITABLE_PATH/files/temp, then deletes it).
+  try {
+    const { filenameLooksLikeExploit, sanitizeUploadFileName } = require('./lib/uploadFileName');
+    if (filenameLooksLikeExploit(fileObj.name)) {
+      console.log('[onAfterUpload] rejected exploit-looking filename:', fileObj._id);
+      await Attachments.removeAsync(fileObj._id);
+      return;
+    }
+    const { detectStoredFileMime } = require('./lib/fileTypeCorrection');
+    const detectedMime = await detectStoredFileMime(fileObj, fileStoreStrategyFactory);
+    const originalName = fileObj.name;
+    const correctedName = sanitizeUploadFileName(originalName, detectedMime || fileObj.type);
+    if (correctedName && correctedName !== originalName) {
+      rename(fileObj, correctedName, fileStoreStrategyFactory);
+      fileObj.name = correctedName;
+      // Log to Admin Panel / Problems: who uploaded, why, when, where.
+      try {
+        const { sanitizationReasons } = require('./lib/uploadFileName');
+        await require('/server/lib/filenameSanitizeLog').logFilenameSanitized({
+          fileObj, source: 'attachmentUpload',
+          reasons: sanitizationReasons(originalName, detectedMime || fileObj.type, correctedName),
+          from: originalName, to: correctedName,
+        });
+      } catch (e) { /* best effort */ }
+    }
+  } catch (error) {
+    console.error('[onAfterUpload] filename hardening failed:', error);
   }
 
   // Get default storage backend from settings
@@ -152,30 +240,55 @@ Attachments.onAfterUpload = async function (fileObj) {
   // Use selected storage backend or copy storage if specified
   let storageDestination = fileObj.meta.copyStorage || defaultStorage;
 
-  // Only migrate if the destination is different from filesystem
-  if (storageDestination !== STORAGE_NAME_FILESYSTEM) {
-    const fileObjId = fileObj._id;
-    // Note: Meteor.call('validateAttachmentAndMoveToStorage', ...) cannot be used here
-    // because server-side calls have this.userId=null, triggering not-authorized.
-    // Call the validation and migration logic directly instead.
-    Meteor.defer(async () => {
-      try {
-        const currentFileObj = await ReactiveCache.getAttachment(fileObjId);
-        if (!currentFileObj) return;
+  // Validate EVERY upload while its bytes are on the local staging filesystem.
+  // The filesystem destination used to skip this block entirely, while only
+  // GridFS/cloud migrations were checked.
+  const fileObjId = fileObj._id;
+  // Do not hold Meteor-Files' completion hook open while scanning. Its client
+  // waits for this hook before completing the upload UI, and the stored record
+  // is reliably queryable once this deferred task starts.
+  Meteor.defer(async () => {
+    try {
+      const currentFileObj = await ReactiveCache.getAttachment(fileObjId);
+      if (!currentFileObj) return;
+      const effectiveUploadMaxBytes = await getAttachmentUploadMaxBytes();
+      const isValid = await isFileValid(
+        currentFileObj,
+        attachmentUploadMimeTypes,
+        effectiveUploadMaxBytes,
+        attachmentUploadExternalProgram,
+      );
+      if (!isValid) {
+        await Attachments.removeAsync(fileObjId);
+        return;
+      }
 
-        const effectiveUploadMaxBytes = await getAttachmentUploadMaxBytes();
-        const isValid = await isFileValid(currentFileObj, attachmentUploadMimeTypes, effectiveUploadMaxBytes, attachmentUploadExternalProgram);
-        if (!isValid) {
-          await Attachments.removeAsync(fileObjId);
-          return;
-        }
-
+      // Only migrate if the destination is different from filesystem.
+      if (storageDestination !== STORAGE_NAME_FILESYSTEM) {
         const fileObjAfterValidation = await ReactiveCache.getAttachment(fileObjId);
         if (fileObjAfterValidation) {
           moveToStorage(fileObjAfterValidation, storageDestination, fileStoreStrategyFactory);
         }
+      }
+    } catch (error) {
+      console.error('[onAfterUpload] Error during validation and storage migration:', error);
+    }
+  });
+
+  // Index PDF/DOCX/XLSX/PPTX text content for card search, in the
+  // background. This only builds the search index - it does not affect how
+  // the attachment is displayed (office-open-xml-viewer / the browser's
+  // native PDF viewer render the original file directly).
+  const extension = String(fileObj.extension || fileObj.name?.split('.').pop() || '').toLowerCase();
+  if (['pdf', 'docx', 'xlsx', 'pptx'].includes(extension)) {
+    Meteor.defer(async () => {
+      try {
+        const { indexAttachmentDocumentText } = require('/server/routes/universalFileServer');
+        const currentFileObj = await ReactiveCache.getAttachment(fileObjId);
+        if (currentFileObj) await indexAttachmentDocumentText(currentFileObj);
       } catch (error) {
-        console.error('[onAfterUpload] Error during validation and storage migration:', error);
+        // Search indexing must never break the upload.
+        console.error('[onAfterUpload] Document search indexing failed:', error);
       }
     });
   }
@@ -202,7 +315,9 @@ Attachments.onAfterRemove = function (filesInput) {
 
 // We authorize the attachment download either:
 // - if the board is public, everyone (even unconnected) can download it
-// - if the board is private, only board members can download it
+// - if the board is private, only board members can download it, and an
+//   assigned-only member only the files of cards assigned to them
+//   (AssignedBleed, GHSA-3cgr-47wm-9cc9)
 // Note: ostrio:files v3.x uses `await this.protected.call(...)` in _checkAccess,
 // so this function can be async and use findOneAsync for Meteor 3.x compatibility.
 Attachments.protected = async function (fileObj) {
@@ -214,10 +329,13 @@ Attachments.protected = async function (fileObj) {
   if (!board) {
     return false;
   }
-  if (board.isPublic()) {
+  // #3249: an 'instance' board is readable by any signed-in user.
+  if (readableWithoutMembership(board.permission, !!this.userId)) {
     return true;
   }
-  return board.hasMember(this.userId);
+  if (!board.hasMember(this.userId)) return false;
+  return require('/server/lib/assignedOnlyAttachments')
+    .mayReadBoardAttachment(board, this.userId, fileObj, 'attachments:protected');
 };
 
 // ---------------------------------------------------------------------------
@@ -293,7 +411,7 @@ Meteor.methods({
     }
 
     // Allowlist storage destinations
-    const allowedDestinations = ['fs', 'gridfs', 's3', 'azure', 'gcs'];
+    const allowedDestinations = ['fs', 'gridfs', 's3', 'azure', 'gcs', 'webdav'];
     if (!allowedDestinations.includes(storageDestination)) {
       throw new Meteor.Error('invalid-storage-destination', 'Invalid storage destination');
     }
@@ -320,14 +438,28 @@ Meteor.methods({
       throw new Meteor.Error('board-not-found', 'Board not found');
     }
 
-    if (!allowIsBoardMember(currentUserId, board)) {
-      if (process.env.DEBUG === 'true') {
-        console.warn(`Blocked unauthorized attachment rename attempt: user ${currentUserId} tried to rename attachment ${fileObjId} in board ${fileObj.meta?.boardId}`);
-      }
-      throw new Meteor.Error('not-authorized', 'You do not have permission to modify this attachment');
-    }
+    requireBoardMutation(currentUserId, board, 'renameAttachment', Meteor);
 
-    rename(fileObj, newName, fileStoreStrategyFactory);
+    // FileNameBleed, regressed (2023-02-21 to 2026-10-02): the server check
+    // added by the original fix was deleted in "Try to fix build errors", and
+    // only the client refused markup in a new name - so a direct method call
+    // stored it. Display paths escape it today; the name is refused here
+    // anyway, and every other name is stored cleaned, as an upload's is.
+    const { filenameLooksLikeExploit } = require('./lib/uploadFileName');
+    if (filenameLooksLikeExploit(newName)) {
+      try {
+        require('/server/lib/securityLog').record({
+          key: 'file.name', action: 'blocked', source: 'renameAttachment', userId: currentUserId,
+          detail: 'An attachment rename carried markup or a path.',
+        });
+      } catch (e) { /* logging must never break the guard */ }
+      throw new Meteor.Error('invalid-filename', 'This file name is not allowed.');
+    }
+    const { cleanFileName } = require('/imports/lib/fileNameDisplay');
+    const cleanName = cleanFileName(newName);
+    if (!cleanName) throw new Meteor.Error('invalid-filename', 'This file name is not allowed.');
+
+    rename(fileObj, cleanName, fileStoreStrategyFactory);
   },
   async validateAttachment(fileObjId) {
     check(fileObjId, String);
@@ -344,6 +476,34 @@ Meteor.methods({
     const board = await ReactiveCache.getBoard(fileObj.meta?.boardId);
     if (!board || !board.isVisibleBy({ _id: this.userId })) {
       throw new Meteor.Error('not-authorized', 'You do not have access to this board.');
+    }
+
+    // MoveStorageBleed sibling (2026-10-27 regression audit): seeing the board
+    // was enough, and a file that fails the CURRENT upload rules - a type or a
+    // size an admin has since disallowed - is removed for good. So anybody who
+    // could see a board, a public one included, could delete its attachments.
+    // Only who may change the attachment's card (or write its board, for a
+    // board's own image), or a site admin, validates now. No WeKan client calls
+    // this method - validateAttachmentAndMoveToStorage does, for an admin - so
+    // a refusal is an attempt and is recorded.
+    const user = await ReactiveCache.getUser(this.userId);
+    if (!(user && user.isAdmin)) {
+      const { canEditCardOrLinkedCard } = require('/server/lib/linkedCardPermission');
+      const { allowIsBoardMemberWithWriteAccess } = require('/server/lib/utils');
+      const card = fileObj.meta?.cardId ? await ReactiveCache.getCard(fileObj.meta.cardId) : null;
+      const mayChange = card
+        ? await canEditCardOrLinkedCard(this.userId, card, undefined, { recordDenial: false })
+        : allowIsBoardMemberWithWriteAccess(this.userId, board);
+      if (!mayChange) {
+        try {
+          require('/server/lib/securityLog').record({
+            key: 'authz.attachment-validate', action: 'blocked', source: 'ddp:validateAttachment',
+            userId: this.userId,
+            detail: 'Asked to validate - and so possibly delete - an attachment the caller cannot change.',
+          });
+        } catch (e) { /* logging must never break the guard */ }
+        throw new Meteor.Error('not-authorized', 'You cannot change this attachment.');
+      }
     }
 
     const effectiveUploadMaxBytes = await getAttachmentUploadMaxBytes();
@@ -377,7 +537,7 @@ Meteor.methods({
     }
 
     // Allowlist storage destinations
-    const allowedDestinations = ['fs', 'gridfs', 's3', 'azure', 'gcs'];
+    const allowedDestinations = ['fs', 'gridfs', 's3', 'azure', 'gcs', 'webdav'];
     if (!allowedDestinations.includes(storageDestination)) {
       throw new Meteor.Error('invalid-storage-destination', 'Invalid storage destination');
     }
@@ -386,8 +546,15 @@ Meteor.methods({
 
     const fileObjAfter = await ReactiveCache.getAttachment(fileObjId);
 
+    // The move runs after the method returns. It used to re-enter
+    // moveAttachmentToStorage from Meteor.defer, where there is no method
+    // invocation and so no userId: that method's login check refused it every
+    // time, and the file never moved. Every check it makes - admin, the board
+    // visible, the destination allowlisted - was made above, so the deferred
+    // step moves the file itself, as the upload path does.
     if (fileObjAfter) {
-      Meteor.defer(() => Meteor.call('moveAttachmentToStorage', fileObjId, storageDestination));
+      Meteor.defer(() => Promise.resolve(moveToStorage(fileObjAfter, storageDestination, fileStoreStrategyFactory))
+        .catch(error => console.error('[validateAttachmentAndMoveToStorage] move failed:', error)));
     }
   },
 });
@@ -398,6 +565,14 @@ Meteor.methods({
 
 Meteor.startup(async () => {
   await ensureIndex(Attachments, { 'meta.cardId': 1 });
+  // The board publication now publishes all of a board's attachments with one cursor
+  // on the denormalized meta.boardId (replacing a per-card N+1, #6480); index it so
+  // that board-level query is not a full collection scan.
+  await ensureIndex(Attachments, { 'meta.boardId': 1 });
+  // The Files report pages every attachment by name (server/publications/attachments.js),
+  // so that sort - and the count beside it - is an index scan, not a scan of the
+  // whole collection plus an in-memory sort.
+  await ensureIndex(Attachments, { name: 1 });
 
   // Ensure standard GridFS index on attachments.chunks for efficient chunk lookups.
   // Without this, queries like find({files_id: ObjectId}) do full collection scans.

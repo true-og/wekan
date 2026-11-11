@@ -1,12 +1,25 @@
 template(name="formLabel")
   label(for="labelName") {{_ 'name'}}
-  input.js-label-name#labelName(type="text" name="name" value=name autofocus)
+  textarea.js-label-name#labelName(rows="2" name="name" autofocus)= name
 
   label {{_ "select-color"}}
+  +labelColorPicker(color=color)
+
+  label(for="labelDueAt") {{_ 'due-date'}}
+  +calendarDateInput(inputId="labelDueAt" fieldClass="js-label-due-at" value=dueAtValue)
+
+//- A label's colour: the palette swatches and a custom colour wheel. The board
+//- label popup (formLabel) and Admin Panel / Settings / Shared labels use this
+//- one picker. `onChange`, an object with set(color), hears each pick; the
+//- popups read the picked colour back from the checked swatch or the wheel.
+template(name="labelColorPicker")
   .palette-colors: each labels
-    span.card-label.palette-color.js-palette-color(class="card-label-{{color}}")
+    span.card-label.palette-color.js-palette-color(class="{{labelColorClass color}}" style="{{labelColorStyle color}}" title="{{color}}")
       if(isSelected color)
         i.fa.fa-check
+  .color-wheel-wrap
+    label {{_ 'custom-color'}}
+      input.js-label-color-wheel(type="color" value=currentColorHex title="{{_ 'custom-color'}}")
 
 template(name="createLabelPopup")
   form.create-label
@@ -17,6 +30,14 @@ template(name="createLabelPopup")
 template(name="editLabelPopup")
   form.edit-label
     +formLabel
+    //- #2040: the board's label order, which a list can be sorted by.
+    .label-order
+      button.js-move-label(type="button" data-direction="up" title="{{_ 'card-field-order-move-up'}}")
+        i.fa.fa-arrow-up
+        | &nbsp;{{_ 'card-field-order-move-up'}}
+      button.js-move-label(type="button" data-direction="down" title="{{_ 'card-field-order-move-down'}}")
+        i.fa.fa-arrow-down
+        | &nbsp;{{_ 'card-field-order-move-down'}}
     button.primary.wide.left(type="submit") {{_ 'save'}}
     button.js-delete-label.negate.wide.right {{_ 'delete'}}
 
@@ -28,13 +49,29 @@ template(name="cardLabelsPopup")
   ul.edit-labels-pop-over
     each board.labels
       li.js-card-label-item
-        a.card-label-edit-button.fa.fa-pencil.js-edit-label
+        //- A shared label's copy follows the catalog, so it is not edited here.
+        if sharedLabelId
+          span.card-label-edit-button.fa.fa-share-alt(title="{{_ 'shared-labels'}}")
+        else
+          a.card-label-edit-button.fa.fa-pencil.js-edit-label
         if isTouchScreenOrShowDesktopDragHandles
-          span.fa.label-handle(class="fa-arrows" title="{{_ 'dragLabel'}}")
-        span.card-label.card-label-selectable.js-select-label.card-label-wrapper(class="card-label-{{color}}"
-          class="{{# if isLabelSelected ../_id }}active{{/if}}")
+          span.fa.label-handle(class="fa-arrows" title="{{_ 'move-scope'}}")
+        span.card-label.card-label-selectable.js-select-label.card-label-wrapper(class="{{labelColorClass color}}"
+          class="{{# if isLabelSelected ../_id }}active{{/if}}" style="{{labelColorStyle color}}")
             +viewer
               = name
             if(isLabelSelected ../_id)
               i.card-label-selectable-icon.fa.fa-check
+        if dueAt
+          span.card-label-due-at(title="{{_ 'due-date'}}") {{formatLabelDueAt dueAt}}
+  //- Shared labels (#2761, #4698) this board may use and does not have yet.
+  if sharedLabelsOffered.length
+    p.quiet {{_ 'shared-labels'}}
+    ul.edit-labels-pop-over.shared-labels-offered
+      each sharedLabelsOffered
+        li
+          span.fa.fa-share-alt.card-label-edit-button(title="{{_ 'shared-labels'}}")
+          span.card-label.card-label-selectable.js-use-shared-label.card-label-wrapper(class="{{labelColorClass color}}" style="{{labelColorStyle color}}" role="button" tabindex="0")
+            +viewer
+              = name
   a.quiet-button.full.js-add-label {{_ 'label-create'}}

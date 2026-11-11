@@ -1,21 +1,58 @@
+import { titlesFromComposer } from '/client/components/forms/multilineTitleChoice';
 import { ReactiveCache } from '/imports/reactiveCache';
 import { TAPi18n } from '/imports/i18n';
 import { FlowRouter } from 'meteor/ostrio:flow-router-extra';
+const { allBoardsPath, SECTION_ARCHIVE } = require('/models/lib/allBoardsUrls');
 import dragscroll from '@wekanteam/dragscroll';
 import getSlug from 'limax';
 import Boards from '/models/boards';
 import Swimlanes from '/models/swimlanes';
 import TableVisibilityModeSettings from '/models/tableVisibilityModeSettings';
+import visibilityDesc from '/imports/i18n/lib/visibilityDesc';
+const { boardViewMenuEntries } = require('/models/lib/boardViewSettings');
+import { allowBoardView } from '/client/lib/instanceFeatures';
 import { Filter } from '/client/lib/filter';
+// Which way a button that opens a sidebar view goes on a click - one answer,
+// in one place, for both Filter and Search.
+import {
+  SIDEBAR_VIEW_CLOSE,
+  sidebarViewButtonAction,
+} from '/models/lib/sidebarViewButton';
 import { MultiSelection } from '/client/lib/multiSelection';
 import { getSidebarInstance } from '/client/features/sidebar/service';
 import { Utils } from '/client/lib/utils';
+import { toggleFold } from '/client/lib/foldState';
 
 /*
 const DOWNCLS = 'fa-sort-down';
 const UPCLS = 'fa-sort-up';
 */
 const sortCardsBy = new ReactiveVar('');
+
+// Persist the card sort so it survives a page reload. Session is in-memory and
+// is reset on reload, which is why "sort by due date" kept reverting to the
+// default. See https://github.com/wekan/wekan/issues/5886
+const CARDS_SORT_BY_STORAGE_KEY = 'wekan-cards-sortBy';
+function setCardsSortBy(sortBy) {
+  Session.set('sortBy', sortBy);
+  try {
+    if (sortBy) {
+      window.localStorage.setItem(CARDS_SORT_BY_STORAGE_KEY, JSON.stringify(sortBy));
+    } else {
+      window.localStorage.removeItem(CARDS_SORT_BY_STORAGE_KEY);
+    }
+  } catch (e) {}
+}
+
+Template.boardChangeTitlePopup.onCreated(function () {
+  this.boardKeyError = new ReactiveVar('');
+});
+
+Template.boardChangeTitlePopup.helpers({
+  boardKeyError() {
+    return Template.instance().boardKeyError.get();
+  },
+});
 
 Template.boardChangeTitlePopup.events({
   async submit(event, templateInstance) {
@@ -29,8 +66,29 @@ Template.boardChangeTitlePopup.events({
       .val()
       .trim();
     if (newTitle) {
-      const board = Utils.getCurrentBoard();
+      // The board this popup was opened FOR, when it was opened for one: the
+      // All Boards Table view opens this same popup from a row whose data
+      // context is that row's board (docs/Features/All-Boards/All-Boards.md), and on
+      // that page there is no "current board" at all. The board header opens it
+      // with the current board as its context, so that side is unchanged.
+      const context = Template.currentData();
+      const board =
+        context && context._id && typeof context.rename === 'function'
+          ? context
+          : Utils.getCurrentBoard();
       if (board) {
+        // The key first: a key that is taken or not valid keeps the popup
+        // open with the reason, and nothing else is saved yet.
+        const keyInput = templateInstance.$('.js-board-key');
+        const newKey = keyInput.length ? String(keyInput.val() || '').trim().toUpperCase() : '';
+        if (newKey && newKey !== board.key) {
+          try {
+            await Meteor.callAsync('setBoardKey', board._id, newKey);
+          } catch (error) {
+            templateInstance.boardKeyError.set(error && error.error === 'board-key-taken' ? 'board-key-taken' : 'board-key-invalid');
+            return;
+          }
+        }
         await board.rename(newTitle);
         await board.setDescription(newDesc);
       }
@@ -39,11 +97,21 @@ Template.boardChangeTitlePopup.events({
   },
 });
 
-Template.boardHeaderBar.onCreated(function () {
+Template.boardHeaderButtons.onCreated(function () {
   Meteor.subscribe('tableVisibilityModeSettings');
+  // Restore the persisted card sort after a reload (Session is in-memory), so
+  // both the sorting and the sort icon are remembered. See #5886.
+  if (!Session.get('sortBy')) {
+    try {
+      const stored = window.localStorage.getItem(CARDS_SORT_BY_STORAGE_KEY);
+      if (stored) {
+        Session.set('sortBy', JSON.parse(stored));
+      }
+    } catch (e) {}
+  }
 });
 
-Template.boardHeaderBar.helpers({
+Template.boardHeaderButtons.helpers({
   notDisplayThisBoard() {
     const allowPrivateVisibilityOnly = TableVisibilityModeSettings.findOne('tableVisibilityMode-allowPrivateOnly');
     const currentBoard = Utils.getCurrentBoard();
@@ -51,7 +119,8 @@ Template.boardHeaderBar.helpers({
       allowPrivateVisibilityOnly !== undefined &&
       allowPrivateVisibilityOnly.booleanValue &&
       currentBoard &&
-      currentBoard.permission === 'public'
+      // #3249: an 'instance' board is not private either.
+      (currentBoard.permission === 'public' || currentBoard.permission === 'instance')
     );
   },
 
@@ -60,92 +129,115 @@ Template.boardHeaderBar.helpers({
     return currentBoard && currentBoard.getWatchLevel(Meteor.userId());
   },
 
-  isStarred() {
-    const boardId = Session.get('currentBoard');
-    const user = ReactiveCache.getCurrentUser();
-    return user && user.hasStarred(boardId);
-  },
-
-  // Only show the star counter if the number of star is greater than 2
-  showStarCounter() {
-    const currentBoard = Utils.getCurrentBoard();
-    return currentBoard && currentBoard.stars >= 2;
-  },
-
   boardView() {
     return Utils.boardView();
   },
   isSortActive() {
     return Session.get('sortBy') ? true : false;
   },
+  // A Font Awesome class name for the active sort, not an emoji.
   sortCardsIcon() {
     const sortBy = Session.get('sortBy');
     if (!sortBy) {
-      return '🃏'; // Card icon when nothing is selected
+      return 'fa-sort'; // nothing chosen
     }
-
-    // Determine which sort option is active based on sortBy object
     if (sortBy.dueAt) {
-      return '📅'; // Due date icon
+      return 'fa-clock-o'; // due date
     } else if (sortBy.title) {
-      return '🔤'; // Alphabet icon
+      return 'fa-font'; // alphabetical
     } else if (sortBy.createdAt) {
-      return sortBy.createdAt === 1 ? '⬆️' : '⬇️'; // Up/down arrow based on direction
+      return sortBy.createdAt === 1 ? 'fa-arrow-up' : 'fa-arrow-down';
+    } else if (sortBy.votes) {
+      return 'fa-thumbs-o-up'; // sort by votes (#3050)
     }
-
-    return '🃏'; // Default card icon
+    return 'fa-sort';
   },
 });
 
-Template.boardHeaderBar.events({
-  'click .js-edit-board-title': Popup.open('boardChangeTitle'),
-  'click .js-star-board'() {
+// The board star, in its own template because the first header bar places it
+// beside the starred-boards dropdown. A Blaze event map only sees events inside
+// its own template, so its helpers and its click come with its markup.
+Template.boardStarButton.helpers({
+  isStarred() {
+    const boardId = Session.get('currentBoard');
+    const user = ReactiveCache.getCurrentUser();
+    return user && user.hasStarred(boardId);
+  },
+
+  // Only show the star counter if the number of stars is greater than 2.
+  showStarCounter() {
+    const currentBoard = Utils.getCurrentBoard();
+    return currentBoard && currentBoard.stars >= 2;
+  },
+
+  currentBoard() {
+    return Utils.getCurrentBoard();
+  },
+});
+
+Template.boardStarButton.events({
+  async 'click .js-star-board'() {
     const boardId = Session.get('currentBoard');
     if (boardId) {
-      Meteor.call('toggleBoardStar', boardId);
+      try {
+        await Meteor.callAsync('toggleBoardStar', boardId);
+      } catch (error) {
+        console.error('Could not toggle board favorite:', error);
+      }
     }
   },
-  'click .js-open-board-menu': Popup.open('boardMenu'),
+});
+
+// Open the sidebar on `view`, or shut it when it is already showing that view.
+// `mustStayOpen` is Filter's exception: see models/lib/sidebarViewButton.js.
+function toggleSidebarView(view, mustStayOpen) {
+  const sidebar = getSidebarInstance();
+  if (!sidebar) {
+    console.warn('Sidebar not available for setView');
+    return;
+  }
+  // Open AND on this view: a sidebar open on Activities is showing neither, and
+  // clicking either button there has to switch to it rather than close.
+  const isShowingView = sidebar.isOpen() && sidebar.getView() === view;
+  if (sidebarViewButtonAction(isShowingView, mustStayOpen) === SIDEBAR_VIEW_CLOSE) {
+    sidebar.hide();
+    return;
+  }
+  sidebar.setView(view);
+}
+
+Template.boardHeaderButtons.events({
+  // The board's controls fold into the caret at the start of the group. Named
+  // by the words the app already has for it - Collapse and Uncollapse - rather
+  // than a key of its own in 147 language files. client/lib/foldState.js
+  'click .js-toggle-fold'(event) {
+    event.preventDefault();
+    toggleFold(event.currentTarget.dataset.fold);
+  },
+  'keydown .js-toggle-fold'(event) {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    toggleFold(event.currentTarget.dataset.fold);
+  },
   'click .js-change-visibility': Popup.open('boardChangeVisibility'),
   'click .js-watch-board': Popup.open('boardChangeWatch'),
+  // Boards in Archive is a SECTION of All Boards, not a page of its own: the
+  // row in its left menu. `/archive` is the full-width page that section
+  // replaced. docs/Features/All-Boards/Archive.md
   'click .js-open-archived-board'() {
-    Modal.open('archivedBoards');
+    FlowRouter.go(allBoardsPath(SECTION_ARCHIVE, []));
   },
-  'click .js-toggle-board-view': Popup.open('boardChangeView'),
-  'click .js-toggle-sidebar'() {
-    if (process.env.DEBUG === 'true') {
-      console.log('Hamburger menu clicked');
-    }
-    // Use the same approach as keyboard shortcuts
-    const sidebar = getSidebarInstance();
-    if (sidebar && typeof sidebar.toggle === 'function') {
-      if (process.env.DEBUG === 'true') {
-        console.log('Using Sidebar.toggle()');
-      }
-      sidebar.toggle();
-    } else {
-      if (process.env.DEBUG === 'true') {
-        console.warn('Sidebar not available, trying alternative approach');
-      }
-      // Try to trigger the sidebar through the global Blaze helper
-      if (typeof Blaze !== 'undefined' && Blaze._globalHelpers && Blaze._globalHelpers.Sidebar) {
-        const blazeSidebar = Blaze._globalHelpers.Sidebar();
-        if (blazeSidebar && typeof blazeSidebar.toggle === 'function') {
-          if (process.env.DEBUG === 'true') {
-            console.log('Using Blaze helper Sidebar.toggle()');
-          }
-          blazeSidebar.toggle();
-        }
-      }
-    }
-  },
+  // The button that opens the filter sidebar also shuts it. It only ever
+  // opened, so a second click did nothing visible and the only way back was the
+  // sidebar's own X - somewhere else on screen from the thing you just clicked.
+  //
+  // Not while a filter is ON, though: the sidebar is then the one place that
+  // says what is being hidden from the board, and closing it would leave a
+  // board showing a subset of its cards with nothing on screen to say so. The X
+  // beside this button is what clears the filter.
+  // models/lib/sidebarViewButton.js
   'click .js-open-filter-view'() {
-    const sidebar = getSidebarInstance();
-    if (sidebar) {
-      sidebar.setView('filter');
-    } else {
-      console.warn('Sidebar not available for setView');
-    }
+    toggleSidebarView('filter', Filter.isActive());
   },
   'click .js-sort-cards': Popup.open('cardsSort'),
   /*
@@ -161,6 +253,7 @@ Template.boardHeaderBar.events({
   },
   */
   'click .js-filter-reset'(event) {
+    event.preventDefault();
     event.stopPropagation();
     const sidebar = getSidebarInstance();
     if (sidebar) {
@@ -171,15 +264,13 @@ Template.boardHeaderBar.events({
     Filter.reset();
   },
   'click .js-sort-reset'() {
-    Session.set('sortBy', '');
+    setCardsSortBy('');
   },
+  // Search shuts what it opened too, with no exception: its results are inside
+  // the panel, so closing it hides nothing from the board the way closing an
+  // active filter's panel would. models/lib/sidebarViewButton.js
   'click .js-open-search-view'() {
-    const sidebar = getSidebarInstance();
-    if (sidebar) {
-      sidebar.setView('search');
-    } else {
-      console.warn('Sidebar not available for setView');
-    }
+    toggleSidebarView('search', false);
   },
   'click .js-multiselection-activate'() {
     const currentCard = Utils.getCurrentCardId();
@@ -197,7 +288,34 @@ Template.boardHeaderBar.events({
   },
 });
 
+// Board Settings / Board View (docs/Features/Board-Sidebar/Board-Settings/Board-View.md):
+// a view the board admin un-ticked for this board's visibility (public or
+// private) is not offered. Reads the board reactively, so switching the
+// board Private <-> Public swaps the menu on the spot.
+Template.boardChangeViewPopup.helpers({
+  // Reads the board reactively, so switching the board Private <-> Public,
+  // or a click in Board Settings / Board View, changes the menu on the spot.
+  boardViewMenuEntries() {
+    const board = Utils.getCurrentBoard();
+    // #6736: a view the instance disabled is not drawn at all.
+    return boardViewMenuEntries(board, Utils.boardView(), allowBoardView, Meteor.userId()).map(entry => ({
+      ...entry,
+      icon: `fa ${entry.icon}`,
+    }));
+  },
+});
+
 Template.boardChangeViewPopup.events({
+  // On the Rules page, picking a board view goes back to the board, where
+  // views are drawn - the Rules page's own Back button went with its separate
+  // sidebar. Runs beside the per-view handler below, which sets the view.
+  // Unsaved Blocks work is only dropped after the usual confirmation.
+  'click .js-board-view-entry'() {
+    if (FlowRouter.getRouteName() !== 'board-rules') return;
+    if (Session.get('rulesBlocksDirty') && !confirm(TAPi18n.__('r-blocks-discard'))) return;
+    const board = Utils.getCurrentBoard();
+    if (board) FlowRouter.go('board', { id: board._id, slug: board.slug });
+  },
   'click .js-open-lists-view'() {
     Utils.setBoardView('board-view-lists');
     Popup.back();
@@ -210,8 +328,152 @@ Template.boardChangeViewPopup.events({
     Utils.setBoardView('board-view-cal');
     Popup.back();
   },
+  'click .js-open-calendar-mode-view'() {
+    Utils.setBoardView('board-view-calendar-mode');
+    Popup.back();
+  },
+  'click .js-open-multiboard-cal-view'() {
+    Utils.setBoardView('board-view-multiboard-cal');
+    Popup.back();
+  },
   'click .js-open-gantt-view'() {
     Utils.setBoardView('board-view-gantt');
+    Popup.back();
+  },
+  'click .js-open-gantt-frappe-view'() {
+    Utils.setBoardView('board-view-gantt-frappe');
+    Popup.back();
+  },
+  'click .js-open-gantt-dhtmlx-view'() {
+    Utils.setBoardView('board-view-gantt-dhtmlx');
+    Popup.back();
+  },
+  'click .js-open-table-view'() {
+    Utils.setBoardView('board-view-table');
+    Popup.back();
+  },
+  'click .js-open-stats-view'() {
+    Utils.setBoardView('board-view-stats');
+    Popup.back();
+  },
+  'click .js-open-time-view'() {
+    Utils.setBoardView('board-view-time');
+    Popup.back();
+  },
+  'click .js-open-timeline-view'() {
+    Utils.setBoardView('board-view-timeline');
+    Popup.back();
+  },
+  'click .js-open-group-by-assignee-view'() {
+    Utils.setBoardView('board-view-group-by-assignee');
+    Popup.back();
+  },
+  'click .js-open-roadmap-view'() {
+    Utils.setBoardView('board-view-roadmap');
+    Popup.back();
+  },
+  'click .js-open-dashboard-view'() {
+    Utils.setBoardView('board-view-dashboard');
+    Popup.back();
+  },
+  'click .js-open-bigboard-view'() {
+    Utils.setBoardView('board-view-bigboard');
+    Popup.back();
+  },
+  'click .js-open-burndown-view'() {
+    Utils.setBoardView('board-view-burndown');
+    Popup.back();
+  },
+  'click .js-open-burnup-view'() {
+    Utils.setBoardView('board-view-burnup');
+    Popup.back();
+  },
+  'click .js-open-cumulative-flow-view'() {
+    Utils.setBoardView('board-view-cumulative-flow');
+    Popup.back();
+  },
+  'click .js-open-control-chart-view'() {
+    Utils.setBoardView('board-view-control-chart');
+    Popup.back();
+  },
+  'click .js-open-cycle-time-view'() {
+    Utils.setBoardView('board-view-cycle-time');
+    Popup.back();
+  },
+  'click .js-open-flow-efficiency-view'() {
+    Utils.setBoardView('board-view-flow-efficiency');
+    Popup.back();
+  },
+  'click .js-open-lead-time-view'() {
+    Utils.setBoardView('board-view-lead-time');
+    Popup.back();
+  },
+  'click .js-open-throughput-histogram-view'() {
+    Utils.setBoardView('board-view-throughput-histogram');
+    Popup.back();
+  },
+  'click .js-open-wip-run-view'() {
+    Utils.setBoardView('board-view-wip-run');
+    Popup.back();
+  },
+  'click .js-open-product-backlog-view'() {
+    Utils.setBoardView('board-view-product-backlog');
+    Popup.back();
+  },
+  'click .js-open-sprints-view'() {
+    Utils.setBoardView('board-view-sprints');
+    Popup.back();
+  },
+  'click .js-open-sprint-report-view'() {
+    Utils.setBoardView('board-view-sprint-report');
+    Popup.back();
+  },
+  'click .js-open-velocity-view'() {
+    Utils.setBoardView('board-view-velocity');
+    Popup.back();
+  },
+  'click .js-open-aging-wip-view'() {
+    Utils.setBoardView('board-view-aging-wip');
+    Popup.back();
+  },
+  'click .js-open-blocker-analysis-view'() {
+    Utils.setBoardView('board-view-blocker-analysis');
+    Popup.back();
+  },
+  'click .js-open-monte-carlo-view'() {
+    Utils.setBoardView('board-view-monte-carlo');
+    Popup.back();
+  },
+  'click .js-open-process-behavior-view'() {
+    Utils.setBoardView('board-view-process-behavior');
+    Popup.back();
+  },
+  'click .js-open-size-cycle-time-view'() {
+    Utils.setBoardView('board-view-size-cycle-time');
+    Popup.back();
+  },
+  'click .js-open-map-view'() {
+    Utils.setBoardView('board-view-map');
+    Popup.back();
+  },
+  'click .js-open-email-view'() {
+    Utils.setBoardView('board-view-email');
+    Popup.back();
+  },
+  'click .js-open-chat-view'() {
+    Utils.setBoardView('board-view-chat');
+    Popup.back();
+  },
+  'click .js-open-version-control-view'() {
+    Utils.setBoardView('board-view-version-control');
+    Popup.back();
+  },
+  'click .js-open-column-sets-view'() {
+    Utils.setBoardView('board-view-column-sets');
+    Popup.back();
+  },
+  'click .js-open-pulse-view'() {
+    Utils.setBoardView('board-view-pulse');
     Popup.back();
   },
 });
@@ -221,11 +483,17 @@ function setupCreateBoardState(tpl) {
   tpl.visibilityMenuIsOpen = new ReactiveVar(false);
   tpl.visibility = new ReactiveVar('private');
   tpl.boardId = new ReactiveVar('');
+  // #5850: default to creating a regular board; the dedicated
+  // createTemplateContainerPopup sets this true in its onRendered.
+  Session.set('createBoardAsTemplate', false);
   Meteor.subscribe('tableVisibilityModeSettings');
 }
 
 function createBoardHelpers() {
   return {
+    createBoardOwner() {
+      return Template.instance();
+    },
     visibilityMenuIsOpen() {
       return Template.instance().visibilityMenuIsOpen.get();
     },
@@ -241,12 +509,42 @@ function createBoardHelpers() {
   };
 }
 
-async function createBoardSubmit(tpl, event) {
+async function createBoardSubmit(tpl, event, starAfterCreate = false) {
   event.preventDefault();
-  const title = tpl.find('.js-new-board-title').value;
+  if (tpl.creatingBoards) return;
+  const form = event.currentTarget;
+  const titleInput = form.querySelector('.js-new-board-title');
+  const titles = titlesFromComposer(titleInput);
+  if (!titles.length) return;
+  const addTemplateContainer = Session.get('createBoardAsTemplate') === true;
+  const spaceId = Session.get('createBoardInWorkspace');
+  tpl.creatingBoards = true;
+  const submit = form.querySelector('[type=submit]');
+  if (submit) submit.disabled = true;
+  try {
+    for (const title of titles) {
+      await createOneBoard(tpl, title, addTemplateContainer, spaceId);
+      if (starAfterCreate) await Meteor.callAsync('toggleBoardStar', tpl.boardId.get());
+    }
+    Session.set('createBoardAsTemplate', false);
+    Session.set('createBoardInWorkspace', null);
+    FlowRouter.go('board', { id: tpl.boardId.get(), slug: getSlug(titles[titles.length - 1]) || 'board' });
+  } catch (error) {
+    console.error(error);
+    window.alert(error.reason || error.message);
+  } finally {
+    tpl.creatingBoards = false;
+    if (submit) submit.disabled = false;
+  }
+}
+
+async function createOneBoard(tpl, title, addTemplateContainer, spaceId) {
+  tpl.boardId.set(null);
   const slug = getSlug(title) || 'board';
 
-  const addTemplateContainer = $('#add-template-container.is-checked').length > 0;
+  // #5850: template boards are created via the dedicated "Add Template Board"
+  // flow (createTemplateContainerPopup), signalled by this Session flag, rather
+  // than a checkbox on the generic Create Board popup. Share it across the batch.
   if (addTemplateContainer) {
     tpl.boardId.set(
       await Meteor.callAsync('createBoardWithInitialSwimlanes', {
@@ -256,70 +554,102 @@ async function createBoardSubmit(tpl, event) {
         type: 'template-container',
         migrationVersion: 1,
         swimlanes: [
-          { title: 'Card Templates', sort: 1, type: 'template-container' },
-          { title: 'List Templates', sort: 2, type: 'template-container' },
-          { title: 'Board Templates', sort: 3, type: 'template-container' },
+          { title: 'Card Templates', sort: 1, type: 'template-container', role: 'card' },
+          { title: 'List Templates', sort: 2, type: 'template-container', role: 'list' },
+          { title: 'Board Templates', sort: 3, type: 'template-container', role: 'board' },
         ],
       }),
     );
 
     // Assign to space if one was selected
-    const spaceId = Session.get('createBoardInWorkspace');
     if (spaceId) {
-      Meteor.call('assignBoardToWorkspace', tpl.boardId.get(), spaceId, (err) => {
-        if (err) console.error('Error assigning board to space:', err);
-      });
-      Session.set('createBoardInWorkspace', null); // Clear after use
+      await Meteor.callAsync('assignBoardToWorkspace', tpl.boardId.get(), spaceId);
     }
-
-    FlowRouter.go('board', { id: tpl.boardId.get(), slug });
-
   } else {
     const visibility = tpl.visibility.get();
 
-    tpl.boardId.set(
-      await Meteor.callAsync('createBoardWithInitialSwimlanes', {
-        title,
-        slug,
-        permission: visibility,
-        migrationVersion: 1,
-        swimlanes: [{ title: 'Default' }],
-      }),
-    );
+    // #4205: when the user has marked a board template as their default,
+    // apply it automatically - the same "type a name and click Create" flow
+    // that used to always start blank now reuses the EXACT copyBoard call the
+    // manual "Template" picker already makes (Template.searchElementPopup's
+    // 'click .js-minicard' handler, client/components/lists/listBody.js) -
+    // only the source (the default template's board) and the typed title
+    // differ. Nothing changes for a user who has not set a default.
+    const currentUser = ReactiveCache.getCurrentUser();
+    const defaultTemplateBoardId = currentUser
+      && currentUser.profile
+      && currentUser.profile.defaultBoardTemplateBoardId;
 
-    // Assign to space if one was selected
-    const spaceId = Session.get('createBoardInWorkspace');
-    if (spaceId) {
-      Meteor.call('assignBoardToWorkspace', tpl.boardId.get(), spaceId, (err) => {
-        if (err) console.error('Error assigning board to space:', err);
+    if (defaultTemplateBoardId) {
+      await new Promise((resolve) => {
+        Meteor.call(
+          'copyBoard',
+          defaultTemplateBoardId,
+          {
+            sort: ReactiveCache.getBoards({ archived: false }).length,
+            type: 'board',
+            title,
+          },
+          (err, newBoardId) => {
+            if (err) {
+              // Stale/removed default (should self-heal via boardRemover, but
+              // guard against a race): fall back to a blank board rather than
+              // leaving Create silently broken.
+              console.error(err);
+            } else {
+              tpl.boardId.set(newBoardId);
+            }
+            resolve();
+          },
+        );
       });
-      Session.set('createBoardInWorkspace', null); // Clear after use
     }
 
-    FlowRouter.go('board', { id: tpl.boardId.get(), slug });
+    if (!tpl.boardId.get()) {
+      tpl.boardId.set(
+        await Meteor.callAsync('createBoardWithInitialSwimlanes', {
+          title,
+          slug,
+          permission: visibility,
+          migrationVersion: 1,
+          swimlanes: [{ title: 'Default' }],
+        }),
+      );
+    }
+
+    // Assign to space if one was selected
+    if (spaceId) {
+      await Meteor.callAsync('assignBoardToWorkspace', tpl.boardId.get(), spaceId);
+    }
   }
 }
 
-function createBoardEvents() {
-  return {
-    'click .js-select-visibility'(event, tpl) {
-      tpl.visibility.set(this);
-      tpl.visibilityMenuIsOpen.set(false);
-    },
-    'click .js-change-visibility'(event, tpl) {
-      tpl.visibilityMenuIsOpen.set(!tpl.visibilityMenuIsOpen.get());
-    },
-    'click .js-import': Popup.open('boardImportBoard'),
-    async 'submit'(event, tpl) {
-      await createBoardSubmit(tpl, event);
-    },
-    'click .js-import-board': Popup.open('chooseBoardSource'),
-    'click .js-board-template': Popup.open('searchElement'),
-    'click .js-toggle-add-template-container'() {
-      $('#add-template-container').toggleClass('is-checked');
-    },
-  };
+function createBoardOwner(tpl) {
+  return tpl.data && tpl.data.owner;
 }
+
+// Blaze events are scoped to the template whose rendered DOM contains the
+// selector. The form is an included child template, so attaching submit to its
+// parent popup leaves the Create button inert. Keep state on the parent, but
+// attach the shared form's events here and explicitly pass its owner in.
+Template.createBoardForm.events({
+  'click .js-select-visibility'(event, tpl) {
+    const owner = createBoardOwner(tpl);
+    owner.visibility.set(this);
+    owner.visibilityMenuIsOpen.set(false);
+  },
+  'click .js-change-visibility'(event, tpl) {
+    const owner = createBoardOwner(tpl);
+    owner.visibilityMenuIsOpen.set(!owner.visibilityMenuIsOpen.get());
+  },
+  async submit(event, tpl) {
+    const owner = createBoardOwner(tpl);
+    const starAfterCreate = tpl.data.starAfterCreate === true;
+    await createBoardSubmit(owner, event, starAfterCreate);
+  },
+  'click .js-import-board': Popup.open('chooseBoardSource'),
+  'click .js-board-template': Popup.open('searchElement'),
+});
 
 // createBoard (non-popup version)
 Template.createBoard.onCreated(function () {
@@ -328,8 +658,6 @@ Template.createBoard.onCreated(function () {
 
 Template.createBoard.helpers(createBoardHelpers());
 
-Template.createBoard.events(createBoardEvents());
-
 // createBoardPopup
 Template.createBoardPopup.onCreated(function () {
   setupCreateBoardState(this);
@@ -337,21 +665,17 @@ Template.createBoardPopup.onCreated(function () {
 
 Template.createBoardPopup.helpers(createBoardHelpers());
 
-Template.createBoardPopup.events(createBoardEvents());
-
 // createTemplateContainerPopup
 Template.createTemplateContainerPopup.onCreated(function () {
   setupCreateBoardState(this);
 });
 
 Template.createTemplateContainerPopup.onRendered(function () {
-  // Always pre-check the template container checkbox for this popup
-  $('#add-template-container').addClass('is-checked');
+  // #5850: this dedicated popup always creates a template board.
+  Session.set('createBoardAsTemplate', true);
 });
 
 Template.createTemplateContainerPopup.helpers(createBoardHelpers());
-
-Template.createTemplateContainerPopup.events(createBoardEvents());
 
 // headerBarCreateBoardPopup
 Template.headerBarCreateBoardPopup.onCreated(function () {
@@ -360,30 +684,24 @@ Template.headerBarCreateBoardPopup.onCreated(function () {
 
 Template.headerBarCreateBoardPopup.helpers(createBoardHelpers());
 
-Template.headerBarCreateBoardPopup.events({
-  'click .js-select-visibility'(event, tpl) {
-    tpl.visibility.set(this);
-    tpl.visibilityMenuIsOpen.set(false);
-  },
-  'click .js-change-visibility'(event, tpl) {
-    tpl.visibilityMenuIsOpen.set(!tpl.visibilityMenuIsOpen.get());
-  },
-  'click .js-import': Popup.open('boardImportBoard'),
-  async submit(event, tpl) {
-    await createBoardSubmit(tpl, event);
-    // Immediately star boards created with the headerbar popup.
-    await ReactiveCache.getCurrentUser().toggleBoardStar(tpl.boardId.get());
-  },
-  'click .js-import-board': Popup.open('chooseBoardSource'),
-  'click .js-board-template': Popup.open('searchElement'),
-  'click .js-toggle-add-template-container'() {
-    $('#add-template-container').toggleClass('is-checked');
-  },
-});
-
 Template.boardVisibilityList.helpers({
   notAllowPrivateVisibilityOnly() {
     return !TableVisibilityModeSettings.findOne('tableVisibilityMode-allowPrivateOnly')?.booleanValue;
+  },
+  // #4421: an admin can override these sub-name texts in Admin Panel /
+  // Settings / Visibility (Settings.customPrivateBoardDesc /
+  // customPublicBoardDesc); empty/unset falls back to the i18n default,
+  // byte-identical to before this setting existed.
+  // TAPi18n.__ reads `this` (its reactive language dependency), so it is
+  // passed bound: handed over bare it threw inside the helper and both
+  // descriptions rendered as an empty span in every language.
+  privateDesc() {
+    const setting = ReactiveCache.getCurrentSetting();
+    return visibilityDesc(setting?.customPrivateBoardDesc, key => TAPi18n.__(key), 'private-desc');
+  },
+  publicDesc() {
+    const setting = ReactiveCache.getCurrentSetting();
+    return visibilityDesc(setting?.customPublicBoardDesc, key => TAPi18n.__(key), 'public-desc');
   },
 });
 
@@ -392,6 +710,15 @@ Template.boardChangeVisibilityPopup.onCreated(function () {
 });
 
 Template.boardChangeVisibilityPopup.helpers({
+  instanceEditingOffered() {
+    const board = Utils.getCurrentBoard();
+    return !!(board && ['instance', 'public'].includes(board.permission)
+      && TableVisibilityModeSettings.findOne('tableVisibilityMode-allowInstanceEditing')?.booleanValue);
+  },
+  currentBoardInstanceEditing() {
+    const board = Utils.getCurrentBoard();
+    return !!(board && board.allowsInstanceEditing);
+  },
   notAllowPrivateVisibilityOnly(){
     return !TableVisibilityModeSettings.findOne('tableVisibilityMode-allowPrivateOnly')?.booleanValue;
   },
@@ -402,6 +729,11 @@ Template.boardChangeVisibilityPopup.helpers({
 });
 
 Template.boardChangeVisibilityPopup.events({
+  'click .js-toggle-instance-editing'(event) {
+    event.preventDefault();
+    const board = Utils.getCurrentBoard();
+    if (board) Boards.updateAsync(board._id, { $set: { allowsInstanceEditing: !board.allowsInstanceEditing } });
+  },
   'click .js-select-visibility'() {
     const currentBoard = Utils.getCurrentBoard();
     const visibility = this;
@@ -426,18 +758,38 @@ Template.boardChangeWatchPopup.helpers({
 
 Template.boardChangeWatchPopup.events({
   'click .js-select-watch'() {
-    const level = this;
-    if (typeof level === 'string') {
-      Meteor.call(
-        'watch',
-        'board',
-        Session.get('currentBoard'),
-        level,
-        (err, ret) => {
-          if (!err && ret) Popup.back();
-        },
-      );
-    }
+    // `this` is the data context of the clicked row - the string from the
+    // enclosing {{#with "watching"}}. Blaze can hand that back as a boxed
+    // String, so read it through String() rather than refusing anything that is
+    // not typeof 'string'.
+    const level = this === null || this === undefined ? '' : String(this);
+    if (!level) return;
+    Meteor.call(
+      'watch',
+      'board',
+      Session.get('currentBoard'),
+      level,
+      (err, ret) => {
+        if (!err && ret) {
+          Popup.back();
+          return;
+        }
+        // AN ERROR MUST NOT BE SILENT. It was: the callback closed the popup on
+        // success and did nothing at all otherwise, so a refusal looked exactly
+        // like a broken button - "Silent does not respond. If we try to change
+        // it does not change. Nothing happens." (email, 2026-08-13). The server
+        // refuses for two reasons an admin can act on: the watch feature is
+        // turned off in the Admin Panel, and the board is not visible to this
+        // user.
+        const reason = err && (err.error || err.reason || err.message);
+        const message = reason === 'error-watch-disabled'
+          ? TAPi18n.__('error-watch-disabled')
+          : TAPi18n.__('error-board-notAMember');
+        // eslint-disable-next-line no-alert
+        if (typeof window !== 'undefined' && window.alert) window.alert(message);
+        if (process.env.DEBUG === 'true') console.error('watch failed:', err);
+      },
+    );
   },
 });
 
@@ -520,7 +872,7 @@ Template.cardsSortPopup.events({
     const sortBy = {
       dueAt: 1,
     };
-    Session.set('sortBy', sortBy);
+    setCardsSortBy(sortBy);
     sortCardsBy.set(TAPi18n.__('due-date'));
     Popup.back();
   },
@@ -528,7 +880,7 @@ Template.cardsSortPopup.events({
     const sortBy = {
       title: 1,
     };
-    Session.set('sortBy', sortBy);
+    setCardsSortBy(sortBy);
     sortCardsBy.set(TAPi18n.__('title'));
     Popup.back();
   },
@@ -536,16 +888,99 @@ Template.cardsSortPopup.events({
     const sortBy = {
       createdAt: 1,
     };
-    Session.set('sortBy', sortBy);
-    sortCardsBy.set(TAPi18n.__('date-created-newest-first'));
+    setCardsSortBy(sortBy);
+    sortCardsBy.set(TAPi18n.__('created-at-newest-first'));
     Popup.back();
   },
   'click .js-sort-created-desc'() {
     const sortBy = {
       createdAt: -1,
     };
-    Session.set('sortBy', sortBy);
-    sortCardsBy.set(TAPi18n.__('date-created-oldest-first'));
+    setCardsSortBy(sortBy);
+    sortCardsBy.set(TAPi18n.__('created-at-oldest-first'));
+    Popup.back();
+  },
+  // #3050: float highest-voted cards to the top of each list. `votes` is not
+  // a real Mongo field (vote score is computed from vote.positive/negative),
+  // so this is a marker only - client.components.lists.listBody's
+  // cardsWithLimit() recognizes it and re-sorts the rendered cards in JS
+  // instead of passing it through as a Mongo sort spec.
+  // #2040: a display order like votes - the cards' `sort` is not changed.
+  'click .js-sort-label-order'() {
+    setCardsSortBy({ labelOrder: 1 });
+    sortCardsBy.set(TAPi18n.__('sort-by-label-order'));
+    Popup.back();
+  },
+  'click .js-sort-votes'() {
+    const sortBy = {
+      votes: -1,
+    };
+    setCardsSortBy(sortBy);
+    sortCardsBy.set(TAPi18n.__('sort-by-votes'));
     Popup.back();
   },
 });
+
+// The board's view menu is its own template in the FIRST header bar now, so its
+// handler is here rather than on the second bar that used to draw it.
+// docs/Features/Header-Bar/Header.md
+Template.boardViewMenu.events({
+  'click .js-toggle-board-view': Popup.open('boardChangeView'),
+});
+
+Template.boardViewMenu.helpers({
+  boardView() {
+    return Utils.boardView();
+  },
+  // The tooltip: the name of the view that is ON. The button is icon only, so
+  // this is the only place the name appears. docs/Features/Header-Bar/Header.md
+  boardViewName() {
+    const names = {
+      'board-view-swimlanes': 'swimlanes',
+      'board-view-lists': 'lists',
+      'board-view-cal': 'calendar',
+      'board-view-calendar-mode': 'board-view-calendar-mode',
+      'board-view-multiboard-cal': 'board-view-multiboard-cal',
+      'board-view-gantt': 'gantt',
+      'board-view-gantt-frappe': 'board-view-gantt-frappe',
+      'board-view-gantt-dhtmlx': 'board-view-gantt-dhtmlx',
+      'board-view-table': 'board-view-table',
+      'board-view-stats': 'board-view-stats',
+      'board-view-time': 'board-view-time',
+      'board-view-timeline': 'board-view-timeline',
+      'board-view-group-by-assignee': 'board-view-group-by-assignee',
+      'board-view-roadmap': 'board-view-roadmap',
+      'board-view-dashboard': 'board-view-dashboard',
+      'board-view-bigboard': 'board-view-bigboard',
+      'board-view-burndown': 'board-view-burndown',
+      'board-view-burnup': 'board-view-burnup',
+      'board-view-cumulative-flow': 'board-view-cumulative-flow',
+      'board-view-control-chart': 'board-view-control-chart',
+      'board-view-cycle-time': 'board-view-cycle-time',
+      'board-view-flow-efficiency': 'board-view-flow-efficiency',
+      'board-view-lead-time': 'board-view-lead-time',
+      'board-view-throughput-histogram': 'board-view-throughput-histogram',
+      'board-view-wip-run': 'board-view-wip-run',
+      'board-view-pulse': 'board-view-pulse',
+      'board-view-product-backlog': 'board-view-product-backlog',
+      'board-view-sprints': 'board-view-sprints',
+      'board-view-sprint-report': 'board-view-sprint-report',
+      'board-view-velocity': 'board-view-velocity',
+      'board-view-aging-wip': 'board-view-aging-wip',
+      'board-view-blocker-analysis': 'board-view-blocker-analysis',
+      'board-view-monte-carlo': 'board-view-monte-carlo',
+      'board-view-process-behavior': 'board-view-process-behavior',
+      'board-view-size-cycle-time': 'board-view-size-cycle-time',
+      'board-view-map': 'board-view-map',
+      'board-view-email': 'board-view-email',
+      'board-view-chat': 'board-view-chat',
+      'board-view-version-control': 'board-view-version-control',
+      'board-view-column-sets': 'board-view-column-sets',
+    };
+    return TAPi18n.__(names[Utils.boardView()] || 'board-view');
+  },
+});
+
+// The board is renamed by clicking its NAME in the first header bar, which is
+// handled where that bar is: client/components/main/header.js. The pencil that
+// used to be here is gone with the template it lived in.

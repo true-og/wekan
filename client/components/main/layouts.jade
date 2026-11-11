@@ -1,5 +1,5 @@
 template(name="main")
-  html(lang="{{TAPi18n.getLanguage}}")
+  html(lang="{{htmlLang}}" dir="{{htmlDir}}")
     head
       title
       meta(name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5, user-scalable=yes, viewport-fit=cover")
@@ -23,38 +23,114 @@ template(name="main")
       //link(rel="stylesheet" type="text/css" class="__meteor-css__" href="css/html5-default-theme.css")
 
 template(name="userFormsLayout")
+  +recoveryMaintenance
   section.auth-layout
-    if currentSetting.hideLogo
-      h1.at-form-landing-logo
-        br
-        br
-    unless currentSetting.hideLogo
-      h1.at-form-landing-logo
-      if currentSetting.customLoginLogoImageUrl
-        if currentSetting.customLoginLogoLinkUrl
-          a(href="{{currentSetting.customLoginLogoLinkUrl}}")
-            img(src="{{currentSetting.customLoginLogoImageUrl}}" width="300" height="auto")
+    if logoSettingsReady
+      if currentSetting.hideLogo
+        //- A spacer, not a heading: an empty h1 is announced as an empty heading.
+        div.at-form-landing-logo(aria-hidden="true")
           br
-        unless currentSetting.customLoginLogoLinkUrl
-          img(src="{{currentSetting.customLoginLogoImageUrl}}" width="300" height="auto")
           br
-      else
-        img(src="{{pathFor '/wekan-logo.svg'}}" alt="" width="300" height="auto")
-        br
+      unless currentSetting.hideLogo
+        div.at-form-landing-logo(aria-hidden="true")
+        if currentSetting.customLoginLogoImageUrl
+          if currentSetting.customLoginLogoLinkUrl
+            a(href="{{currentSetting.customLoginLogoLinkUrl}}")
+              img(src="{{currentSetting.customLoginLogoImageUrl}}" alt="{{currentSetting.productName}}" width="300" height="auto")
+            br
+          unless currentSetting.customLoginLogoLinkUrl
+            img(src="{{currentSetting.customLoginLogoImageUrl}}" alt="{{currentSetting.productName}}" width="300" height="auto")
+            br
+        else
+          img(src="{{pathFor '/wekan-logo.svg'}}" alt="" width="300" height="auto")
+          br
   if currentSetting.textBelowCustomLoginLogo
     hr
     section.textBelowCustomLoginLogo
       +viewer
         | {{currentSetting.textBelowCustomLoginLogo}}
     hr
-  section.auth-layout
+  //- role="main": the sign-in and register form is the page's main landmark
+    (WCAG 1.3.1 / 2.4.1), so the title, the links and the language picker are in one.
+  section.auth-layout(role="main")
     section.auth-dialog
       if isLoading
         +loader
       else
         // ARIA live region for error messages
-        div#login-error-message(role="alert" aria-live="assertive" style="color: #d32f2f; margin-bottom: 1em;")
+        div#login-error-message(role="alert" aria-live="assertive" style="color: #d32f2f; margin-bottom: 1em;")= loginErrorText
+        // Second sign-in step for accounts-2fa (issue #3058). Hidden unless a
+        // password login comes back with the "no-2fa-code" / "invalid-2fa-code"
+        // error - see decideTwoFactorLoginStep() in
+        // imports/lib/twoFactorAuthLoginDecision.js and its wiring in
+        // config/accounts.js.
+        form#two-factor-code-container.hide(hidden="hidden")
+          label(for="two-factor-code-input")
+            | {{_ 'twoFactorCode-prompt'}}
+            input#two-factor-code-input(type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code")
+          div#two-factor-code-error.error.hide
+          div.buttonsContainer
+            input.primary(type="submit" value="{{_ 'twoFactorCode-submit'}}")
+            button#two-factor-code-cancel.js-two-factor-code-cancel(type="button") {{_ 'twoFactorCode-cancel'}}
+        //- Google and the other providers return to ROOT_URL; at any other
+          address the login cannot finish (models/lib/loginOriginMismatch.js).
+        if loginOriginMismatch
+          p.login-origin-mismatch.js-login-origin-mismatch(role="alert")
+            | {{_ 'login-origin-mismatch' expected=loginOriginMismatch.expected actual=loginOriginMismatch.actual}}
         +Template.dynamic(template=content)
+        button#at-saml.primary.hide(type="button")
+          i.fa.fa-key
+          | {{_ 'samlSignIn'}}
+        // One button per Meteor accounts-* OAuth provider the server reports
+        // enabled (getAuthenticationsEnabled -> models/lib/oauthProviders.js).
+        each oauthProviders
+          button.primary.js-oauth-provider(type="button" data-provider=key)
+            i.fa(class=icon)
+            | {{_ 'sign-in-with' label}}
+        //- #5847: sign in with a passkey (client/lib/passkeys.js).
+        if passkeysSupported
+          button.primary.js-passkey-sign-in(type="button")
+            i.fa.fa-key
+            | {{_ 'passkey-sign-in'}}
+          if passkeyMessage
+            p.quiet.js-passkey-message= passkeyMessage
+        //- #5758: Windows single sign-on (server/windowsSso.js).
+        if windowsSsoOffered
+          a.button.primary.js-windows-sso(href="/sso/windows")
+            i.fa.fa-windows
+            | {{_ 'windows-sso-sign-in'}}
+        //- #2460: sign in with SQRL (client/lib/sqrl.js).
+        if sqrlOffered
+          button.primary.js-sqrl-sign-in(type="button")
+            i.fa.fa-qrcode
+            | {{_ 'sqrl-sign-in'}}
+          if sqrlShown
+            .sqrl-box
+              a.sqrl-qr(href=sqrlShown.link aria-label="{{_ 'sqrl-open-client'}}") {{{sqrlShown.svg}}}
+              p.quiet {{_ 'sqrl-scan'}}
+              a.button.js-sqrl-open(href=sqrlShown.link) {{_ 'sqrl-open-client'}}
+          if sqrlMessage
+            p.quiet.js-sqrl-message= sqrlMessage
+        // accounts-passwordless: e-mailed one-time sign-in code.
+        if passwordlessEnabled
+          if passwordlessCodeStep
+            form#passwordless-code-form.js-passwordless-login
+              p {{_ 'passwordless-code-sent'}}
+              label(for="passwordless-code")
+                | {{_ 'passwordless-enter-code'}}
+                input#passwordless-code(type="text" autocomplete="one-time-code" autocapitalize="none" spellcheck="false" maxlength="10" required)
+              div.buttonsContainer
+                input.primary(type="submit" value="{{_ 'passwordless-sign-in'}}")
+                button.js-passwordless-cancel(type="button") {{_ 'cancel'}}
+          else
+            form#passwordless-email-form.js-passwordless-request
+              label(for="passwordless-email")
+                | {{_ 'passwordless-email'}}
+                input#passwordless-email(type="email" autocomplete="email" required)
+              div.buttonsContainer
+                button.primary.js-passwordless-send(type="submit")
+                  i.fa.fa-envelope
+                  | {{_ 'passwordless-login'}}
         if currentSetting.displayAuthenticationMethod
           +connectionMethod(authenticationMethod=currentSetting.defaultAuthenticationMethod)
         if isLegalNoticeLinkExist
@@ -78,27 +154,47 @@ template(name="userFormsLayout")
                   option(value="{{tag}}") {{name}} (RTL)
                 else
                   option(value="{{tag}}") {{name}}
+    //- Extra space below the login / register dialog so its bottom scrolls
+    //- fully into view and scrolling continues a little past the form.
+    //- A real element, not <br>: body is display:flex, so a <br> becomes a
+    //- flex item, gets blockified and collapses to zero height - which is why
+    //- the two <br> that used to be here added no space at all.
+    .auth-bottom-space
 
 template(name="defaultLayout")
+  +attachmentViewer
+  +recoveryMaintenance
+  +historyRecoveryNotice
+  //- Shared migration / board-repair progress dashboard. Mounted app-wide so it
+  //- shows for both a board-open repair AND an Admin Panel database migration.
+  +migrationProgress
+  a.skip-link(href="#content") {{_ 'skip-to-content'}}
   +header
-  #content
+  #content(role="main" tabindex="-1")
     | {{{afterBodyStart}}}
     +Template.dynamic(template=content)
     | {{{beforeBodyEnd}}}
+    //- The right sidebar of a page that has no sidebar of its own. It draws
+      nothing on a board or on All Boards, which have theirs, and nothing on a
+      page with no controls to put in one. docs/Features/Header-Bar/Header.md
+    +pageSidebar
+  //- A card drawing full screen, under the header bar
+    (docs/Features/Cards/Whiteboard.md). Draws nothing until one is opened.
+  +cardWhiteboard
   +boardConversionProgress
   if (Modal.isOpen)
-    #modal
+    #modal(role="dialog" aria-modal="true" aria-label="{{_ 'modal-title'}}")
       .overlay
       if (Modal.isWide)
         .modal-content-wide.modal-container
-          a.modal-close-btn.js-close-modal
-            i.fa.fa-times-thin
+          a.modal-close-btn.js-close-modal(aria-label="{{_ 'close-dialog'}}")
+            i.fa.fa-times-thin(aria-hidden="true")
           +Template.dynamic(template=Modal.getHeaderName)
           +Template.dynamic(template=Modal.getTemplateName)
       else
         .modal-content.modal-container
-          a.modal-close-btn.js-close-modal
-            i.fa.fa-times-thin
+          a.modal-close-btn.js-close-modal(aria-label="{{_ 'close-dialog'}}")
+            i.fa.fa-times-thin(aria-hidden="true")
           +Template.dynamic(template=Modal.getHeaderName)
           +Template.dynamic(template=Modal.getTemplateName)
 

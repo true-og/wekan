@@ -2,8 +2,20 @@ template(name="commentForm")
   .new-comment.js-new-comment(
     class="{{#if commentFormIsOpen}}is-open{{/if}}")
     +userAvatar(userId=currentUser._id noRemove=true)
+    if replyToComment
+      .comment-reply-banner.js-reply-banner
+        span.comment-reply-banner-label
+          if replyToCommentAuthorName
+            | {{_ 'comment-in-reply-to'}} {{ replyToCommentAuthorName }}:
+          else
+            | {{_ 'comment-in-reply-to'}}:
+        span.comment-reply-banner-text
+          +viewer
+            = replyToComment.text
+        a.js-cancel-reply(title="{{_ 'close' }}")
+          i.fa.fa-times-thin
     form.js-new-comment-form
-      +editor(class="js-new-comment-input")
+      +editor(class="js-new-comment-input" labelKey="comment")
         | {{getUnsavedValue 'cardComment' currentCard._id}}
       .add-controls
         button.primary.confirm.clear.js-add-comment(type="submit") {{_ 'comment'}}
@@ -14,17 +26,25 @@ template(name="comments")
       +comment(commentData)
 
 template(name="comment")
-  .comment
+  .comment(id=commentDomId class="{{#if parentId}}is-reply{{/if}}")
     +userAvatar(userId=userId)
     p.comment-desc
       span.comment-member
         +memberName(user=user)
 
+      if parentComment
+        .comment-in-reply-to
+          span.comment-in-reply-to-label {{_ 'comment-in-reply-to'}}:
+          span.comment-in-reply-to-text
+            +viewer
+              = parentComment.text
+
       +inlinedForm(classNames='js-edit-comment')
-        +editor(autofocus=true)
+        +editor(autofocus=true labelKey="comment")
           = text
         .edit-controls
-          button.primary(type="submit") {{_ 'edit'}}
+          button.primary(type="submit" title="{{_ 'edit'}}" aria-label="{{_ 'edit'}}")
+            i.fa.fa-pencil-square-o(aria-hidden="true")
           a.js-close-inlined-form(title="{{_ 'close' }}")
             i.fa.fa-times-thin
       else
@@ -32,15 +52,31 @@ template(name="comment")
           +viewer
             = text
         +commentReactions(reactions=reactions commentId=_id)
-        span(title=createdAt).comment-meta {{ displayDate createdAt }}
-          if($eq currentUser._id userId)
-            +editOrDeleteComment
-          else if currentUser.isBoardAdmin
+        span(title=createdAt).comment-meta
+          //- Issue #4757: the timestamp is a real permalink (card URL +
+          //- #comment-<id>) so a normal click navigates/scrolls/highlights,
+          //- and right-click - copy link address works too. The small icon
+          //- beside it copies the same URL to the clipboard explicitly,
+          //- reusing the copy-link pattern already used for cards/lists/
+          //- swimlanes (client/lib/utils.js copyTextToClipboard).
+          a.js-comment-permalink(href="{{ commentPermalink }}") {{ displayDate createdAt }}
+          a.js-copy-comment-link(title="{{_ 'copy-link-to-clipboard'}}")
+            i.fa.fa-link
+          span.copied-tooltip {{_ 'copied'}}
+          if currentUser.isBoardMember
+            = ' - '
+            a.js-reply-comment {{_ "comment-reply"}}
+            //- Action items, Show on Card (docs/Features/Cards/Action-Items.md).
+            if actionItemsOf this
+              = ' - '
+              a.js-comment-action-items {{_ "action-items-create"}}
+          if canEditThisComment
             +editOrDeleteComment
 
 template(name="editOrDeleteComment")
   = ' - '
-  a.js-open-inlined-form {{_ "edit"}}
+  a.js-open-inlined-form(title="{{_ 'edit'}}" aria-label="{{_ 'edit'}}")
+    i.fa.fa-pencil-square-o(aria-hidden="true")
   = ' - '
   a.js-delete-comment {{_ "delete"}}
 
@@ -54,15 +90,12 @@ template(name="commentReactions")
       span.reaction(class="{{#if isSelected reaction.userIds}}selected{{/if}}" data-codepoint="#{reaction.reactionCodepoint}" title="{{userNames reaction.userIds}}")
         span.reaction-codepoint !{reaction.reactionCodepoint}
         span.reaction-count #{reaction.userIds.length}
-    if (currentUser.isBoardMember)
-      unless currentUser.isReadOnly
-        unless currentUser.isReadAssignedOnly
-          a.open-comment-reaction-popup(title="{{_ 'addReactionPopup-title'}}")
-            span(title="{{_ 'reaction' }}") 😀
-            span(title="{{_ 'add' }}") ➕
+    if canComment
+      a.open-comment-reaction-popup(title="{{_ 'addReactionPopup-title'}}")
+        i.fa.fa-smile-o(title="{{_ 'addReactionPopup-title' }}")
+            i.fa.fa-plus(title="{{_ 'add' }}")
 
 template(name="addReactionPopup")
   .reactions-popup
     each codepoint in codepoints
       span.add-comment-reaction(data-codepoint="#{codepoint}") !{codepoint}
-

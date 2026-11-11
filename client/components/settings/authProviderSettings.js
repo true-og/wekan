@@ -1,0 +1,150 @@
+import { Meteor } from 'meteor/meteor';
+import { Template } from 'meteor/templating';
+import { ReactiveVar } from 'meteor/reactive-var';
+import { TAPi18n } from '/imports/i18n';
+import './authProviderSettings.jade';
+
+// `section` set: the catalog methods take the section name first
+// (getAuthConfigSources / saveAuthConfigSettings, server/lib/authConfig.js).
+// Unset: a method of its own, as SAML has.
+function callWithSection(data, method, ...args) {
+  return data.section ? Meteor.call(method, data.section, ...args) : Meteor.call(method, ...args);
+}
+
+Template.authProviderSettings.onCreated(function () {
+  this.loaded = new ReactiveVar(false);
+  this.busy = new ReactiveVar(false);
+  this.error = new ReactiveVar('');
+  this.config = new ReactiveVar({});
+  this.refresh = () => callWithSection(this.data, this.data.loadMethod, (error, result) => {
+    if (error) this.error.set(error.reason || TAPi18n.__('error'));
+    else { this.config.set(result); this.loaded.set(true); }
+  });
+  this.refresh();
+});
+Template.authProviderSettings.helpers({
+  loaded() { return Template.instance().loaded; },
+  busy() { return Template.instance().busy; },
+  error() { return Template.instance().error; },
+  // A section only the environment sets (models/lib/authConfigCatalog.js).
+  sectionEnvOnly() { return (this.fields || []).some(field => field.envOnly); },
+  fields() {
+    const { overrides = {}, sources = {} } = Template.instance().config.get();
+    return this.fields.map(field => {
+      const value = overrides[field.key];
+      const source = sources[field.key] || {};
+      const secretField = field.type === 'secret';
+      // A choice is shown by its translated name when the catalog gives one.
+      const choiceLabel = choice => (field.choiceLabelKeys && field.choiceLabelKeys[choice]
+        ? TAPi18n.__(field.choiceLabelKeys[choice]) : choice);
+      const effectiveRaw = String(source.value ?? '');
+      return { ...field, value: value ?? '',
+        effective: field.type === 'choice' ? choiceLabel(effectiveRaw)
+          : field.type === 'boolean' && ['true', 'false'].includes(effectiveRaw)
+            ? TAPi18n.__(effectiveRaw === 'true' ? 'yes' : 'no') : effectiveRaw,
+        booleanField: field.type === 'boolean', multiline: field.type === 'textarea',
+        choiceField: field.type === 'choice', numberField: field.type === 'number',
+        secretField,
+        // The server reports a secret only as { source, hasValue }.
+        secretStoredHere: secretField && source.source === 'admin',
+        // A secret's line names where it comes from - the Admin Panel, the
+        // variable, or the file <NAME>_FILE points at - and says so when that
+        // file cannot be read; the server never sends the value or the path.
+        secretStatus: !secretField ? ''
+          : source.source === 'file-error' ? `${field.fileVar}: ${TAPi18n.__('error')}`
+          : !source.hasValue ? TAPi18n.__('unset-color')
+          : `${TAPi18n.__('password')}: ${source.source === 'admin' ? TAPi18n.__('admin-panel')
+            : source.source === 'file' ? field.fileVar : field.envVar}`,
+        choiceOptions: (field.choices || []).map(choice => ({ value: choice, label: choiceLabel(choice), selected: value === choice })),
+        inherit: value === undefined, enabled: value === true, disabled: value === false,
+        sourceLabel: source.source === 'admin' ? TAPi18n.__('admin-panel')
+          : source.source === 'env' ? field.envVar
+          // SAML fields left at Default follow the identity-provider profile.
+          : source.source === 'profile' ? 'SAML_IDP_PROFILE' : TAPi18n.__('default') };
+    });
+  },
+  urls() { return Object.values(Template.instance().config.get().urls || {}).map(url => ({ url })); },
+});
+Template.authProviderSettings.events({
+  'submit .js-auth-provider-settings'(event, instance) {
+    event.preventDefault();
+    if (instance.busy.get()) return;
+    const input = {};
+    for (const field of instance.findAll('.js-auth-config-field')) {
+      input[field.dataset.key] = field.dataset.boolean && field.value !== ''
+        ? field.value === 'true' : field.value;
+    }
+    const clearSecrets = instance.findAll('.js-auth-secret-clear')
+      .filter(box => box.checked).map(box => box.dataset.key);
+    if (clearSecrets.length) input.clearSecrets = clearSecrets;
+    instance.busy.set(true);
+    instance.error.set('');
+    callWithSection(instance.data, instance.data.saveMethod, input, error => {
+      instance.busy.set(false);
+      // A typed secret is never kept in the page after it was sent.
+      for (const field of instance.findAll('input[type="password"].js-auth-config-field')) field.value = '';
+      if (error) instance.error.set(error.reason || TAPi18n.__('error'));
+      else instance.refresh();
+    });
+  },
+});
+
+Template.ldapTestConnection.onCreated(function () {
+  this.result = new ReactiveVar('');
+  this.success = new ReactiveVar(true);
+  this.syncing = new ReactiveVar(false);
+  this.syncResult = new ReactiveVar('');
+  this.syncSuccess = new ReactiveVar(true);
+});
+Template.ldapTestConnection.helpers({
+  result() { return Template.instance().result; },
+  syncing() { return Template.instance().syncing; },
+  syncResult() { return Template.instance().syncResult; },
+  syncResultClass() {
+    return Template.instance().syncSuccess.get() ? 'ldap-test-success' : 'ldap-test-error';
+  },
+  resultClass() {
+    return Template.instance().success.get() ? 'ldap-test-success' : 'ldap-test-error';
+  },
+});
+Template.ldapTestConnection.events({
+  // The admin-only ldap_sync_now method (packages/wekan-ldap/server/syncUser.js):
+  // the background sync, once, now.
+  'click button.js-ldap-sync-now'(event, tpl) {
+    event.preventDefault();
+    if (tpl.syncing.get()) return;
+    tpl.syncing.set(true);
+    tpl.syncResult.set('...');
+    Meteor.call('ldap_sync_now', (err) => {
+      tpl.syncing.set(false);
+      tpl.syncSuccess.set(!err);
+      if (!err) tpl.syncResult.set(TAPi18n.__('ldap-sync-now-done'));
+      else if (err.error === 'LDAP_sync_nothing_to_do') tpl.syncResult.set(TAPi18n.__('ldap-sync-now-nothing'));
+      else {
+        tpl.syncResult.set(TAPi18n.__('ldap-sync-now-error', {
+          sprintf: [err.reason || err.error || err.message || ''],
+        }));
+      }
+    });
+  },
+  // "It should be possible to test at admin panel, does for example LDAP login
+  // work": the admin-gated ldap_test_connection method
+  // (packages/wekan-ldap/server/testConnection.js) against whichever value is
+  // in effect, Admin Panel or environment variable.
+  'click button.js-ldap-test-connection'(event, tpl) {
+    tpl.result.set('...');
+    Meteor.call('ldap_test_connection', (err) => {
+      if (err) {
+        tpl.success.set(false);
+        tpl.result.set(
+          TAPi18n.__('ldap-test-connection-error', {
+            sprintf: [err.reason || err.message || ''],
+          }),
+        );
+      } else {
+        tpl.success.set(true);
+        tpl.result.set(TAPi18n.__('ldap-test-connection-success'));
+      }
+    });
+  },
+});

@@ -1,11 +1,216 @@
 import { ReactiveCache } from '/imports/reactiveCache';
+import { setSortableOptions } from '/client/lib/sortableOptions';
 import { TAPi18n } from '/imports/i18n';
 import { EscapeActions } from '/client/lib/escapeActions';
 import { MultiSelection } from '/client/lib/multiSelection';
 import { Utils } from '/client/lib/utils';
-require('/client/lib/jquery-ui.js')
+import {
+  suspendBoardDragscroll,
+  resumeBoardDragscroll,
+} from '/client/lib/boardDragscroll';
+import {
+  createCardDropPreview,
+  retireCardDropPreview,
+} from '/client/lib/cardDropPreview';
+import Cards from '/models/cards';
+import {
+  isDegenerateSortGap,
+  computeRepairedDropIndex,
+} from '/models/lib/cardSortRepair';
+require('/client/lib/jquery-ui.js');
 
 const { calculateIndex } = Utils;
+
+// ---------------------------------------------------------------------------
+// #6409 List width: a single, simple model.
+//
+//   * Each list has ONE fixed width.
+//   * SHARED mode (board default): width lives in `lists.width` and is the same
+//     for everyone; only members with board write access can change it.
+//   * PERSONAL mode (board setting `allowsPersonalListWidth`): each user keeps
+//     their own width in their profile (or localStorage when not logged in),
+//     falling back to the shared width and then the default.
+//
+// The old per-list "min width / max width / automatic" knobs are gone — the
+// rendered width is now a single hard value (see list.jade).
+//
+// #5659: the default/minimum width and the resolution order live in ONE
+// Meteor-free module shared with models/users.js, so every path (member,
+// anonymous public-board visitor, fixed mode) falls back to the SAME default
+// and all lists render the same width when nothing is customized.
+// ---------------------------------------------------------------------------
+import {
+  DEFAULT_LIST_WIDTH,
+  MIN_LIST_WIDTH,
+  normalizeListWidth,
+  resolveListWidth,
+} from '/models/lib/listWidth';
+import {
+  isFixedListWidth,
+  fixedListWidthValue,
+  setAnonFixedListWidth,
+} from '/client/lib/fixedListWidth';
+
+function isPersonalListWidth(boardId) {
+  const board = ReactiveCache.getBoard(boardId);
+  return !!(board && board.allowsPersonalListWidth);
+}
+
+// #6409 Auto-width follows the same scope as fixed widths:
+//   * personal mode -> the user's own profile.autoWidthBoards
+//   * shared mode   -> the board's `autoWidth` (same for everyone)
+function effectiveAutoWidth(boardId) {
+  if (isPersonalListWidth(boardId)) {
+    const user = ReactiveCache.getCurrentUser();
+    return !!(user && user.isAutoWidth(boardId));
+  }
+  const board = ReactiveCache.getBoard(boardId);
+  return !!(board && board.autoWidth);
+}
+
+function readAnonListWidth(boardId, listId) {
+  try {
+    const stored = localStorage.getItem('wekan-list-widths');
+    if (stored) {
+      const widths = JSON.parse(stored);
+      const w = widths[boardId] && widths[boardId][listId];
+      if (typeof w === 'number' && w >= MIN_LIST_WIDTH) return w;
+    }
+  } catch (e) {
+    console.warn('Error reading list width from localStorage:', e);
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// #5729 Fixed (same) width for all lists.
+//
+// A per-viewer, per-board toggle that makes EVERY list render at a single
+// shared value, and makes dragging any list update that one value (so all lists
+// change together). Stored exactly like the personal width:
+//   * logged-in -> profile.fixedListWidthBoards / profile.fixedListWidths
+//   * anonymous  -> localStorage (mirrors readAnonListWidth)
+// The helpers are in client/lib/fixedListWidth.js, shared with the list
+// header menu that turns the mode on.
+// ---------------------------------------------------------------------------
+// #6680: the BOARD-WIDE equivalent of isFixedListWidth/fixedListWidthValue
+// above - same "every list renders at one shared value" mode, but as an
+// admin-set board setting (toggled from the top header) instead of each
+// viewer's own personal choice. Takes priority over the personal one below:
+// an admin turning this on should not be silently overridden by a member's
+// earlier personal preference.
+function isBoardWideFixedListWidth(boardId) {
+  const board = ReactiveCache.getBoard(boardId);
+  return !!(board && board.getSameWidthForAllLists());
+}
+
+function boardWideFixedListWidthValue(boardId) {
+  const board = ReactiveCache.getBoard(boardId);
+  return normalizeListWidth(board && board.getSameWidthForAllListsValue());
+}
+
+function effectiveListWidth(list) {
+  if (!list) return DEFAULT_LIST_WIDTH;
+  // #5659: all inputs are gathered here, but the fallback order and the ONE
+  // default width live in models/lib/listWidth.js (shared + unit tested).
+  const boardWideFixed = isBoardWideFixedListWidth(list.boardId);
+  const fixedEnabled = boardWideFixed || isFixedListWidth(list.boardId);
+  const personalMode = isPersonalListWidth(list.boardId);
+  let personalWidth = null;
+  if (personalMode) {
+    const user = ReactiveCache.getCurrentUser();
+    if (user) {
+      const widths = user.getListWidths();
+      personalWidth = widths[list.boardId] && widths[list.boardId][list._id];
+    } else {
+      personalWidth = readAnonListWidth(list.boardId, list._id);
+    }
+  }
+  let fixedWidth = null;
+  if (boardWideFixed) {
+    fixedWidth = boardWideFixedListWidthValue(list.boardId);
+  } else if (fixedEnabled) {
+    fixedWidth = fixedListWidthValue(list.boardId);
+  }
+  return resolveListWidth({
+    // #5729 In fixed width mode every list renders at the single shared value.
+    fixedEnabled,
+    fixedWidth,
+    sharedWidth: list.width,
+    personalMode,
+    personalWidth,
+  });
+}
+
+// Can the current user change THIS list's width by dragging?
+//  - never while the board/list is in auto-width mode (the width is computed)
+//  - personal mode: always (it only affects their own view)
+//  - shared mode: only with board write access
+function canResizeList(list) {
+  if (!list) return false;
+  // #6680: a board-wide lock, toggled from the top header, overrides every
+  // other rule below - nobody drags a list width while it is on, regardless
+  // of personal/shared mode or board write access.
+  const board = ReactiveCache.getBoard(list.boardId);
+  if (board && board.getListWidthResizeLocked()) return false;
+  if (effectiveAutoWidth(list.boardId)) return false;
+  // #6680: board-wide fixed width - any viewer with board write access may
+  // drag-resize (it changes the one value everyone sees, so a read-only
+  // visitor should not be the one setting it).
+  if (isBoardWideFixedListWidth(list.boardId)) return Utils.canModifyBoard();
+  // #5729 Fixed width is the viewer's own per-board setting, so any viewer
+  // (logged-in or anonymous) may drag-resize; the change applies to all lists.
+  if (isFixedListWidth(list.boardId)) return true;
+  if (isPersonalListWidth(list.boardId)) return true;
+  return Utils.canModifyBoard();
+}
+
+// Persist a new width to the place that matches the current board mode.
+function saveListWidth(list, width) {
+  if (!list) return;
+  const boardId = list.boardId;
+  const listId = list._id;
+  const user = ReactiveCache.getCurrentUser();
+  // #6680: board-wide fixed width persists to the BOARD (sole modified field,
+  // allowed for any board member with write access - server/permissions/boards.js).
+  if (isBoardWideFixedListWidth(boardId)) {
+    const board = ReactiveCache.getBoard(boardId);
+    if (board) board.setSameWidthForAllListsValue(width);
+    return;
+  }
+  // #5729 In fixed width mode, persist to the single per-board value instead of
+  // the per-list width, so EVERY list re-renders at the new width.
+  if (isFixedListWidth(boardId)) {
+    if (user) {
+      Meteor.call('setFixedListWidth', boardId, width, (error) => {
+        if (error) console.error('Error saving fixed list width:', error);
+      });
+    } else {
+      setAnonFixedListWidth(boardId, width);
+    }
+    return;
+  }
+  if (isPersonalListWidth(boardId)) {
+    if (user) {
+      Meteor.call('applyListWidthToStorage', boardId, listId, width, width);
+    } else {
+      try {
+        const stored = localStorage.getItem('wekan-list-widths');
+        const widths = stored ? JSON.parse(stored) : {};
+        if (!widths[boardId]) widths[boardId] = {};
+        widths[boardId][listId] = width;
+        localStorage.setItem('wekan-list-widths', JSON.stringify(widths));
+      } catch (e) {
+        console.warn('Error saving personal list width to localStorage:', e);
+      }
+    }
+  } else if (user) {
+    // Shared width: server also enforces board membership.
+    Meteor.call('applyListWidth', boardId, listId, width, width, (error) => {
+      if (error) console.error('Error saving shared list width:', error);
+    });
+  }
+}
 
 Template.list.onCreated(function () {
   this.newCardFormIsVisible = new ReactiveVar(true);
@@ -27,16 +232,24 @@ Template.list.onCreated(function () {
 // callback, we basically solve all issues related to reactive updates. A
 // comment below provides further details.
 Template.list.onRendered(function () {
-  const boardBodyEl = this.firstNode?.parentElement?.closest?.('.board-body') ||
-    document.querySelector('.board-body');
-  const boardView = boardBodyEl && Blaze.getView(boardBodyEl, 'Template.boardBody');
-  const boardComponent = boardView?.templateInstance?.();
-
-  // Initialize list resize functionality immediately
   this.initializeListResize();
+});
+
+// #6705: collapse removes listBody but keeps the parent list alive. Bind card
+// widgets and their reactive work to the body so expansion initializes the new
+// .js-minicards element, including lists that were collapsed on page load.
+Template.listBody.onRendered(function () {
+  const boardBodyEl =
+    this.firstNode?.parentElement?.closest?.('.board-body') ||
+    document.querySelector('.board-body');
+  const boardView =
+    boardBodyEl && Blaze.getView(boardBodyEl, 'Template.boardBody');
+  const boardComponent = boardView?.templateInstance?.();
 
   const itemsSelector = '.js-minicard:not(.placeholder, .js-card-composer)';
   const $cards = this.$('.js-minicards');
+  this.cardDragTargets = $cards;
+  this.cardDragDestroyed = false;
 
   // Destroy any existing sortable before re-initializing. Without this, a
   // re-render of the list (e.g. when a Card Details panel opens) binds a SECOND
@@ -49,6 +262,10 @@ Template.list.onRendered(function () {
 
   $cards.sortable({
     connectWith: '.js-minicards:not(.js-list-full)',
+    // The former inline-title form selector remains unnecessary while direct
+    // minicard title editing is disabled. Form controls elsewhere still must
+    // never arm the sortable.
+    cancel: 'input, textarea, button, select, option',
     tolerance: 'pointer',
     appendTo: '.board-canvas',
     helper(evt, item) {
@@ -79,18 +296,112 @@ Template.list.onRendered(function () {
       ui.placeholder.height(ui.helper.height());
       EscapeActions.executeUpTo('popup-close');
       if (boardComponent) boardComponent.setIsDragging(true);
+      // #6558: the same pointer must not ALSO pan the lane and the canvas -
+      // that is what made a card drag scroll the list, scroll the board, and
+      // move the card all at once. The `sort` handler below does the one
+      // auto-scroll a drag needs, at the edges.
+      suspendBoardDragscroll();
     },
     stop(evt, ui) {
+      // #6558: panning is available again the moment the drag is over.
+      resumeBoardDragscroll();
+
+      // #766: a card dropped precisely on another list's HEADER (rather than
+      // its card-body area, which is the only thing `connectWith` above
+      // covers) lands outside every connected sortable container, so jQuery
+      // UI resolves no new drop target and the card silently snaps back to
+      // its source list. Detect that case from the mouseup event's own
+      // coordinates - `evt` here is the native mouseup - and, when the
+      // pointer is over a `.js-list-header`, treat it exactly like a drop at
+      // the TOP of that list's card body: same neighbour-based index
+      // calculation and the same card.move() mutation below, just resolved
+      // against the header's list instead of `ui.item`'s (unchanged) DOM
+      // position.
+      let headerDropList = null;
+      if (typeof evt.clientX === 'number' && typeof evt.clientY === 'number') {
+        const pointEl = document.elementFromPoint(evt.clientX, evt.clientY);
+        const headerEl = pointEl && pointEl.closest('.js-list-header');
+        headerDropList = headerEl ? headerEl.closest('.list') : null;
+      }
+
       // To attribute the new index number, we need to get the DOM element
       // of the previous and the following card -- if any.
-      const prevCardDom = ui.item.prev('.js-minicard').get(0);
-      const nextCardDom = ui.item.next('.js-minicard').get(0);
+      let prevCardDom;
+      let nextCardDom;
+      let headerDropContainer = null;
+      if (headerDropList) {
+        headerDropContainer = headerDropList.querySelector('.js-minicards');
+        prevCardDom = null;
+        nextCardDom = headerDropContainer
+          ? headerDropContainer.querySelector(itemsSelector)
+          : null;
+      } else {
+        prevCardDom = ui.item.prev('.js-minicard').get(0);
+        nextCardDom = ui.item.next('.js-minicard').get(0);
+      }
       const nCards = MultiSelection.isActive() ? MultiSelection.count() : 1;
-      const sortIndex = calculateIndex(prevCardDom, nextCardDom, nCards);
-      const listData = Blaze.getData(ui.item.parents('.list').get(0));
+      let sortIndex = calculateIndex(prevCardDom, nextCardDom, nCards);
+
+      // #3826: cards created by the "add subtask" flow were all inserted with
+      // a constant sort of -1, so a list full of subtask cards contains only
+      // ties. No number lies strictly between two equal sorts, so
+      // calculateIndex returns base === neighbour sort with increment 0: the
+      // write is then discarded by Card.move()'s no-op guard and the card
+      // snaps back (and a multi-selection drop would give every selected card
+      // the SAME sort, losing their relative order). When the drop landed in
+      // such a degenerate gap, capture the target list's sibling cards in
+      // their current visual order (before sortable('cancel') reshuffles the
+      // DOM) so their sorts can be repaired below.
+      const prevCardData = prevCardDom ? Blaze.getData(prevCardDom) : null;
+      const nextCardData = nextCardDom ? Blaze.getData(nextCardDom) : null;
+      let orderedSiblingCards = null;
+      if (
+        isDegenerateSortGap(
+          prevCardData ? prevCardData.sort : null,
+          nextCardData ? nextCardData.sort : null,
+        )
+      ) {
+        orderedSiblingCards = $(headerDropContainer || ui.item.parent().get(0))
+          .children(itemsSelector)
+          .not(ui.item)
+          .toArray()
+          .map((el) => Blaze.getData(el))
+          .filter(Boolean);
+      }
+      const listData = headerDropList
+        ? Blaze.getData(headerDropList)
+        : Blaze.getData(ui.item.parents('.list').get(0));
       const listId = listData._id;
+      const targetContainer = headerDropContainer || ui.item.parent().get(0);
+      const cardDomElement = ui.item.get(0);
+      const droppedCard = Blaze.getData(cardDomElement);
+      // #6430: sortable('cancel') is still necessary to keep jQuery UI from
+      // fighting Blaze, but it visibly returns the card to its source until a
+      // large board finishes its reactive flush. Leave a presentation-only
+      // clone in the drop slot until the real reactive card arrives.
+      const dropPreview = !MultiSelection.isActive()
+        ? createCardDropPreview(cardDomElement, targetContainer)
+        : null;
       const currentBoard = Utils.getCurrentBoard();
-      const defaultSwimlaneId = currentBoard.getDefaultSwimline()._id;
+      // #3298: the drop target list may belong to a DIFFERENT board than the
+      // one the page is currently routed to. The Bigboard view (#4223) stacks
+      // several boards' lists on one page, and the cards sortable's
+      // `connectWith: '.js-minicards:not(.js-list-full)'` above already
+      // connects across ALL of them (list-level dragging is the one scoped to
+      // stay within a board, via connectWithSelector() in swimlanes.js), so a
+      // card can legitimately be dropped into a list owned by another board
+      // entirely. Use the DESTINATION list's own boardId - already available
+      // on listData - rather than the route's current board, so the move
+      // lands on the right board when it crosses one. currentBoard is still
+      // used below for the CURRENT page's view-mode checks (swimlanes view /
+      // templates board), which describe how the page being dragged IN is
+      // laid out, not which board owns the drop target.
+      const targetBoardId = listData.boardId || currentBoard._id;
+      const targetBoard =
+        targetBoardId === currentBoard._id
+          ? currentBoard
+          : ReactiveCache.getBoard(targetBoardId);
+      const defaultSwimlaneId = targetBoard.getDefaultSwimline()._id;
       let targetSwimlaneId = null;
 
       // only set a new swimelane ID if the swimlanes view is active
@@ -98,8 +409,10 @@ Template.list.onRendered(function () {
         Utils.boardView() === 'board-view-swimlanes' ||
         currentBoard.isTemplatesBoard()
       ) {
-        targetSwimlaneId = Blaze.getData(ui.item.parents('.swimlane').get(0))
-          ._id;
+        const swimlaneSourceEl = headerDropList || ui.item.parents('.list').get(0);
+        targetSwimlaneId = Blaze.getData(
+          $(swimlaneSourceEl).parents('.swimlane').get(0),
+        )._id;
       } else if (listData.swimlaneId) {
         targetSwimlaneId = listData.swimlaneId;
       }
@@ -113,79 +426,187 @@ Template.list.onRendered(function () {
       // Blaze with the below query.
       $cards.sortable('cancel');
 
+      // #3826: the drop landed between two cards whose sorts do not strictly
+      // increase (duplicate -1 sorts from subtask creation, or legacy data).
+      // Repair the sibling sorts with the minimal bumps that make the visible
+      // order strictly increasing, then recompute the drop index from the
+      // repaired neighbours: base now falls strictly between them and the
+      // increment is strictly positive (distinct sorts for a multi-selection).
+      if (orderedSiblingCards && prevCardData && nextCardData) {
+        const repairedDrop = computeRepairedDropIndex(
+          orderedSiblingCards,
+          prevCardData,
+          nextCardData,
+          nCards,
+        );
+        repairedDrop.updates.forEach((u) => {
+          Cards.update(u._id, { $set: { sort: u.sort } });
+        });
+        sortIndex = {
+          base: repairedDrop.base,
+          increment: repairedDrop.increment,
+        };
+      }
+
       if (MultiSelection.isActive()) {
-        ReactiveCache.getCards(MultiSelection.getMongoSelector(), { sort: ['sort'] }).forEach((card, i) => {
+        ReactiveCache.getCards(MultiSelection.getMongoSelector(), {
+          sort: ['sort'],
+        }).forEach((card, i) => {
           const newSwimlaneId = targetSwimlaneId
             ? targetSwimlaneId
             : card.swimlaneId || defaultSwimlaneId;
           card.move(
-            currentBoard._id,
+            targetBoardId,
             newSwimlaneId,
             listId,
             sortIndex.base + i * sortIndex.increment,
           );
         });
       } else {
-        const cardDomElement = ui.item.get(0);
-        const card = Blaze.getData(cardDomElement);
+        const card = droppedCard;
         const newSwimlaneId = targetSwimlaneId
           ? targetSwimlaneId
           : card.swimlaneId || defaultSwimlaneId;
-        card.move(currentBoard._id, newSwimlaneId, listId, sortIndex.base);
+        const moveResult = card.move(
+          targetBoardId,
+          newSwimlaneId,
+          listId,
+          sortIndex.base,
+        );
+        // #6430: cardDomElement is back at its source after sortable('cancel');
+        // it is hidden until Blaze moves the card, so the card is never shown
+        // in both lists at once.
+        retireCardDropPreview(
+          dropPreview,
+          card._id,
+          targetContainer,
+          moveResult,
+          cardDomElement,
+        );
       }
       if (boardComponent) boardComponent.setIsDragging(false);
     },
     sort(event, ui) {
-      const $boardCanvas = $('.board-canvas');
-      const boardCanvas = $boardCanvas[0];
-
-      if (event.pageX < 10) { // scroll to the left
-        boardCanvas.scrollLeft -= 15;
-        ui.helper[0].offsetLeft -= 15;
+      // #443: the HORIZONTAL scroller is the .js-lists lane (.swimlane has
+      // overflow: auto), NOT .board-canvas, which only overflows vertically —
+      // the old code compared against a scrollLeftMax of 0 and never fired, so
+      // dragging a card toward an off-screen list never auto-scrolled the board.
+      const {
+        computeEdgeScroll,
+        findLaneUnderPointer,
+      } = require('/imports/lib/boardAutoScroll');
+      let scrolled = false;
+      const lanes = document.querySelectorAll('.js-lists');
+      const rects = Array.prototype.map.call(lanes, (el) =>
+        el.getBoundingClientRect(),
+      );
+      const laneIndex = findLaneUnderPointer(
+        rects,
+        event.clientX,
+        event.clientY,
+      );
+      if (laneIndex !== -1) {
+        const nextLeft = computeEdgeScroll({
+          pointer: event.clientX,
+          lowEdge: rects[laneIndex].left,
+          highEdge: rects[laneIndex].right,
+          scrollPos: lanes[laneIndex].scrollLeft,
+          scrollSize: lanes[laneIndex].scrollWidth,
+          clientSize: lanes[laneIndex].clientWidth,
+        });
+        if (nextLeft !== null) {
+          lanes[laneIndex].scrollLeft = nextLeft;
+          scrolled = true;
+        }
       }
-      if (
-        event.pageX > boardCanvas.offsetWidth - 10 &&
-        boardCanvas.scrollLeft < $boardCanvas.data('scrollLeftMax') // don't scroll more than possible
-      ) { // scroll to the right
-        boardCanvas.scrollLeft += 15;
+      // #6584: VERTICALLY, the thing to scroll is the LIST the pointer is over,
+      // not the board canvas. `.list-body` is `overflow-y: scroll` (list.css) and
+      // is what holds the cards; `.board-canvas` is `overflow-y: auto` and holds
+      // the swimlanes. Scrolling the canvas moves the whole board, which is what
+      // the report describes: "The whole Page/Site scrolls down and not the Line".
+      //
+      // It only showed up DOWNWARDS, and the asymmetry is the tell. Dragging up,
+      // the canvas is usually already at scrollTop 0, so computeEdgeScroll
+      // returned null, nothing here fired, and jQuery UI's own `scroll` option -
+      // which acts on the placeholder's scrollParent, i.e. the list body - scrolled
+      // the list, exactly as expected. Dragging down, the canvas nearly always HAS
+      // room, so this fired first and scrolled the board instead of the list.
+      //
+      // The canvas is still scrolled, but only once the list under the pointer
+      // cannot go further that way - so a drag down a long list scrolls the list,
+      // and a drag past the end of it moves on to the board. Same shape as the
+      // horizontal case above, which already picks the lane under the pointer.
+      let scrolledList = false;
+      const listBodies = document.querySelectorAll('.list-body');
+      const listRects = Array.prototype.map.call(listBodies, (el) =>
+        el.getBoundingClientRect(),
+      );
+      // findLaneUnderPointer is a plain rectangle hit-test; the name is about
+      // where it was first used, not what it can be given.
+      const listIndex = findLaneUnderPointer(
+        listRects,
+        event.clientX,
+        event.clientY,
+      );
+      if (listIndex !== -1) {
+        const nextListTop = computeEdgeScroll({
+          pointer: event.clientY,
+          lowEdge: listRects[listIndex].top,
+          highEdge: listRects[listIndex].bottom,
+          scrollPos: listBodies[listIndex].scrollTop,
+          scrollSize: listBodies[listIndex].scrollHeight,
+          clientSize: listBodies[listIndex].clientHeight,
+        });
+        if (nextListTop !== null) {
+          listBodies[listIndex].scrollTop = nextListTop;
+          scrolled = true;
+          scrolledList = true;
+        }
       }
-      if (
-        event.pageY > boardCanvas.offsetHeight - 10 &&
-        event.pageY + boardCanvas.scrollTop < $boardCanvas.data('scrollTopMax') // don't scroll more than possible
-      ) { // scroll to the bottom
-        boardCanvas.scrollTop += 15;
+      const canvas = scrolledList
+        ? null
+        : document.querySelector('.board-canvas');
+      if (canvas) {
+        const crect = canvas.getBoundingClientRect();
+        const nextTop = computeEdgeScroll({
+          pointer: event.clientY,
+          lowEdge: crect.top,
+          highEdge: crect.bottom,
+          scrollPos: canvas.scrollTop,
+          scrollSize: canvas.scrollHeight,
+          clientSize: canvas.clientHeight,
+        });
+        if (nextTop !== null) {
+          canvas.scrollTop = nextTop;
+          scrolled = true;
+        }
       }
-      if (event.pageY < 10) { // scroll to the top
-        boardCanvas.scrollTop -= 15;
+      // #6477: after an auto-scroll, jQuery UI sortable's cached container/item
+      // geometry is STALE — it snapshots positions at drag start and on its own
+      // placeholder moves, never on our manual scroll here. With long/overflowing
+      // lists (exactly what triggers auto-scroll) the drop then resolved against a
+      // stale map and parked the placeholder in the WRONG swimlane's copy of the
+      // list, so a card dragged between swimlanes snapped back into its source
+      // swimlane (the stop handler's ui.item.parents('.swimlane') faithfully
+      // persisted it). Re-cache positions so the placeholder and drop resolve
+      // against the scrolled layout. Complements the DOM-mutation refresh in
+      // listBody.js (#2769), which does not fire on scroll.
+      if (scrolled) {
+        $cards.sortable('refreshPositions');
       }
-    },
-    activate(event, ui) {
-      const $boardCanvas = $('.board-canvas');
-      const boardCanvas = $boardCanvas[0];
-      // scrollTopMax and scrollLeftMax only available at Firefox (https://developer.mozilla.org/en-US/docs/Web/API/Element/scrollTopMax)
-      // https://www.it-swarm.com.de/de/javascript/so-erhalten-sie-den-maximalen-dokument-scrolltop-wert/1069126844/
-      $boardCanvas.data('scrollTopMax', boardCanvas.scrollHeight - boardCanvas.clientTop);
-      // https://stackoverflow.com/questions/5138373/how-do-i-get-the-max-value-of-scrollleft/5704386#5704386
-      $boardCanvas.data('scrollLeftMax', boardCanvas.scrollWidth - boardCanvas.clientWidth);
     },
   });
 
   this.autorun(() => {
     if ($cards.data('uiSortable') || $cards.data('sortable')) {
-      if (Utils.isTouchScreenOrShowDesktopDragHandles()) {
-        $cards.sortable('option', 'handle', '.handle');
-      } else {
-        $cards.sortable('option', 'handle', '.minicard');
-      }
-
-      $cards.sortable(
-        'option',
-        'disabled',
+      // #6745: only what changed - re-setting `handle` re-tags every card.
+      setSortableOptions($cards, {
+        handle: Utils.isTouchScreenOrShowDesktopDragHandles() ? '.handle' : '.minicard',
         // Disable drag-dropping when user is not member
-        !Utils.canModifyBoard(),
+        disabled: !Utils.canModifyBoard() || !Utils.canDragBoardObject('card'),
         // Not disable drag-dropping while in multi-selection mode
         // MultiSelection.isActive() || !Utils.canModifyBoard(),
-      );
+      });
     }
   });
 
@@ -194,7 +615,15 @@ Template.list.onRendered(function () {
     const currentBoardId = Tracker.nonreactive(() => {
       return Session.get('currentBoard');
     });
+    // #1554: reactive dependency so newly added / re-rendered minicards are
+    // (re)initialized as droppable for label/member drags. The dependency
+    // (Cards.find(...).fetch()) was dropped in 7673c77c5, so the autorun ran
+    // ONCE per list render and cards added afterwards silently rejected
+    // sidebar label/member drops until the board was re-entered. Re-running
+    // .droppable() on initialized elements is an idempotent option refresh.
+    ReactiveCache.getCards({ boardId: currentBoardId });
     Tracker.afterFlush(() => {
+      if (this.cardDragDestroyed) return;
       $cards.find(itemsSelector).droppable({
         hoverClass: 'draggable-hover-card',
         accept: '.js-member,.js-label',
@@ -215,69 +644,94 @@ Template.list.onRendered(function () {
   });
 });
 
+Template.listBody.onDestroyed(function () {
+  this.cardDragDestroyed = true;
+  const $cards = this.cardDragTargets;
+  if ($cards && ($cards.data('uiSortable') || $cards.data('sortable'))) {
+    $cards.sortable('destroy');
+  }
+  this.cardDragTargets = null;
+});
+
+// A board-wide list (no swimlaneId of its own) renders once per swimlane in
+// Swimlanes view - the SAME list document, one row per swimlane - so its
+// collapse state must be resolved per-swimlane, or collapsing it in one
+// swimlane's row collapses every other swimlane's row of it too. Mirrors
+// listHeader.js's resolveContainerSwimlaneId exactly (#6660's fix for card
+// visibility, extended here to the collapse toggle).
+function resolveContainerSwimlaneId(list) {
+  if (!list || Utils.boardView() !== 'board-view-swimlanes') {
+    return undefined;
+  }
+  for (let depth = 1; depth <= 5; depth += 1) {
+    const candidate = Template.parentData(depth);
+    if (
+      candidate &&
+      candidate._id &&
+      candidate._id !== list._id &&
+      candidate.boardId === list.boardId
+    ) {
+      return candidate._id;
+    }
+  }
+  return undefined;
+}
+
+// The same resolution as resolveContainerSwimlaneId above, but usable from
+// initializeListResize's async/deferred code, where there is no active
+// Blaze render or event dispatch for Template.parentData() to read from
+// (that is exactly why this function already resolves `list` itself via
+// tpl.data/Blaze.getData instead of Template.currentData()). A View's
+// .parentView chain is a stored reference on the object, not a call-stack
+// snapshot, so it stays walkable at any time - the same idiom used by
+// client/components/gantt/ganttCard.js and cards/checklists.js.
+function resolveContainerSwimlaneIdFromView(view, list) {
+  if (!list || Utils.boardView() !== 'board-view-swimlanes') {
+    return undefined;
+  }
+  let current = view;
+  let depth = 0;
+  while (current && depth < 8) {
+    const inst = current.templateInstance && current.templateInstance();
+    const data = inst && inst.data;
+    if (data && data._id && data._id !== list._id && data.boardId === list.boardId) {
+      return data._id;
+    }
+    current = current.parentView;
+    depth += 1;
+  }
+  return undefined;
+}
+
 Template.list.helpers({
   listWidth() {
-    const user = ReactiveCache.getCurrentUser();
-    const list = Template.currentData();
-    if (!list) return 270; // Return default width if list is not available
-
-    if (user) {
-      // For logged-in users, get from user profile
-      return user.getListWidthFromStorage(list.boardId, list._id);
-    } else {
-      // For non-logged-in users, get from localStorage
-      try {
-        const stored = localStorage.getItem('wekan-list-widths');
-        if (stored) {
-          const widths = JSON.parse(stored);
-          if (widths[list.boardId] && widths[list.boardId][list._id]) {
-            return widths[list.boardId][list._id];
-          }
-        }
-      } catch (e) {
-        console.warn('Error reading list width from localStorage:', e);
-      }
-      return 270; // Return default width if not found
-    }
+    return effectiveListWidth(Template.currentData());
   },
 
-  listConstraint() {
-    const user = ReactiveCache.getCurrentUser();
-    const list = Template.currentData();
-    if (!list) return 550; // Return default constraint if list is not available
-
-    if (user) {
-      // For logged-in users, get from user profile
-      return user.getListConstraintFromStorage(list.boardId, list._id);
-    } else {
-      // For non-logged-in users, get from localStorage
-      try {
-        const stored = localStorage.getItem('wekan-list-constraints');
-        if (stored) {
-          const constraints = JSON.parse(stored);
-          if (constraints[list.boardId] && constraints[list.boardId][list._id]) {
-            return constraints[list.boardId][list._id];
-          }
-        }
-      } catch (e) {
-        console.warn('Error reading list constraint from localStorage:', e);
-      }
-      return 550; // Return default constraint if not found
-    }
+  // Whether to show the drag-resize handle for this list.
+  canResizeList() {
+    return canResizeList(Template.currentData());
   },
 
   autoWidth() {
-    const user = ReactiveCache.getCurrentUser();
     const list = Template.currentData();
-    if (!user) {
-      // For non-logged-in users, auto-width is disabled
-      return false;
-    }
-    return user.isAutoWidth(list.boardId);
+    return !!list && effectiveAutoWidth(list.boardId);
   },
 
   collapsed() {
-    return Utils.getListCollapseState(this);
+    return Utils.getListCollapseState(this, resolveContainerSwimlaneId(this));
+  },
+
+  // #3847: board-wide "sticky list headers" toggle (client/components/lists/
+  // listHeader.jade's listActionPopup, models/boards.js). Drives the CSS in
+  // list.css that pins .list-header to the top of the list's own card
+  // scroll container (.list-body, overflow-y: scroll) instead of it
+  // scrolling out of view with the cards.
+  stickyListHeaders() {
+    const list = Template.currentData();
+    const board = list && ReactiveCache.getBoard(list.boardId);
+    // #2805: the shared list header row is the sticky one, so it pins too.
+    return !!(board && (board.getStickyListHeaders() || (board.hasSharedListHeaders && board.hasSharedListHeaders())));
   },
 });
 
@@ -295,8 +749,9 @@ Template.list.onCreated(function () {
     }
     const $list = tpl.$('.js-list');
     const $resizeHandle = tpl.$('.js-list-resize-handle');
+    const swimlaneId = resolveContainerSwimlaneIdFromView(tpl.view, list);
 
-    const isCollapsed = Utils.getListCollapseState(list);
+    const isCollapsed = Utils.getListCollapseState(list, swimlaneId);
     if (isCollapsed) {
       // Collapsed lists do not render a resize handle by design.
       return;
@@ -313,18 +768,12 @@ Template.list.onCreated(function () {
       return;
     }
 
-    // Helper to get autoWidth state
-    const getAutoWidth = () => {
-      const user = ReactiveCache.getCurrentUser();
-      if (!user) return false;
-      return user.isAutoWidth(list.boardId);
-    };
-
-    // Reactively show/hide resize handle based on collapse and auto-width state
+    // #6409: show the resize handle only when the list is not collapsed and the
+    // user is allowed to change this list's width (always in personal mode; only
+    // with board write access in shared mode).
     tpl.autorun(() => {
-      const isAutoWidth = getAutoWidth();
-      const isCollapsed = Utils.getListCollapseState(list);
-      if (isCollapsed || isAutoWidth) {
+      const isCollapsed = Utils.getListCollapseState(list, swimlaneId);
+      if (isCollapsed || !canResizeList(list)) {
         $resizeHandle.hide();
       } else {
         $resizeHandle.show();
@@ -334,25 +783,8 @@ Template.list.onCreated(function () {
     let isResizing = false;
     let startX = 0;
     let startWidth = 0;
-    let minWidth = 270; // Minimum width matching system default
-
-    // Get listConstraint value
-    const getListConstraint = () => {
-      const user = ReactiveCache.getCurrentUser();
-      if (user) {
-        return user.getListConstraintFromStorage(list.boardId, list._id);
-      }
-      try {
-        const stored = localStorage.getItem('wekan-list-constraints');
-        if (stored) {
-          const constraints = JSON.parse(stored);
-          if (constraints[list.boardId] && constraints[list.boardId][list._id]) {
-            return constraints[list.boardId][list._id];
-          }
-        }
-      } catch (e) {}
-      return 550;
-    };
+    let inlineDirection = 1;
+    let minWidth = MIN_LIST_WIDTH; // Minimum width matching system default
 
     // Read the horizontal page coordinate from either a jQuery mouse event
     // or a native touch event (touchstart/move expose `touches`, touchend
@@ -360,7 +792,8 @@ Template.list.onCreated(function () {
     const getEventPageX = (e) => {
       const oe = e.originalEvent || e;
       if (oe.touches && oe.touches.length) return oe.touches[0].pageX;
-      if (oe.changedTouches && oe.changedTouches.length) return oe.changedTouches[0].pageX;
+      if (oe.changedTouches && oe.changedTouches.length)
+        return oe.changedTouches[0].pageX;
       return e.pageX;
     };
 
@@ -368,6 +801,13 @@ Template.list.onCreated(function () {
       isResizing = true;
       startX = getEventPageX(e);
       startWidth = $list.outerWidth();
+      // #6801: the handle is on the list's inline END (list.css), which is its
+      // LEFT edge in a right-to-left language. Dragging it left widens the list
+      // there, so the pointer's movement counts the other way round - the list
+      // narrowed when dragged out and widened when dragged in. The list's own
+      // direction decides, because that is what places the handle.
+      inlineDirection =
+        window.getComputedStyle($list[0]).direction === 'rtl' ? -1 : 1;
 
       // Add visual feedback
       $list.addClass('list-resizing');
@@ -386,7 +826,7 @@ Template.list.onCreated(function () {
       }
 
       const currentX = getEventPageX(e);
-      const deltaX = currentX - startX;
+      const deltaX = (currentX - startX) * inlineDirection;
       const newWidth = Math.max(minWidth, startWidth + deltaX);
 
       // Apply the new width immediately for real-time feedback
@@ -410,9 +850,8 @@ Template.list.onCreated(function () {
 
       // Calculate final width
       const currentX = getEventPageX(e);
-      const deltaX = currentX - startX;
+      const deltaX = (currentX - startX) * inlineDirection;
       const finalWidth = Math.max(minWidth, startWidth + deltaX);
-      const listConstraint = getListConstraint();
 
       // Ensure the final width is applied
       $list[0].style.setProperty('--list-width', `${finalWidth}px`);
@@ -429,55 +868,9 @@ Template.list.onCreated(function () {
       $('body').removeClass('list-resizing-active');
       $('body').css('user-select', '');
 
-      // Save the new width using the existing system
-      const boardId = list.boardId;
-      const listId = list._id;
-
-      if (process.env.DEBUG === 'true') {
-      }
-
-      const currentUser = ReactiveCache.getCurrentUser();
-      if (currentUser) {
-        // For logged-in users, use server method
-        Meteor.call('applyListWidthToStorage', boardId, listId, finalWidth, listConstraint, (error, result) => {
-          if (error) {
-            console.error('Error saving list width:', error);
-          } else {
-            if (process.env.DEBUG === 'true') {
-            }
-          }
-        });
-      } else {
-        // For non-logged-in users, save to localStorage directly
-        try {
-          // Save list width
-          const storedWidths = localStorage.getItem('wekan-list-widths');
-          let widths = storedWidths ? JSON.parse(storedWidths) : {};
-
-          if (!widths[boardId]) {
-            widths[boardId] = {};
-          }
-          widths[boardId][listId] = finalWidth;
-
-          localStorage.setItem('wekan-list-widths', JSON.stringify(widths));
-
-          // Save list constraint
-          const storedConstraints = localStorage.getItem('wekan-list-constraints');
-          let constraints = storedConstraints ? JSON.parse(storedConstraints) : {};
-
-          if (!constraints[boardId]) {
-            constraints[boardId] = {};
-          }
-          constraints[boardId][listId] = listConstraint;
-
-          localStorage.setItem('wekan-list-constraints', JSON.stringify(constraints));
-
-          if (process.env.DEBUG === 'true') {
-          }
-        } catch (e) {
-          console.warn('Error saving list width/constraint to localStorage:', e);
-        }
-      }
+      // #6409: persist to the shared list width or the user's personal width,
+      // depending on the board's mode.
+      saveListWidth(list, finalWidth);
 
       e.preventDefault();
     };
@@ -493,23 +886,15 @@ Template.list.onCreated(function () {
     // as the handler, throwing "handler.apply is not a function" on every
     // touch. Use the native API so { passive: false } actually applies and
     // preventDefault() works during the resize.
-    $resizeHandle[0].addEventListener('touchstart', startResize, { passive: false });
+    $resizeHandle[0].addEventListener('touchstart', startResize, {
+      passive: false,
+    });
     document.addEventListener('touchmove', doResize, { passive: false });
     document.addEventListener('touchend', stopResize, { passive: false });
 
     // Prevent dragscroll interference
     $resizeHandle.on('mousedown', (e) => {
       e.stopPropagation();
-    });
-
-    // Reactively update resize handle visibility when auto-width or collapse changes
-    tpl.autorun(() => {
-      const collapsed = Utils.getListCollapseState(list);
-      if (getAutoWidth() || collapsed) {
-        $resizeHandle.hide();
-      } else {
-        $resizeHandle.show();
-      }
     });
 
     // Clean up on component destruction

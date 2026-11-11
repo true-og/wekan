@@ -136,6 +136,18 @@ UserPositionHistory.attachSchema(
       type: String,
       optional: true,
     },
+    // #6478 undo/redo stack: a change that has been undone can be redone until a
+    // NEW change is recorded (which clears the redo stack). undoneAt orders the
+    // redo stack (most-recently-undone is redone first).
+    undone: {
+      type: Boolean,
+      defaultValue: false,
+      optional: true,
+    },
+    undoneAt: {
+      type: Date,
+      optional: true,
+    },
   }),
 );
 
@@ -184,11 +196,97 @@ UserPositionHistory.helpers({
   },
 
   /**
+   * Soft-delete apply/undo helper (docs/Features/Undo/Undo.md). Marks
+   * (`deleted=true`) or restores (`deleted=false`) the entity AND its cascade,
+   * using the history entry's `batchId` as the canonical group so repeated
+   * undo/redo cycles stay consistent. v1 wires lists (+ their cards); other entity
+   * types are no-ops here (their delete paths are not yet soft).
+   */
+  async _applyDeleted(deleted) {
+    if (this.entityType !== 'list') return;
+    const list = await ReactiveCache.getList(this.entityId);
+    if (!list) return;
+    const batchId = this.batchId || list.deleteBatchId || this.entityId;
+
+    if (deleted) {
+      const at = new Date();
+      const set = { deletedAt: at, deleteBatchId: batchId };
+      if (this.userId) set.deletedBy = this.userId;
+      await Lists.updateAsync(list._id, { $set: set });
+      // Re-mark the list's currently-live cards under the canonical batch.
+      await Cards.updateAsync(
+        { listId: list._id, boardId: list.boardId, deletedAt: null },
+        { $set: set },
+        { multi: true },
+      );
+    } else {
+      // Restore: $unset all three fields (setting a Date to null trips schema).
+      const unset = { $unset: { deletedAt: '', deletedBy: '', deleteBatchId: '' } };
+      await Lists.updateAsync(list._id, unset);
+      await Cards.updateAsync({ deleteBatchId: batchId }, unset, { multi: true });
+    }
+  },
+
+  /**
    * Undo this change
    */
+  /**
+   * PositionHistoryBleed: an entry may act only on an entity that is still on
+   * the entry's board, for a user who can still write there - and, for a card
+   * move, on the board it moves to. History documents are data; this is the
+   * check at execution time, whatever wrote them.
+   */
+  async assertApplicable(destinationBoardIds = []) {
+    if (!Meteor.isServer) return;
+    const { allowIsBoardMemberWithWriteAccess } = require('/server/lib/utils');
+    let entityBoardId = null;
+    switch (this.entityType) {
+      case 'card': entityBoardId = (await ReactiveCache.getCard(this.entityId) || {}).boardId; break;
+      case 'list': entityBoardId = (await ReactiveCache.getList(this.entityId) || {}).boardId; break;
+      case 'swimlane': entityBoardId = (await ReactiveCache.getSwimlane(this.entityId) || {}).boardId; break;
+      case 'checklist': {
+        const checklist = await ReactiveCache.getChecklist(this.entityId);
+        entityBoardId = checklist && (await ReactiveCache.getCard(checklist.cardId) || {}).boardId;
+        break;
+      }
+      case 'checklistItem': {
+        const item = await ChecklistItems.findOneAsync(this.entityId);
+        entityBoardId = item && (await ReactiveCache.getCard(item.cardId) || {}).boardId;
+        break;
+      }
+      default: break;
+    }
+    const boards = [entityBoardId, ...destinationBoardIds.filter(Boolean)];
+    // A cross-board card move is recorded under the board it LEFT, so after
+    // the move (or its undo) the card is on the entry's previous or new board.
+    const entryBoards = [this.boardId, this.previousBoardId, this.newBoardId].filter(Boolean);
+    let allowed = !!entityBoardId && entryBoards.includes(entityBoardId);
+    for (const boardId of boards) {
+      if (!allowed) break;
+      allowed = allowIsBoardMemberWithWriteAccess(this.userId, await Boards.findOneAsync(boardId));
+    }
+    if (allowed) return;
+    try {
+      require('/server/lib/canary').tripCanary('history.cross-board', { userId: this.userId });
+    } catch (e) { /* logging must never break the guard */ }
+    throw new Meteor.Error('not-authorized', 'This history entry is outside your current access.');
+  },
+
   async undo() {
     if (!(await this.canUndo())) {
       throw new Meteor.Error('cannot-undo', 'Entity no longer exists');
+    }
+    await this.assertApplicable([this.entityType === 'card' ? this.previousBoardId : null]);
+
+    // Soft delete: undo of a 'delete' RESTORES the entity (+ batch); undo of a
+    // 'restore' re-deletes it. (docs/Features/Undo/Undo.md)
+    if (this.actionType === 'delete') {
+      await this._applyDeleted(false);
+      return;
+    }
+    if (this.actionType === 'restore') {
+      await this._applyDeleted(true);
+      return;
     }
 
     const userId = this.userId;
@@ -202,6 +300,26 @@ UserPositionHistory.helpers({
           const swimlaneId = this.previousSwimlaneId || card.swimlaneId;
           const listId = this.previousListId || card.listId;
           const sort = this.previousSort !== undefined ? this.previousSort : card.sort;
+
+          // History documents are writable from DDP. Re-check the destination at
+          // execution time so a forged or stale entry cannot cross board bounds.
+          if (boardId !== card.boardId) {
+            const destinationBoard = await Boards.findOneAsync(boardId);
+            if (!destinationBoard || !destinationBoard.hasMember(userId)) {
+              try {
+                require('/server/lib/canary').tripCanary(
+                  'history.cross-board',
+                  { userId },
+                );
+              } catch (e) {
+                /* logging must never break the guard */
+              }
+              throw new Meteor.Error(
+                'not-authorized',
+                'You do not have access to the destination board.',
+              );
+            }
+          }
 
           await Cards.updateAsync(card._id, {
             $set: {
@@ -267,6 +385,85 @@ UserPositionHistory.helpers({
                 sort,
                 checklistId,
               },
+            });
+          }
+        }
+        break;
+      }
+    }
+  },
+
+  /**
+   * #6478: Redo this change — re-apply the NEW position after an undo. Mirrors
+   * undo() but restores the new* fields instead of the previous* ones.
+   */
+  async redo() {
+    if (!(await this.canUndo())) {
+      throw new Meteor.Error('cannot-redo', 'Entity no longer exists');
+    }
+    await this.assertApplicable([this.entityType === 'card' ? this.newBoardId : null]);
+
+    // Soft delete: redo of a 'delete' re-deletes; redo of a 'restore' restores.
+    if (this.actionType === 'delete') {
+      await this._applyDeleted(true);
+      return;
+    }
+    if (this.actionType === 'restore') {
+      await this._applyDeleted(false);
+      return;
+    }
+
+    switch (this.entityType) {
+      case 'card': {
+        const card = await ReactiveCache.getCard(this.entityId);
+        if (card) {
+          await Cards.updateAsync(card._id, {
+            $set: {
+              boardId: this.newBoardId || card.boardId,
+              swimlaneId: this.newSwimlaneId || card.swimlaneId,
+              listId: this.newListId || card.listId,
+              sort: this.newSort !== undefined ? this.newSort : card.sort,
+            },
+          });
+        }
+        break;
+      }
+      case 'list': {
+        const list = await ReactiveCache.getList(this.entityId);
+        if (list) {
+          await Lists.updateAsync(list._id, {
+            $set: {
+              sort: this.newSort !== undefined ? this.newSort : list.sort,
+              swimlaneId: this.newSwimlaneId || list.swimlaneId,
+            },
+          });
+        }
+        break;
+      }
+      case 'swimlane': {
+        const swimlane = await ReactiveCache.getSwimlane(this.entityId);
+        if (swimlane) {
+          await Swimlanes.updateAsync(swimlane._id, {
+            $set: { sort: this.newSort !== undefined ? this.newSort : swimlane.sort },
+          });
+        }
+        break;
+      }
+      case 'checklist': {
+        const checklist = await ReactiveCache.getChecklist(this.entityId);
+        if (checklist) {
+          await Checklists.updateAsync(checklist._id, {
+            $set: { sort: this.newSort !== undefined ? this.newSort : checklist.sort },
+          });
+        }
+        break;
+      }
+      case 'checklistItem': {
+        if (typeof ChecklistItems !== 'undefined') {
+          const item = await ChecklistItems.findOneAsync(this.entityId);
+          if (item) {
+            await ChecklistItems.updateAsync(item._id, {
+              $set: { sort: this.newSort !== undefined ? this.newSort : item.sort },
             });
           }
         }

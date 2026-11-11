@@ -1,10 +1,62 @@
+import { riskOf } from '/client/lib/cardRiskOf';
+import { commentBadgeTitle } from '/models/lib/commentBadgeTitle';
+import { newLineLayer } from '/client/lib/dependencyLayers';
+import { isSubmitKey } from '/models/lib/editorSubmitKey';
+import { relativeCardSort } from '/client/lib/relativeCardPosition';
 import { ReactiveCache } from '/imports/reactiveCache';
 import { TAPi18n } from '/imports/i18n';
-import { CustomFieldStringTemplate } from '/client/lib/customFields';
+import { CustomFieldStringTemplate, stringTemplateContext } from '/client/lib/customFields';
 import { handleFileUpload } from './attachments';
 import uploadProgressManager from '../../lib/uploadProgressManager';
 import { Utils } from '/client/lib/utils';
+import { formatDateForDisplay } from '/client/lib/dateDisplay';
+import CardTextNotes from '/models/cardTextNotes';
 import ChecklistItems from '/models/checklistItems';
+import Cards from '/models/cards';
+import { resolveCoverId } from '/models/lib/linkedCardCover';
+import { isLiveAttachment } from '/models/lib/attachmentSoftDelete';
+import { isChecklistShownAtMinicard } from '/models/lib/minicardChecklistVisibility';
+const { issueTypeBadge } = require('/models/lib/issueTypeIcon');
+import { hasUnreadComments } from '/models/lib/unreadComments';
+import { currentUserWith } from '/client/lib/currentUserWith';
+import {
+  parseChecklistItemTitles,
+  buildChecklistItemPayload,
+} from '/models/lib/checklistItemTitles';
+import {
+  hiddenMinicardLabelText,
+  toggleMinicardLabelText,
+} from '/client/lib/minicardLabelText';
+const { applyMinicardOrder } = require('/models/lib/cardFieldOrder');
+const cardSettingsSections = require('/models/lib/cardSettingsSections');
+const { minicardGroups } = require('/models/lib/minicardGroups');
+const { isCardFieldHiddenOnBoard } = require('/models/lib/cardFieldVisibility');
+
+// The board as every minicard of it sees it (models/lib/cardShownFields.js
+// boardForMinicard): the rows of a Card Settings section hidden whole on Show
+// on Minicard read false. Every helper below that decides whether the minicard
+// draws a field reads this, not the board itself; Card Settings reads the
+// board, so its checkboxes keep showing each row's own flag.
+const { boardForMinicard, hidesRow } = require('/models/lib/cardShownFields');
+
+function minicardBoardOf(data) {
+  const boardId = (data && (data.boardId || (data.card && data.card.boardId))) || null;
+  const board = boardId ? ReactiveCache.getBoard(boardId) : Utils.getCurrentBoard();
+  return boardForMinicard(board || Utils.getCurrentBoard());
+}
+
+// The minicard and its sub-templates read `currentBoard.allowsXOnMinicard`;
+// this template-level helper answers before the global one, as the opened
+// card's CARD_FIELD_TEMPLATES do (client/components/cards/cardAddFields.js).
+export const MINICARD_FIELD_TEMPLATES = Object.freeze(['minicard', 'minicardChecklist']);
+MINICARD_FIELD_TEMPLATES.forEach(name => {
+  Template[name].helpers({
+    currentBoard() {
+      const tpl = Template.instance();
+      return minicardBoardOf(tpl && tpl.data);
+    },
+  });
+});
 
 function getMinicardFlag(board, onMinicardField, legacyField, defaultValue) {
   if (!board) return false;
@@ -22,35 +74,184 @@ function getMinicardFlag(board, onMinicardField, legacyField, defaultValue) {
 // });
 
 Template.minicard.helpers({
+  // #2012: the card's kind, as a badge.
+  cardKindIcon() {
+    const { KIND_ICONS } = require('/models/lib/cardKinds');
+    return KIND_ICONS[this.cardKind] || null;
+  },
+  cardKindTitle() {
+    return this.cardKind ? TAPi18n.__(`card-kind-${this.cardKind}`) : '';
+  },
+  commentBadgeTitle() {
+    return commentBadgeTitle(this.comments(), count => TAPi18n.__('card-comments-title', count));
+  },
+  // #1591: the whole-minicard fold, same shape as a list's collapsed() helper.
+  showCollapseControl() { return minicardBoardOf(this)?.allowsMinicardCollapse !== false; },
+  showLabelsAboveTitle() {
+    const board = minicardBoardOf(this);
+    return board?.labelsAboveTitleOnMinicard === true && (board.allowsMinicardCollapse === false || !Utils.getCardCollapseState(this));
+  },
+  labelsAboveTitle() { return minicardBoardOf(this)?.labelsAboveTitleOnMinicard === true; },
+  minicardCollapsed() {
+    return minicardBoardOf(this)?.allowsMinicardCollapse !== false && Utils.getCardCollapseState(this);
+  },
+  // Card Settings' sections in the board's Show on Minicard section order
+  // (minicardSettingsSectionOrder), less those hidden whole on Show on
+  // Minicard, each section's fields in its Show on Minicard row order
+  // (board.minicardFieldOrder, models/lib/cardFieldOrder.js) - grouped into
+  // the `.dates` line, the `.badges` strips and blocks
+  // (models/lib/minicardGroups.js). The raw board for the orders, the
+  // minicard's view of it for nothing here: the gates are in the template.
+  minicardGroups() {
+    const boardId = this && this.boardId;
+    const board = (boardId && ReactiveCache.getBoard(boardId)) || Utils.getCurrentBoard();
+    const hidden = cardSettingsSections.hiddenSectionsOf(board, 'minicard');
+    const flat = applyMinicardOrder(board?.minicardFieldOrder);
+    const ids = cardSettingsSections.sectionOrderOf(board, 'minicard').filter(id => !hidden.includes(id));
+    return minicardGroups(ids, id => cardSettingsSections.sectionFieldsOn('minicard', flat, id));
+  },
+  showCustomFieldsOnMinicard() {
+    const board = minicardBoardOf(this);
+    return board?.allowsCustomFieldsOnMinicard === true;
+  },
+  // #3078: highlight the minicard when it has comments the current user has
+  // not seen yet - a comment created after the user's last-viewed timestamp
+  // for this card (models/users.js getCardLastViewedAt/setCardLastViewed),
+  // or any comment at all when the card was never opened by this user. The
+  // decision itself is pure/tested in models/lib/unreadComments.js.
+  // #2111 / #1604: any change to the card since this member last opened it,
+  // when they turned that on (models/lib/unreadChanges.js).
+  hasUnreadChanges() {
+    const card = this;
+    if (!card || !card._id) return false;
+    const user = currentUserWith([`profile.cardLastViews.${card._id}`, 'profile.unreadChangesSince']);
+    const enabledAt = user && user.profile && user.profile.unreadChangesSince;
+    if (!enabledAt) return false;
+    const { latestChangeTime, hasUnreadChanges } = require('/models/lib/unreadChanges');
+    const latest = latestChangeTime({
+      card,
+      checklists: ReactiveCache.getChecklists({ cardId: card._id }) || [],
+      items: ReactiveCache.getChecklistItems({ cardId: card._id }) || [],
+      attachments: ReactiveCache.getAttachments({ 'meta.cardId': card._id }) || [],
+      comments: ReactiveCache.getCardComments({ cardId: card._id }) || [],
+    });
+    return hasUnreadChanges(latest, { lastViewedAt: user.getCardLastViewedAt(card._id), enabledAt });
+  },
+  hasUnreadComments() {
+    const card = this;
+    if (!card || !card._id) return false;
+    // Unread comments, Show on Minicard: on unless turned off.
+    if (minicardBoardOf(this)?.allowsUnreadCommentsOnMinicard === false) return false;
+    const comments = ReactiveCache.getCardComments({ cardId: card._id }) || [];
+    if (!comments.length) return false;
+    // #6745: only this card's own last-viewed time, so opening ANOTHER card
+    // (which writes profile.cardLastViews) does not re-run this on every minicard.
+    const user = currentUserWith([`profile.cardLastViews.${card._id}`]);
+    if (!user) return false;
+    return hasUnreadComments(comments, user.getCardLastViewedAt(card._id));
+  },
+  // True exactly when the drag handle is rendered (see minicard.jade): the user
+  // may move the card AND drag handles are on. On a coarse pointer the handle is
+  // a 48px strip down the leading edge, so the card's own content needs matching
+  // padding - keyed off this so a card the user cannot move never gets a gutter
+  // for a handle that is not there.
+  showMinicardHandle() {
+    return Utils.canMoveCard() && Utils.showDragHandles();
+  },
+  // #3392 / #6732: a drag-to-connect handle when a line drawn now has a layer
+  // to go to (client/lib/dependencyLayers.js): the Board Dependencies when
+  // shown and editable by this user, else My Dependencies when shown.
+  showDependencyConnectHandle() {
+    const board = ReactiveCache.getBoard(this.boardId);
+    return !!(board && newLineLayer(board));
+  },
+  // #3392: PI Program Board "Red Strings". Show a small badge on the minicard
+  // when a card has dependencies: the first dependency's icon and color plus the
+  // total count.
+  dependencyBadge() {
+    const deps = this.getDependencies();
+    if (deps.length === 0) return null;
+    return {
+      icon: deps[0].icon,
+      color: deps[0].color,
+      count: deps.length,
+    };
+  },
+  // #3984: visual card aging — fade cards that have not been touched recently,
+  // based on dateLastActivity, when the board has card aging enabled.
+  // docs/Features/Cards/At-Risk.md
+  atRisk() {
+    return riskOf(this);
+  },
+  agingClass() {
+    const card = this.getRealCard();
+    const board = ReactiveCache.getBoard(this.boardId);
+    if (!board || !board.cardAging) return '';
+    const last = card.dateLastActivity || card.modifiedAt || card.createdAt;
+    if (!last) return '';
+    const days = (Date.now() - new Date(last).getTime()) / 86400000;
+    // #3984: thresholds are board-configurable (board settings / cardSettings API),
+    // defaulting to 7 / 14 / 28 days.
+    const d1 = board.cardAgingDays1 != null ? board.cardAgingDays1 : 7;
+    const d2 = board.cardAgingDays2 != null ? board.cardAgingDays2 : 14;
+    const d3 = board.cardAgingDays3 != null ? board.cardAgingDays3 : 28;
+    if (days >= d3) return 'minicard-aging-3';
+    if (days >= d2) return 'minicard-aging-2';
+    if (days >= d1) return 'minicard-aging-1';
+    return '';
+  },
+  // #6811: called inside `each customFieldsWD`, so `this` is the custom-field
+  // row: drawn on the minicard only when it holds a value.
+  minicardCustomFieldHasValue() {
+    const { hasCustomFieldValue } = require('/models/lib/customFieldsWD');
+    return hasCustomFieldValue(this && this.value);
+  },
   formattedCurrencyCustomFieldValue(definition) {
-    const customField = this
-      .customFieldsWD()
-      .find(f => f._id === definition._id);
-    const customFieldTrueValue =
-      customField && customField.trueValue ? customField.trueValue : '';
-
+    // This helper is called from `each customFieldsWD`, so `this` is already
+    // the rendered custom-field row, not the Card. Calling this.customFieldsWD
+    // threw and prevented minicards with Currency fields from rendering.
+    const field = this || {};
+    const fieldDefinition = definition || field.definition || {};
+    const customFieldTrueValue = field.trueValue;
+    if (customFieldTrueValue === '' || customFieldTrueValue == null) return '';
+    const currencyCode = fieldDefinition.settings?.currencyCode || 'USD';
     const locale = TAPi18n.getLanguage();
-    return new Intl.NumberFormat(locale, {
-      style: 'currency',
-      currency: definition.settings.currencyCode,
-    }).format(customFieldTrueValue);
+    try {
+      const number = typeof customFieldTrueValue === 'number'
+        ? customFieldTrueValue
+        : Number(customFieldTrueValue);
+      if (!Number.isFinite(number)) return String(customFieldTrueValue);
+      return new Intl.NumberFormat(locale, {
+        style: 'currency',
+        currency: currencyCode,
+      }).format(number);
+    } catch (error) {
+      return `${currencyCode} ${customFieldTrueValue}`;
+    }
   },
 
   formattedStringtemplateCustomFieldValue(definition) {
-    const customField = this
-      .customFieldsWD()
-      .find(f => f._id === definition._id);
-
-    const customFieldTrueValue =
-      customField && customField.trueValue ? customField.trueValue : [];
-
-    const ret = new CustomFieldStringTemplate(definition).getFormattedValue(customFieldTrueValue);
-    return ret;
+    // As above, the current row already carries the resolved linked/source
+    // value and definition. Never reach back through a nonexistent Card API.
+    const field = this || {};
+    const fieldDefinition = definition || field.definition;
+    const customFieldTrueValue = Array.isArray(field.trueValue)
+      ? field.trueValue
+      : [];
+    if (!fieldDefinition) return customFieldTrueValue.join(' ');
+    try {
+      return new CustomFieldStringTemplate(fieldDefinition)
+        .getFormattedValue(customFieldTrueValue, stringTemplateContext(
+          ReactiveCache.getCard(Template.instance().data._id),
+        ));
+    } catch (error) {
+      return customFieldTrueValue.join(' ');
+    }
   },
 
   showCreatorOnMinicard() {
     // cache "board" to reduce the mini-mongodb access
-    const board = this.board();
+    const board = minicardBoardOf(this);
     let ret = false;
     if (board) {
       ret = board.allowsCreatorOnMinicard ?? false;
@@ -58,68 +259,180 @@ Template.minicard.helpers({
     return ret;
   },
   isWatching() {
-    return this.findWatcher(Meteor.userId());
+    return this.getRealCard().findWatcher(Meteor.userId());
+  },
+  // #6872: a picked member (requesters / assigners) or a free-text name.
+  hasRequestedByOnMinicard() {
+    return !!this.getRequestedBy() || (this.getRequesters() || []).length > 0;
+  },
+  hasAssignedByOnMinicard() {
+    return !!this.getAssignedBy() || (this.getAssigners() || []).length > 0;
   },
 
   showMembers() {
-    const board = this.board();
+    const board = minicardBoardOf(this);
     return getMinicardFlag(board, 'allowsMembersOnMinicard', 'allowsMembers', true);
   },
 
   showAssignee() {
-    const board = this.board();
+    const board = minicardBoardOf(this);
     return getMinicardFlag(board, 'allowsAssigneeOnMinicard', 'allowsAssignee', true);
   },
   showReceived() {
-    const board = this.board();
+    const board = minicardBoardOf(this);
     return getMinicardFlag(board, 'allowsReceivedDateOnMinicard', 'allowsReceivedDate', true);
   },
   showStart() {
-    const board = this.board();
+    const board = minicardBoardOf(this);
     return getMinicardFlag(board, 'allowsStartDateOnMinicard', 'allowsStartDate', true);
   },
   showDue() {
-    const board = this.board();
+    const board = minicardBoardOf(this);
     return getMinicardFlag(board, 'allowsDueDateOnMinicard', 'allowsDueDate', true);
   },
   showEnd() {
-    const board = this.board();
+    const board = minicardBoardOf(this);
     return getMinicardFlag(board, 'allowsEndDateOnMinicard', 'allowsEndDate', true);
   },
+  // #2530: accumulated spent-time badge on the minicard. Defaults to true
+  // (models/boards.js) since it was already shown unconditionally; this only
+  // lets an admin turn it off via Card Settings.
+  showSpentTime() {
+    const board = minicardBoardOf(this);
+    return getMinicardFlag(board, 'allowsSpentTimeOnMinicard', 'allowsSpentTime', true);
+  },
   showLabels() {
-    const board = this.board();
+    const board = minicardBoardOf(this);
     return getMinicardFlag(board, 'allowsLabelsOnMinicard', 'allowsLabels', true);
   },
   showCardNumber() {
-    const board = this.board();
+    const board = minicardBoardOf(this);
     return getMinicardFlag(board, 'allowsCardNumberOnMinicard', 'allowsCardNumber', false);
   },
+  // "Mark as complete" toggle on the minicard. No legacy fallback to the
+  // card-details setting (allowsDueComplete): hidden by default so it only
+  // appears when explicitly enabled in Card Settings > Show at Minicard.
+  showDueComplete() {
+    const board = minicardBoardOf(this);
+    return getMinicardFlag(board, 'allowsDueCompleteOnMinicard', null, false);
+  },
   showSubtasks() {
-    const board = this.board();
+    const board = minicardBoardOf(this);
     return getMinicardFlag(board, 'allowsSubtasksOnMinicard', 'allowsSubtasks', true);
   },
+  // #6688: the minicard badges that had no Board Settings / Card toggle.
+  // Each defaults to TRUE (models/boards.js) because it always rendered
+  // before; a legacy board without the field keeps showing it. The card-side
+  // flag is NOT a fallback here - hiding the Dependencies section of the
+  // opened card is a different decision from hiding its badge.
+  showDependenciesOnMinicard() {
+    const board = minicardBoardOf(this);
+    return getMinicardFlag(board, 'allowsDependenciesOnMinicard', null, true);
+  },
+  showStickersOnMinicard() {
+    const board = minicardBoardOf(this);
+    return getMinicardFlag(board, 'allowsStickersOnMinicard', null, true);
+  },
+  showCommentCountOnMinicard() {
+    const board = minicardBoardOf(this);
+    return getMinicardFlag(board, 'allowsCommentCountOnMinicard', null, true);
+  },
+  showVoteOnMinicard() {
+    const board = minicardBoardOf(this);
+    return getMinicardFlag(board, 'allowsVoteOnMinicard', null, true);
+  },
+  showPokerOnMinicard() {
+    const board = minicardBoardOf(this);
+    return getMinicardFlag(board, 'allowsPokerOnMinicard', null, true);
+  },
+  // #6431: compact checklist item-count badge (finished/total) on the minicard.
+  // Opt-in, OFF by default. Only a cheap boolean read here; the actual checklist
+  // counting (checklistFinishedCount/checklistItemCount) is gated behind this in
+  // the template, so a board with the badge off spends no resources counting.
+  showChecklistCountBadge() {
+    const board = minicardBoardOf(this);
+    return !!(board && board.allowsChecklistCountBadgeOnMinicard);
+  },
+  // #4285: show a card's comments directly on the minicard. Opt-in and OFF by
+  // default (see models/boards.js:allowsCommentsOnMinicard), so a board that
+  // does not use this pays no extra cost - the comments list below is only
+  // built (and the comment badge's `comments` helper already runs
+  // unconditionally for the count badge) when this returns true.
+  showCommentsOnMinicard() {
+    const board = minicardBoardOf(this);
+    return !!(board && board.allowsCommentsOnMinicard);
+  },
+  // Compact, truncated preview of the most recent comments for the minicard.
+  // Reuses the same `comments()` card helper the comment-count badge already
+  // calls (sorted newest first) rather than a new subscription/query. Caps
+  // the number shown and the length of each, and flags whether there is more
+  // to see (either more comments than shown, or a comment that got cut) so
+  // the template can offer a "more" affordance that opens the full card -
+  // the same click-to-open behavior every minicard already has.
+  commentsForMinicard() {
+    const MAX_COMMENTS = 3;
+    const MAX_LENGTH = 140;
+    const all = this.comments() || [];
+    const shown = all.slice(0, MAX_COMMENTS).map(comment => {
+      const text = comment.text || '';
+      const truncated = text.length > MAX_LENGTH;
+      return {
+        _id: comment._id,
+        text: truncated ? `${text.slice(0, MAX_LENGTH)}…` : text,
+        truncated,
+      };
+    });
+    return {
+      comments: shown,
+      hasMore: all.length > MAX_COMMENTS || shown.some(c => c.truncated),
+    };
+  },
 
-  hiddenMinicardLabelText() {
-    const currentUser = ReactiveCache.getCurrentUser();
-    if (currentUser) {
-      return (currentUser.profile || {}).hiddenMinicardLabelText;
-    } else if (window.localStorage.getItem('hiddenMinicardLabelText')) {
-      return true;
-    } else {
-      return false;
-    }
+  hiddenMinicardLabelText,
+  stickers() {
+    return this.getStickers();
+  },
+  // The card's issue type with its icon, shown whenever the card has one.
+  issueTypeBadge() {
+    return issueTypeBadge(this.scrum && this.scrum.issueType);
+  },
+  // Board Settings / Card, Show on Minicard (2026-10-02): the attachments'
+  // names, newest first, at most five - the card lists them all.
+  minicardAttachmentNames() {
+    const attachments = typeof this.attachments === 'function' ? this.attachments() : [];
+    return (attachments || []).slice(0, 5).map(file => file && file.name).filter(Boolean);
+  },
+  // ...how many text notes the card has (published with the board).
+  textNotesCount() {
+    return CardTextNotes.find({ cardId: this._id }).count();
+  },
+  // ...and when the card last changed: its activity in one line.
+  minicardLastActivity() {
+    return this.dateLastActivity ? formatDateForDisplay(this.dateLastActivity, true) : '';
+  },
+  // "Scrum settings: Work item type", Show on Minicard: on unless turned off,
+  // as it was on every board before it had a row.
+  // Card color, Show on Minicard: on unless turned off.
+  showCardColorOnMinicard() {
+    return minicardBoardOf(this)?.allowsCardColorOnMinicard !== false;
+  },
+  showIssueTypeOnMinicard() {
+    return minicardBoardOf(this)?.allowsIssueTypeOnMinicard !== false;
   },
   cover() {
-    if (!this.coverId) return null;
-    const attachment = ReactiveCache.getAttachment(this.coverId);
-    if (!attachment) return null;
-    const coverLink = typeof attachment.link === 'function' ? attachment.link() : '';
-    if (!coverLink) return null;
-    return {
-      link() {
-        return coverLink;
-      },
-    };
+    // #5666: for a linked card the cover lives on the real card it points at, so
+    // resolve the cover id through it (mirroring getTitle/getDue/...); a plain
+    // card resolves to its own coverId.
+    const coverId = resolveCoverId(this, id => ReactiveCache.getCard(id));
+    if (!coverId) return null;
+    const attachment = ReactiveCache.getAttachment(coverId);
+    // A soft-deleted attachment is never a cover (History.md §12.1).
+    if (!isLiveAttachment(attachment)) return null;
+    // The attachment itself, as models/cards.js cover() returns it: the
+    // template's attachmentPreviewUrl needs its _id, type and name. A wrapper
+    // with only link() gave it no _id, so the cover URL was empty and the
+    // board showed a flat band instead of the picture (v12.12 email report).
+    return attachment;
   },
   // XXX resolve this nasty hack for https://github.com/veliovgroup/Meteor-Files/issues/763
   sess() {
@@ -129,13 +442,13 @@ Template.minicard.helpers({
   },
   // Upload progress helpers
   hasActiveUploads() {
-    return uploadProgressManager.hasActiveUploads(this._id);
+    return uploadProgressManager.hasActiveUploads(this.getRealId());
   },
   uploads() {
-    return uploadProgressManager.getUploadsForCard(this._id);
+    return uploadProgressManager.getUploadsForCard(this.getRealId());
   },
   uploadCount() {
-    return uploadProgressManager.getUploadCountForCard(this._id);
+    return uploadProgressManager.getUploadCountForCard(this.getRealId());
   },
   listName() {
     const list = this.list();
@@ -146,24 +459,51 @@ Template.minicard.helpers({
     // Show list name if either:
     // 1. Board-wide setting is enabled, OR
     // 2. This specific card has the setting enabled
-    const currentBoard = this.board();
+    const currentBoard = minicardBoardOf(this);
     if (!currentBoard) return false;
-    return currentBoard.allowsShowListsOnMinicard || this.showListOnMinicard;
+    if (currentBoard.allowsShowListsOnMinicard) return true;
+    // The card's own List title, unless unticked in Admin Panel / Settings /
+    // Visibility / Features (models/lib/cardFieldVisibility.js).
+    // ...and unless its section (Card) is hidden whole on Show on Minicard.
+    return !isCardFieldHiddenOnBoard(currentBoard, 'listTitle') && !hidesRow(currentBoard, 'minicard', 'listTitle')
+      && Boolean(this.getRealCard().showListOnMinicard);
+  },
+
+  // #2426: the swimlane a card belongs to isn't otherwise visible on its
+  // minicard in List view (Swimlanes view already groups cards by
+  // swimlane), so this board-wide toggle shows the swimlane's name at the
+  // bottom of the minicard, the same place/style as the list name above.
+  shouldShowSwimlaneNameOnMinicard() {
+    const currentBoard = minicardBoardOf(this);
+    if (!currentBoard) return false;
+    return currentBoard.allowsSwimlaneNameOnMinicard === true;
+  },
+
+  swimlaneName() {
+    const card = this.getRealCard();
+    const swimlane = card && ReactiveCache.getSwimlane(card.swimlaneId);
+    return swimlane ? swimlane.title : '';
   },
 
   shouldShowChecklistAtMinicard() {
     // Return checklists that should be shown on minicard
-    const currentBoard = this.board();
+    const currentBoard = minicardBoardOf(this);
     if (!currentBoard) return [];
+    // A checklist's own "Show at minicard" overrides the board's default, so
+    // the Checklists section hidden whole on Show on Minicard is asked first.
+    if (hidesRow(currentBoard, 'minicard', 'checklists')) return [];
 
     const checklists = this.checklists();
     const visibleChecklists = [];
 
     checklists.forEach(checklist => {
-      // Show checklist if either:
-      // 1. Board-wide setting is enabled, OR
-      // 2. This specific checklist has the setting enabled
-      if (currentBoard.allowsChecklistAtMinicard || checklist.showChecklistAtMinicard) {
+      // The board setting is the DEFAULT and the checklist's own setting is an
+      // OVERRIDE. This was an OR - board || checklist - and the board setting
+      // (`allowsChecklistsOnMinicard`, #5565) defaults to TRUE, so unchecking
+      // "Show on minicard" on a checklist could never hide it: reported by email
+      // with a screenshot of a checklist still on the minicard after the toggle
+      // was switched off. See models/lib/minicardChecklistVisibility.js.
+      if (isChecklistShownAtMinicard(checklist, currentBoard.allowsChecklistsOnMinicard)) {
         visibleChecklists.push(checklist);
       }
     });
@@ -172,11 +512,103 @@ Template.minicard.helpers({
   }
 });
 
+// #459: accessible reordering — keyboard/screen-reader users can move a card up
+// or down within its list via sr-only buttons (no drag-and-drop required). The
+// move inserts beside its neighbor in the same list+swimlane, repairing ties.
+async function moveCardBy(card, delta) {
+  const siblings = ReactiveCache.getCards(
+    { boardId: card.boardId, listId: card.listId, swimlaneId: card.swimlaneId, archived: false, deletedAt: null },
+    { sort: { sort: 1, _id: 1 } },
+  );
+  const idx = siblings.findIndex(c => c._id === card._id);
+  const target = siblings[idx + delta];
+  if (idx < 0 || !target) return;
+  try {
+    const sort = await relativeCardSort(target, delta < 0 ? 'above' : 'below', card._id);
+    await card.move(card.boardId, card.swimlaneId, card.listId, sort);
+  } catch (error) {
+    window.alert(error.reason || error.message || TAPi18n.__('server-error'));
+  }
+}
+
 Template.minicard.events({
+  // #1591: the same collapse toggle as a list's `.js-collapse` handler. The
+  // minicard is a link to the card, so both preventDefault and stopPropagation
+  // are needed or toggling the caret would also open the card.
+  'click .js-collapse-minicard'(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    const card = Template.currentData();
+    const collapsed = Utils.getCardCollapseState(card);
+    Utils.setCardCollapseState(card, !collapsed);
+  },
+  'keydown .js-collapse-minicard'(event) {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    event.stopPropagation();
+    $(event.currentTarget).trigger('click');
+  },
+  /* Direct title editing on the minicard is disabled. The title must remain a
+   * drag surface: it moves the card without handles and pans the board with
+   * handles. Keep the former handlers commented for possible future reuse.
+  'keydown .minicard-title-text.js-open-inlined-form'(event) {
+    // The title container replaced an anchor overlay in #6639 so markdown
+    // anchors can receive clicks. Retain the overlay's keyboard behavior on
+    // the container itself without turning nested rendered links into editors.
+    if (
+      event.target === event.currentTarget &&
+      (event.key === 'Enter' || event.key === ' ')
+    ) {
+      event.preventDefault();
+      event.currentTarget.click();
+    }
+  },
+  // #4990: the title is edited in place. The minicard sits inside the wrapper
+  // LINK to the card, so every click inside the open form would otherwise
+  // navigate away mid-edit. Cancelling the click's default stops that - except
+  // on the save button, whose own default IS the submit (the innermost element
+  // with an activation behaviour is the one that runs, so the link does not
+  // follow when the button is clicked).
+  'click .js-minicard-title-form'(event) {
+    event.stopPropagation();
+    if (!$(event.target).closest('button[type=submit]').length) {
+      event.preventDefault();
+    }
+  },
+  async 'submit .js-minicard-title-form'(event, templateInstance) {
+    event.preventDefault();
+    event.stopPropagation();
+    // #6604: `this` is the nested inlinedForm's data context
+    // ({ classNames: 'js-minicard-title-form' }), not the Card. The enclosing
+    // minicard template instance keeps the Card it was created with.
+    const card = templateInstance.data;
+    const title = templateInstance
+      .$('.js-edit-minicard-title')
+      .val()
+      ?.trim();
+    // An empty title would leave a card with nothing to click, so an empty
+    // save is a no-op rather than a way to lose the card - same as a list.
+    if (card && title && title !== card.getTitle()) {
+      await card.setTitle(title);
+    }
+  },
+  */
   'click .js-linked-link'() {
     if (this.isLinkedCard()) Utils.goCardId(this.linkedId);
     else if (this.isLinkedBoard())
       Utils.goBoardId(this.linkedId);
+  },
+  'click .js-card-move-up'(event) {
+    // The move buttons sit inside the minicard anchor; don't let the click
+    // bubble up and open the card detail view.
+    event.preventDefault();
+    event.stopPropagation();
+    moveCardBy(this, -1);
+  },
+  'click .js-card-move-down'(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    moveCardBy(this, 1);
   },
   'click .js-toggle-card-complete'(event) {
     // Trello-style "mark complete" toggle (left of the title). Don't let the
@@ -188,18 +620,29 @@ Template.minicard.events({
     }
     this.setDueComplete(!this.getDueComplete());
   },
+  // The minicard's own copy of this only ever wrote localStorage, so a
+  // logged-in user toggling it here set something nothing reads. One module
+  // now, for reading and for writing. client/lib/minicardLabelText.js
   'click .js-toggle-minicard-label-text'() {
-    if (window.localStorage.getItem('hiddenMinicardLabelText')) {
-      window.localStorage.removeItem('hiddenMinicardLabelText'); //true
-    } else {
-      window.localStorage.setItem('hiddenMinicardLabelText', 'true'); //true
-    }
+    toggleMinicardLabelText();
   },
   'click span.badge-icon.fa.fa-sort, click span.badge-text.check-list-sort' : Popup.open("editCardSortOrder"),
-  'click .minicard-labels'(event, tpl) {
-    if (tpl.find('.js-card-label:hover')) {
-      Popup.open("cardLabels")(event, {dataContextIfCurrentDataIsUndefined: Template.currentData()});
+  // A label on a minicard opens the card's labels, and ONLY that. The click used
+  // to reach the minicard as well, so the card details opened behind the popup:
+  // two things for one click, and the one you asked for on top of the one you
+  // did not.
+  //
+  // Which label was clicked is read from the EVENT rather than from `:hover`.
+  // `:hover` answers about the pointer, and on a touch screen it can still be
+  // true for whatever was tapped last - so a tap anywhere in the labels area
+  // could open the labels of a label nobody touched.
+  'click .minicard-labels'(event) {
+    if (!$(event.target).closest('.js-card-label').length) {
+      return; // not a label - let the click be the card's, as before
     }
+    event.preventDefault();
+    event.stopPropagation();
+    Popup.open("cardLabels")(event, {dataContextIfCurrentDataIsUndefined: Template.currentData()});
   },
   'click .js-open-minicard-details-menu'(event, tpl) {
     event.preventDefault();
@@ -266,6 +709,24 @@ Template.minicard.events({
 });
 
 Template.minicardChecklist.helpers({
+  // Checklists > Card due, Show on Minicard.
+  minicardChecklistDue(dueAt) {
+    return dueAt ? formatDateForDisplay(dueAt, true) : '';
+  },
+  /** #1591: folded for THIS user, under the same key the opened card uses, so
+   * the two agree. `this.checklist || this` because this template is called both
+   * with an explicit checklist and with one as the data context. */
+  checklistCollapsed() {
+    const checklist = this.checklist || this;
+    if (!checklist || !checklist._id) return false;
+    const cardId = (this.card && this.card._id) || checklist.cardId;
+    if (!cardId) return false;
+    // #6745: only this card's folds, not the whole user document.
+    const user = currentUserWith([`profile.collapsedCardSections.${cardId}`]);
+    if (!user) return false;
+    return user.getCollapsedCardSection(
+      cardId, user.checklistSectionKey(checklist._id)) === true;
+  },
   visibleItems() {
     const checklist = this.checklist || this;
     const items = checklist.items();
@@ -284,7 +745,49 @@ Template.minicardChecklist.helpers({
   },
 });
 
+// #6440: create the checklist item(s) for the minicard add-item form. Shared by
+// the Save-button click handler and the (rarely reached) form-submit handler.
+// The Save button needs an explicit click handler because the minicard — and so
+// the add-item <form> — is rendered inside the `a.minicard-wrapper` anchor, where
+// the native form `submit` event never reaches the Blaze event map; without this
+// the "+" add-item on the minicard did nothing. The blank-input guard and the
+// title parsing live in the pure, unit-tested models/lib/checklistItemTitles.js.
+function addMinicardChecklistItems(textarea, checklist) {
+  if (!textarea || !checklist) return;
+  const titles = parseChecklistItemTitles(textarea.value);
+  if (titles.length === 0) return;
+  const items = checklist.items();
+  const lastItem = items[items.length - 1] || null;
+  let sortIndex = Utils.calculateIndexData(lastItem, null).base;
+  titles.forEach(title => {
+    ChecklistItems.insert(buildChecklistItemPayload(title, checklist, sortIndex));
+    sortIndex += 1;
+  });
+  textarea.value = '';
+  textarea.focus();
+}
+
 Template.minicardChecklist.events({
+  'click .js-collapse-checklist'(event) {
+    // A minicard is a link to the card, and the title opens the rename form -
+    // neither must happen because somebody folded a checklist.
+    event.preventDefault();
+    event.stopPropagation();
+    const data = Template.currentData();
+    const checklist = (data && data.checklist) || data || this;
+    const user = ReactiveCache.getCurrentUser();
+    if (!checklist || !checklist._id || !user) return;
+    const cardId = (data && data.card && data.card._id) || checklist.cardId;
+    const key = user.checklistSectionKey(checklist._id);
+    const collapsed = user.getCollapsedCardSection(cardId, key) === true;
+    user.setCollapsedCardSection(cardId, key, !collapsed);
+  },
+  'keydown .js-collapse-checklist'(event) {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    event.stopPropagation();
+    $(event.currentTarget).trigger('click');
+  },
   'click .js-convert-checklist-item-to-card'(event) {
     event.stopPropagation();
     const formData = Blaze.getData(event.currentTarget);
@@ -325,25 +828,26 @@ Template.minicardChecklist.events({
     }
     $form.find('.js-close-inlined-form').trigger('click');
   },
+  // #6440: explicit click handler for the minicard "+" add-item Save button.
+  // The native form `submit` event does not fire on the minicard (the form is
+  // inside the `a.minicard-wrapper` anchor), so — unlike card-detail — we cannot
+  // rely on `submit .js-add-checklist-item`. This mirrors the already-working
+  // `click .js-submit-edit-checklist-item-form` above.
+  'click .js-submit-add-checklist-item-form'(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    const $form = $(event.currentTarget).closest('form');
+    const textarea = $form.find('textarea.js-add-checklist-item')[0];
+    const formData = Blaze.getData($form[0]) || Template.currentData() || {};
+    addMinicardChecklistItems(textarea, formData.checklist);
+  },
+  // Kept for completeness (e.g. card-detail-style contexts); on the minicard this
+  // rarely fires, so the click handler above is the real path. See #6440.
   'submit .js-add-checklist-item'(event, tpl) {
     event.preventDefault();
     const textarea = tpl.find('textarea.js-add-checklist-item');
-    if (!textarea) return;
-    const title = textarea.value.trim();
     const data = Template.currentData() || {};
-    const checklist = data.checklist;
-    if (!checklist || !title) return;
-    const items = checklist.items();
-    const lastItem = items[items.length - 1] || null;
-    const sortIndex = Utils.calculateIndexData(lastItem, null).base;
-    ChecklistItems.insert({
-      title,
-      checklistId: checklist._id,
-      cardId: checklist.cardId,
-      sort: sortIndex,
-    });
-    textarea.value = '';
-    textarea.focus();
+    addMinicardChecklistItems(textarea, data.checklist);
   },
   'click .js-delete-checklist-item': Popup.afterConfirm('checklistItemDelete', function () {
     Popup.back();
@@ -353,8 +857,9 @@ Template.minicardChecklist.events({
     }
   }),
   'keydown textarea.js-add-checklist-item'(event) {
-    if (event.keyCode === 13 && !event.shiftKey) {
+    if (isSubmitKey(event, { submitOnEnter: !!ReactiveCache.getCurrentUser()?.hasSubmitOnEnter?.() })) {
       event.preventDefault();
+      event.stopPropagation();
       const $form = $(event.currentTarget).closest('form');
       $form.find('button[type=submit]').click();
     }

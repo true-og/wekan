@@ -1,24 +1,82 @@
+import { currentRulesAccess } from '/client/lib/rulesAccess';
+import '/client/components/forms/dateFormatSettings';
 import { Meteor } from 'meteor/meteor';
 import { Template } from 'meteor/templating';
 import { ReactiveVar } from 'meteor/reactive-var';
+import { ReactiveDict } from 'meteor/reactive-dict';
 import { ReactiveCache } from '/imports/reactiveCache';
+import { liveAttachments } from '/models/lib/attachmentSoftDelete';
 import { TAPi18n } from '/imports/i18n';
 import { FlowRouter } from 'meteor/ostrio:flow-router-extra';
+const { allBoardsPath, SECTION_ARCHIVE } = require('/models/lib/allBoardsUrls');
+const {
+  SIDEBAR_BACK_CLOSE,
+  sidebarBackAction,
+} = require('/models/lib/sidebarBackAction');
+const {
+  CARD_LAYOUT,
+  MINICARD_LAYOUT,
+  applyLayoutOrder,
+  placeKey,
+  isMovableKey,
+} = require('/models/lib/cardFieldOrder');
+const { rowsForSide, CARD_SETTINGS_ROWS } = require('/models/lib/cardSettingsRows');
+const { isRowVisible } = require('/models/lib/cardFieldVisibility');
+const cardSettingsSections = require('/models/lib/cardSettingsSections');
+const cardSettingsCustomFields = require('/models/lib/cardSettingsCustomFields');
+const cardSettingsSplit = require('/models/lib/cardSettingsSplit');
+import { invalidateScrumNames } from '/client/components/boards/scrum/scrumFields';
 import { InfiniteScrolling } from '/client/lib/infiniteScrolling';
+import '/client/components/boards/exportScope';
 import AccessibilitySettings from '/models/accessibilitySettings';
 import Boards from '/models/boards';
+import CustomFields from '/models/customFields';
+import CustomBoardRoles from '/models/customBoardRoles';
+const { normalizeCustomCapabilities } = require('/models/lib/boardRoleCapabilities');
+// What a custom role's description lists, in this order (#3022).
+const CUSTOM_ROLE_SUMMARY = [
+  ['seesAllCards', 'custom-role-sees-all'],
+  ['comment', 'roles-status-comment'],
+  ['write', 'roles-status-write'],
+  ['moveCard', 'roles-status-move'],
+  ['inviteToBoard', 'roles-status-invite'],
+];
+import TableVisibilityModeSettings from '/models/tableVisibilityModeSettings';
+const boardViewSettings = require('/models/lib/boardViewSettings');
+import { allowBoardView } from '/client/lib/instanceFeatures';
+import Cards from '/models/cards';
 import Attachments from '/models/attachments';
 import { generateUniversalAttachmentUrl } from '/models/lib/universalUrlGenerator';
 import Integrations from '/models/integrations';
 import Lists from '/models/lists';
-import { BOARD_COLORS } from '/models/metadata/colors';
+import { listIdsForSwimlane } from '/models/lib/wipLimitGroupDecision.js';
 import { Filter } from '/client/lib/filter';
+import { loadSinceLastVisit } from '/client/lib/boardVisits';
 import { EscapeActions } from '/client/lib/escapeActions';
 import { Utils } from '/client/lib/utils';
 import {
+  exportDependenciesJson,
+  exportDependenciesSvg,
+} from '/client/lib/exportDependencies';
+import { parseDependencyLines } from '/client/lib/importDependencies';
+import { caretClassFor } from '/client/lib/sectionCaret';
+import { buildAttachmentUploadConfig } from '/client/lib/attachmentUploadConfig';
+import { toggleFold } from '/client/lib/foldState';
+import {
+  resolveShowLabelText,
+  toggleMinicardLabelText,
+  resolveShowCardLabelText,
+  hasCardLabelTextOverride,
+  toggleCardLabelText,
+  resetCardLabelTextOverride,
+} from '/client/lib/minicardLabelText';
+import {
   clearSidebarInstance,
+  getSidebarInstance,
   setSidebarInstance,
 } from '/client/features/sidebar/service';
+import { errorMessage } from '/client/lib/errorMessage';
+const { changeCount } = require('/models/lib/sinceLastVisit');
 
 export let Sidebar = null;
 
@@ -43,6 +101,9 @@ const viewTitles = {
   multiselection: 'multi-selection',
   customFields: 'custom-fields',
   archives: 'archives',
+  originalPositions: 'original-positions',
+  boardSummary: 'summary',
+  sinceLastVisit: 'since-last-visit',
 };
 
 Template.sidebar.onCreated(function() {
@@ -134,7 +195,137 @@ Template.sidebar.onCreated(function() {
   };
 });
 
+// ── Right sidebar drag-to-resize (desktop only) ──────────────────────────────
+// Drag the sidebar's left edge to change its width, like resizing a spreadsheet
+// column (mirrors the list resize in client/components/lists/list.js). The width
+// is saved to the user profile for logged-in users, or browser localStorage for
+// anonymous users on a public board. On phones the sidebar stays full width.
+const MIN_SIDEBAR_WIDTH = 280;
+const SIDEBAR_WIDTH_STORAGE_KEY = 'wekan-sidebar-width';
+const isMobileSidebar = () => window.innerWidth <= 800;
+const maxSidebarWidth = () =>
+  Math.max(MIN_SIDEBAR_WIDTH, Math.min(900, window.innerWidth - 80));
+
+function readSavedSidebarWidth() {
+  const user = ReactiveCache.getCurrentUser();
+  if (user) return user.getSidebarWidth();
+  try {
+    const v = window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY);
+    return v ? parseInt(v, 10) : undefined;
+  } catch (e) {
+    return undefined;
+  }
+}
+
+function saveSidebarWidth(width) {
+  const user = ReactiveCache.getCurrentUser();
+  if (user) {
+    Meteor.call('setSidebarWidth', width, err => {
+      if (err) console.error('Error saving sidebar width:', err);
+    });
+  } else {
+    try {
+      window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(width));
+    } catch (e) {
+      /* localStorage unavailable (private mode) — width just isn't persisted */
+    }
+  }
+}
+
+function applySavedSidebarWidth($sidebar) {
+  // On phones the sidebar is full width (a !important CSS rule), so never set an
+  // inline width there; clear any leftover so shrinking desktop -> mobile works.
+  if (isMobileSidebar()) {
+    $sidebar[0].style.removeProperty('width');
+    return;
+  }
+  const w = readSavedSidebarWidth();
+  if (typeof w === 'number' && w >= MIN_SIDEBAR_WIDTH) {
+    $sidebar[0].style.width = `${Math.min(w, maxSidebarWidth())}px`;
+  } else {
+    $sidebar[0].style.removeProperty('width'); // fall back to the CSS clamp
+  }
+}
+
+Template.sidebar.onRendered(function() {
+  const tpl = this;
+  const $sidebar = tpl.$('.board-sidebar');
+  const $handle = tpl.$('.js-sidebar-resize-handle');
+  if (!$sidebar.length || !$handle.length) return;
+
+  // Apply the saved width when the current user (and thus the saved value)
+  // resolves, and re-apply on window resize so crossing the mobile breakpoint
+  // clears/restores the inline width.
+  tpl.autorun(() => {
+    ReactiveCache.getCurrentUser(); // reactive dependency on login state
+    applySavedSidebarWidth($sidebar);
+  });
+  const onWinResize = () => applySavedSidebarWidth($sidebar);
+  window.addEventListener('resize', onWinResize);
+
+  let isResizing = false;
+  let startX = 0;
+  let startWidth = 0;
+  let lastWidth = 0;
+
+  const getPageX = (e) => {
+    const oe = e.originalEvent || e;
+    if (oe.touches && oe.touches.length) return oe.touches[0].pageX;
+    if (oe.changedTouches && oe.changedTouches.length) return oe.changedTouches[0].pageX;
+    return e.pageX;
+  };
+  // Direction: the sidebar docks to the logical inline-end. In LTR that is the
+  // right, so its left-edge handle widens the panel when dragged left; RTL puts
+  // the panel on the left, mirroring the direction.
+  const isRtl = () =>
+    (document.documentElement.getAttribute('dir') || document.dir) === 'rtl';
+
+  const startResize = (e) => {
+    if (isMobileSidebar()) return; // no resize on phones
+    isResizing = true;
+    startX = getPageX(e);
+    startWidth = $sidebar.outerWidth();
+    lastWidth = startWidth;
+    $('body').addClass('sidebar-resizing-active');
+    e.preventDefault();
+    e.stopPropagation();
+  };
+  const doResize = (e) => {
+    if (!isResizing) return;
+    const delta = (startX - getPageX(e)) * (isRtl() ? -1 : 1);
+    const w = Math.max(MIN_SIDEBAR_WIDTH, Math.min(maxSidebarWidth(), startWidth + delta));
+    lastWidth = w;
+    $sidebar[0].style.width = `${w}px`;
+    e.preventDefault();
+    e.stopPropagation();
+  };
+  const stopResize = (e) => {
+    if (!isResizing) return;
+    isResizing = false;
+    $('body').removeClass('sidebar-resizing-active');
+    saveSidebarWidth(Math.round(lastWidth));
+    if (e && e.preventDefault) e.preventDefault();
+  };
+
+  $handle.on('mousedown', startResize);
+  $(document).on('mousemove', doResize);
+  $(document).on('mouseup', stopResize);
+  // Native touch API so { passive: false } applies and preventDefault works.
+  $handle[0].addEventListener('touchstart', startResize, { passive: false });
+  document.addEventListener('touchmove', doResize, { passive: false });
+  document.addEventListener('touchend', stopResize, { passive: false });
+
+  tpl._sidebarResizeCleanup = () => {
+    window.removeEventListener('resize', onWinResize);
+    $(document).off('mousemove', doResize);
+    $(document).off('mouseup', stopResize);
+    document.removeEventListener('touchmove', doResize);
+    document.removeEventListener('touchend', stopResize);
+  };
+});
+
 Template.sidebar.onDestroyed(function() {
+  if (this._sidebarResizeCleanup) this._sidebarResizeCleanup();
   clearSidebarInstance(this);
   Sidebar = null;
 });
@@ -173,26 +364,33 @@ Template.sidebar.helpers({
 });
 
 Template.sidebar.events({
+  // Members and Labels fold by their headings, the way an opened card's
+  // sections do. Delegated here, on the sidebar, because the two headings live
+  // in two child templates and the rule is one rule.
+  // client/lib/foldState.js
+  'click .js-toggle-fold'(event) {
+    event.preventDefault();
+    toggleFold(event.currentTarget.dataset.fold);
+  },
+  // A heading with role="button" and a tabindex has to answer the keys a button
+  // answers, or it cannot be folded without a mouse.
+  'keydown .js-toggle-fold'(event) {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    toggleFold(event.currentTarget.dataset.fold);
+  },
   'click .js-hide-sidebar'(event, tpl) {
     tpl.hide();
   },
-  'click .js-toggle-sidebar'(event, tpl) {
-    tpl.toggle();
-  },
   'click .js-back-home'(event, tpl) {
-    tpl.setView();
-  },
-  'click .js-toggle-minicard-label-text'() {
-    const currentUser = ReactiveCache.getCurrentUser();
-    if (currentUser) {
-      Meteor.call('toggleMinicardLabelText');
-    } else if (window.localStorage.getItem('hiddenMinicardLabelText')) {
-      window.localStorage.removeItem('hiddenMinicardLabelText');
-      location.reload();
-    } else {
-      window.localStorage.setItem('hiddenMinicardLabelText', 'true');
-      location.reload();
+    if (sidebarBackAction(tpl.getView(), Utils.isMiniScreen()) === SIDEBAR_BACK_CLOSE) {
+      // #3576: Search is a full-screen panel on a phone. Reset its view for the
+      // next open, but close it now so Back returns directly to the card wall.
+      tpl._view.set(defaultView);
+      tpl.hide();
+      return;
     }
+    tpl.setView();
   },
   'click .js-shortcuts'() {
     FlowRouter.go('shortcuts');
@@ -203,15 +401,6 @@ Template.sidebar.events({
   },
   'click .js-vertical-scrollbars-toggle'() {
     ReactiveCache.getCurrentUser().toggleVerticalScrollbars();
-  },
-  'click .js-show-week-of-year-toggle'() {
-    const user = ReactiveCache.getCurrentUser();
-    if (user) {
-      user.toggleShowWeekOfYear();
-    } else {
-      const current = window.localStorage.getItem('showWeekOfYear') === 'true';
-      window.localStorage.setItem('showWeekOfYear', String(!current));
-    }
   },
   'click .sidebar-accessibility'(event, tpl) {
     FlowRouter.go('accessibility');
@@ -230,33 +419,33 @@ Template.sidebar.events({
 Blaze.registerHelper('Sidebar', () => Sidebar);
 
 Template.homeSidebar.helpers({
-  hiddenMinicardLabelText() {
-    const currentUser = ReactiveCache.getCurrentUser();
-    if (currentUser) {
-      return (currentUser.profile || {}).hiddenMinicardLabelText;
-    } else if (window.localStorage.getItem('hiddenMinicardLabelText')) {
-      return true;
-    } else {
-      return false;
-    }
-  },
   isVerticalScrollbars() {
     const user = ReactiveCache.getCurrentUser();
     return user && user.isVerticalScrollbars();
-  },
-  isShowWeekOfYear() {
-    const user = ReactiveCache.getCurrentUser();
-    if (!user) return window.localStorage.getItem('showWeekOfYear') === 'true';
-    return user.isShowWeekOfYear();
   },
   showActivities() {
     let ret = Utils.getCurrentBoard().showActivities ?? false;
     return ret;
   },
+  // The caret in front of the Activities heading - the same one an opened
+  // card's sections carry, from the same function, so the two cannot point
+  // different ways in one language. client/lib/sectionCaret.js
+  activitiesCaret() {
+    return caretClassFor(Utils.getCurrentBoard()?.showActivities ?? false);
+  },
 });
 
 Template.homeSidebar.events({
-  async 'click .js-toggle-show-activities'() {
+  async 'click .js-toggle-show-activities'(event) {
+    event.preventDefault();
+    await Utils.getCurrentBoard().toggleShowActivities();
+  },
+  // A heading that can be operated with the mouse can be operated with the
+  // keyboard: it carries role="button" and a tabindex, so Enter and Space have
+  // to do what a click does.
+  async 'keydown .js-toggle-show-activities'(event) {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
     await Utils.getCurrentBoard().toggleShowActivities();
   },
 });
@@ -289,7 +478,7 @@ Template.memberPopup.helpers({
     return ReactiveCache.getUser(this.userId);
   },
   isBoardAdmin() {
-    return ReactiveCache.getCurrentUser().isBoardAdmin();
+    return ReactiveCache.getCurrentUser()?.isBoardAdmin();
   },
   memberType() {
     const type = ReactiveCache.getUser(this.userId).isBoardAdmin() ? 'admin' : 'normal';
@@ -326,20 +515,54 @@ Template.memberPopup.helpers({
   isInvited() {
     return ReactiveCache.getUser(this.userId).isInvitedTo(Session.get('currentBoard'));
   },
+  // A virtual (placeholder) member created by a board import — can be mapped to an
+  // existing real board user from this popup.
+  isImportedMember() {
+    const user = ReactiveCache.getUser(this.userId);
+    return !!user && user.authenticationMethod === 'imported';
+  },
 });
 
+// Board Settings / Rules / <view>: open the Rules page in that view. The page
+// reads Session 'rulesViewMode' (client/components/rules/rulesMain.js), which
+// outlives the route change; the request counter brings it back to the rules
+// list tab if the page is already open on another tab. Unsaved Blocks work is
+// only lost after the same confirmation the Rules page sidebar asks for.
+function openRulesViewFromBoardMenu(mode) {
+  if (mode !== 'blocks' && Session.get('rulesBlocksDirty') && !confirm(TAPi18n.__('r-blocks-discard'))) return;
+  const currentBoard = Utils.getCurrentBoard();
+  Popup.back();
+  Session.set('rulesViewMode', mode);
+  Session.set('rulesViewRequest', (Session.get('rulesViewRequest') || 0) + 1);
+  // Already on the Rules page, this board sidebar stays mounted: close it so
+  // the chosen view is not left under it. From the board, the Rules page
+  // mounts its own copy, closed.
+  if (FlowRouter.getRouteName() === 'board-rules') {
+    getSidebarInstance()?.hide?.();
+    return;
+  }
+  if (currentBoard) {
+    FlowRouter.go('board-rules', { id: currentBoard._id, slug: currentBoard.slug });
+  }
+}
 
 Template.boardMenuPopup.events({
+  'click .js-open-rules-list-view'(event) { event.preventDefault(); openRulesViewFromBoardMenu('list'); },
+  'click .js-open-rules-workflow-view'(event) { event.preventDefault(); openRulesViewFromBoardMenu('workflow'); },
+  'click .js-open-rules-bots-view'(event) { event.preventDefault(); openRulesViewFromBoardMenu('bots'); },
+  'click .js-open-rules-blocks-view'(event) { event.preventDefault(); openRulesViewFromBoardMenu('blocks'); },
+  'click .js-open-rules-history'(event) { event.preventDefault(); openRulesViewFromBoardMenu('history'); },
+  'click .js-open-rules-import-export': Popup.open('rulesImportExport'),
   'click .js-rename-board': Popup.open('boardChangeTitle'),
   'click .js-open-rules-view'() {
-    Modal.openWide('rulesMain');
+    const currentBoard = Utils.getCurrentBoard();
     Popup.back();
-  },
-  'click .js-custom-fields'() {
-    if (Sidebar) {
-      Sidebar.setView('customFields');
+    if (currentBoard) {
+      FlowRouter.go('board-rules', {
+        id: currentBoard._id,
+        slug: currentBoard.slug,
+      });
     }
-    Popup.back();
   },
   'click .js-open-archives'() {
     if (Sidebar) {
@@ -347,9 +570,37 @@ Template.boardMenuPopup.events({
     }
     Popup.back();
   },
+  // Where each swimlane, list and card was put when it was made
+  // (originalPositionsSidebar). Open to everyone who sees the board, like
+  // Archived items: the server returns only what the reader may see.
+  'click .js-open-original-positions'() {
+    if (Sidebar) {
+      Sidebar.setView('originalPositions');
+    }
+    Popup.back();
+  },
+  // Board menu -> Summary (docs/Features/General/Summary/Summary.md).
+  'click .js-open-board-summary'() {
+    if (Sidebar) {
+      Sidebar.setView('boardSummary');
+    }
+    Popup.back();
+  },
+  // Board menu -> Since your last visit
+  // (docs/Features/General/Since-Last-Visit/Since-Last-Visit.md).
+  'click .js-open-since-last-visit'() {
+    if (Sidebar) {
+      Sidebar.setView('sinceLastVisit');
+    }
+    Popup.back();
+  },
   'click .js-change-board-color': Popup.open('boardChangeColor'),
+  'click .js-open-board-announcement': Popup.open('boardAnnouncement', { titleKey: 'board-announcement' }),
   'click .js-change-background-image': Popup.open('boardChangeBackgroundImage'),
-  'click .js-manage-board-backgrounds': Popup.open('boardBackgrounds'),
+  'click .js-open-notification-settings': Popup.open('notificationSettings', {
+    titleKey: 'notifications',
+    dataContext: { scope: 'board' },
+  }),
   'click .js-board-info-on-my-boards': Popup.open('boardInfoOnMyBoards'),
   'click .js-change-language': Popup.open('changeLanguage'),
   'click .js-delete-duplicate-lists': Popup.afterConfirm('deleteDuplicateLists', function() {
@@ -391,13 +642,26 @@ Template.boardMenuPopup.events({
       // You could add a toast notification here if available
     }
   }),
+  // #6792: Save as Template - the same words as the card's own action. A copy
+  // of this board becomes one of the user's board templates and opens.
+  async 'click .js-save-board-as-template'() {
+    const currentBoard = Utils.getCurrentBoard();
+    if (!currentBoard) return;
+    Popup.back();
+    try {
+      const template = await Meteor.callAsync('saveBoardAsTemplate', currentBoard._id);
+      FlowRouter.go('board', { id: template.boardId, slug: template.slug || 'board' });
+    } catch (err) {
+      alert(errorMessage(err));
+    }
+  },
   'click .js-archive-board ': Popup.afterConfirm('archiveBoard', async function() {
     const currentBoard = Utils.getCurrentBoard();
     try {
       await Meteor.callAsync('archiveBoard', currentBoard._id);
       FlowRouter.go('home');
     } catch (err) {
-      alert(err?.reason || err?.message || 'Failed to archive board');
+      alert(errorMessage(err));
     }
   }),
   'click .js-delete-board': Popup.afterConfirm('deleteBoard', function() {
@@ -408,9 +672,38 @@ Template.boardMenuPopup.events({
   }),
   'click .js-outgoing-webhooks': Popup.open('outgoingWebhooks'),
   'click .js-import-board': Popup.open('chooseBoardSource'),
-  'click .js-subtask-settings': Popup.open('boardSubtaskSettings'),
-  'click .js-card-settings': Popup.open('boardCardSettings'),
   'click .js-export-board': Popup.open('exportBoard'),
+  // Import INTO this board. `js-import-board` above is All Boards' own row,
+  // which makes a NEW board from a file - a different question with a nearly
+  // identical name, so the classes are kept apart.
+  'click .js-import-into-board': Popup.open('importBoardInto'),
+  // #6680: Swimlane/List/Card, together - see the jade comment above these
+  // three entries. "swimlane" and "list" are existing, already-translated
+  // words rather than new `<popupName>-title` keys (Popup.open's own
+  // convention comment explains why: a new key would show English in every
+  // language until each is translated). "Card Settings" already has its own
+  // title key from the shared table template, so it needs no override.
+  // Board Settings / Board View - "board-view" is the existing, translated
+  // "Board View" key the view switcher already uses.
+  'click .js-open-board-view-settings': Popup.open('boardViewSettings', { titleKey: 'board-view' }),
+  'click .js-open-board-scrum-settings'() {
+    Session.set('scrumOpenSettings', true);
+    Utils.setBoardView('board-view-sprints');
+    Popup.close();
+  },
+  'click .js-open-board-swimlane-settings': Popup.open('boardSwimlaneSettings', { titleKey: 'swimlane' }),
+  'click .js-open-board-date-settings': Popup.open('boardDateSettings', { titleKey: 'date' }),
+  'click .js-open-board-list-settings': Popup.open('boardListSettings', { titleKey: 'list' }),
+  // #2489: WIP Limit Groups is reached from Board Settings / Swimlane now -
+  // its click handler sits with the Swimlane popup's events below.
+  // Board Settings / Card: Card Settings with no card. Overriding
+  // `currentData` (rather than passing openOptions) is what actually reaches
+  // boardCardSettingsPopup's data context: Popup.open only falls back to
+  // `dataContextIfCurrentDataIsUndefined` when currentData() is falsy, and
+  // here it is always the board - whose fields are not Card Settings' data.
+  'click .js-open-board-card-settings'(event) {
+    Popup.open('boardCardSettings').call({ currentData: () => ({}) }, event);
+  },
 });
 
 Template.boardMenuPopup.onCreated(function() {
@@ -418,11 +711,295 @@ Template.boardMenuPopup.onCreated(function() {
   Meteor.call('_isApiEnabled', (e, result) => {
     this.apiEnabled.set(result);
   });
+  // How many changes "Since your last visit" holds, for its menu entry.
+  this.sinceVisitCount = new ReactiveVar(0);
+  loadSinceLastVisit(Session.get('currentBoard'), groups => {
+    this.sinceVisitCount.set(changeCount(groups));
+  });
+});
+
+// Board Settings / Board View (docs/Features/Board-Sidebar/Board-Settings/Board-View.md).
+// Rows come from the one shared BOARD_VIEWS table; every decision - what is
+// shown, what is default, what a click may change - is the pure module's,
+// applied through the Board instance setters, so the popup, the Board View
+// menu and Utils.boardView() can not disagree. Boards.allow's board-admin
+// rule enforces who may persist a click.
+// Rows reorder by drag and drop (jQuery UI sortable, as the custom fields
+// sidebar does). The DOM change is cancelled at the drop and the new order is
+// written to the board, so Blaze redraws the rows from the data rather than
+// keeping a DOM order the data does not have.
+// `handle` is the drag handle when drag handles are on, else the icon and
+// label (the templates put the class on whichever it is).
+// `axis`: 'y' for a single column; false where the rows flow into several
+// columns, so a row can be dropped sideways.
+// `ownListOnly`: an item dropped outside its own list - on another, unrelated
+// list - goes back to where it was, and nothing is written (Card Settings: a
+// row belongs to its section).
+function reorderOnDrop($list, { items, handle, keyOf, drop, axis = 'y', ownListOnly = false }) {
+  if (!$list.length || typeof $list.sortable !== 'function') return;
+  let outside = false;
+  let droppedOutside = false;
+  $list.sortable({
+    items, handle, axis, tolerance: 'pointer', distance: 5,
+    start() { outside = false; droppedOutside = false; },
+    out() { outside = true; },
+    over() { outside = false; },
+    // Read where it was dropped HERE: on release jQuery UI fires a delayed
+    // "out" for the list it was over just before "stop", so in stop the item
+    // always reads as outside.
+    beforeStop() { droppedOutside = outside; },
+    stop(evt, ui) {
+      const key = keyOf(ui.item[0]);
+      const keys = $list.find(items).toArray().map(keyOf);
+      $list.sortable('cancel');
+      if (ownListOnly && droppedOutside) return;
+      if (key) drop(key, keys);
+    },
+  });
+}
+// The keyboard way to do the same: Up and Down move a focused row one step.
+const ARROW_KEYS = { ArrowUp: 'up', ArrowDown: 'down' };
+
+Template.boardViewSettingsPopup.onRendered(function () {
+  reorderOnDrop(this.$('.js-board-view-sortable'), {
+    items: '> .js-board-view-row', handle: '.js-board-view-order-handle',
+    keyOf: el => el.dataset.view,
+    drop: (view, views) => Utils.getCurrentBoard()?.setVisibleBoardViewOrder(views, allowBoardView),
+  });
+});
+
+Template.boardViewSettingsPopup.helpers({
+  showDragHandles() {
+    return Utils.showDragHandles();
+  },
+  publicBoardsHidden() {
+    return Boolean(
+      TableVisibilityModeSettings.findOne('tableVisibilityMode-allowPrivateOnly')?.booleanValue,
+    );
+  },
+  boardViewRows() {
+    const board = Utils.getCurrentBoard();
+    // #6736: views the instance disabled are not rows; their board settings stay.
+    const ordered = boardViewSettings.orderedBoardViews(board).filter(v => allowBoardView(v.view));
+    return ordered.map(v => ({
+      view: v.view,
+      labelKey: v.labelKey,
+      icon: `fa ${v.icon}`,
+      showOnPublic: boardViewSettings.isBoardViewShown(board, v.view, 'public'),
+      showOnPrivate: boardViewSettings.isBoardViewShown(board, v.view, 'private'),
+      isDefaultPublic: boardViewSettings.defaultBoardView(board, 'public') === v.view,
+      isDefaultPrivate: boardViewSettings.defaultBoardView(board, 'private') === v.view,
+    }));
+  },
+});
+
+Template.boardViewSettingsPopup.events({
+  'click .js-board-view-show'(evt) {
+    evt.preventDefault();
+    const board = Utils.getCurrentBoard();
+    if (!board) return;
+    const visibility = evt.currentTarget.dataset.visibility;
+    const view = evt.currentTarget.closest('[data-view]').dataset.view;
+    board.setBoardViewShown(view, visibility, !board.isBoardViewShown(view, visibility));
+  },
+  'click .js-board-view-default'(evt) {
+    evt.preventDefault();
+    const board = Utils.getCurrentBoard();
+    if (!board) return;
+    const visibility = evt.currentTarget.dataset.visibility;
+    const view = evt.currentTarget.closest('[data-view]').dataset.view;
+    board.setDefaultBoardView(view, visibility);
+  },
+  'click .js-board-view-order-handle'(evt) {
+    evt.preventDefault();
+  },
+  'keydown .js-board-view-order-handle'(evt) {
+    const direction = ARROW_KEYS[evt.key];
+    const board = Utils.getCurrentBoard();
+    if (!direction || !board) return;
+    evt.preventDefault();
+    board.moveBoardView(evt.currentTarget.closest('[data-view]').dataset.view, direction, allowBoardView);
+  },
+});
+
+// #6680: Board Settings / Swimlane - moved here from the header (see
+// client/components/main/header.js history). Client calls the Board
+// instance method directly; Boards.allow's allowIsBoardAdmin (the default
+// board-setting rule) enforces who may actually persist it.
+Template.boardSwimlaneSettingsPopup.helpers({
+  isSwimlaneHeightResizeLocked() {
+    const board = Utils.getCurrentBoard();
+    return Boolean(board && board.getSwimlaneHeightResizeLocked());
+  },
+  hasSharedListHeaders() {
+    const board = Utils.getCurrentBoard();
+    return Boolean(board && board.hasSharedListHeaders());
+  },
+});
+
+Template.boardSwimlaneSettingsPopup.events({
+  'click .js-toggle-swimlane-height-resize-lock'() {
+    const board = Utils.getCurrentBoard();
+    if (!board) return;
+    board.setSwimlaneHeightResizeLocked(!board.getSwimlaneHeightResizeLocked());
+  },
+  // #2805: one shared, sticky list header row (models/boards.js).
+  'click .js-toggle-shared-list-headers'() {
+    const board = Utils.getCurrentBoard();
+    if (!board) return;
+    board.setSharedListHeaders(!board.hasSharedListHeaders());
+  },
+  // #2489: Board Settings / Swimlane / WIP Limit Groups. Opened from inside
+  // this popup, so Popup.open stacks it and its back arrow returns here.
+  'click .js-open-board-wip-limit-groups': Popup.open('wipLimitGroups', { titleKey: 'wip-limit-groups' }),
+});
+
+// #6680: Board Settings / List - moved here from the header. The board-wide
+// "same width for all lists" value itself is still set from a list's own
+// "Set width" popup (client/components/lists/list.js saveListWidth); this is
+// only the two board-wide switches.
+Template.boardListSettingsPopup.helpers({
+  isListWidthResizeLocked() {
+    const board = Utils.getCurrentBoard();
+    return Boolean(board && board.getListWidthResizeLocked());
+  },
+  isSameWidthForAllLists() {
+    const board = Utils.getCurrentBoard();
+    return Boolean(board && board.getSameWidthForAllLists());
+  },
+});
+
+Template.boardListSettingsPopup.events({
+  'click .js-toggle-list-width-resize-lock'() {
+    const board = Utils.getCurrentBoard();
+    if (!board) return;
+    board.setListWidthResizeLocked(!board.getListWidthResizeLocked());
+  },
+  'click .js-toggle-same-width-for-all-lists'() {
+    const board = Utils.getCurrentBoard();
+    if (!board) return;
+    board.setSameWidthForAllLists(!board.getSameWidthForAllLists());
+  },
+});
+
+// #2489: Board Settings / WIP Limit Groups - a shared WIP limit across two or
+// more of this board's lists together. See models/lib/wipLimitGroupDecision.js
+// for the pure combined-count / over-limit arithmetic this popup and the list
+// header both reuse, and models/boards.js for the `wipLimitGroups` schema and
+// helpers (addWipLimitGroup/updateWipLimitGroup/removeWipLimitGroup).
+Template.wipLimitGroupsPopup.helpers({
+  wipLimitGroups() {
+    const board = Utils.getCurrentBoard();
+    return board ? board.getWipLimitGroups() : [];
+  },
+  boardLists() {
+    const board = Utils.getCurrentBoard();
+    if (!board) return [];
+    return ReactiveCache.getLists(
+      { boardId: board._id, archived: false },
+      { sort: { sort: 1 } },
+    );
+  },
+  isListInGroup(listId, groupListIds) {
+    return Array.isArray(groupListIds) && groupListIds.includes(listId);
+  },
+  // #2380: swimlanes to offer in the "apply to whole swimlane" quick-select.
+  boardSwimlanes() {
+    const board = Utils.getCurrentBoard();
+    if (!board) return [];
+    return ReactiveCache.getSwimlanes(
+      { boardId: board._id, archived: false },
+      { sort: { sort: 1 } },
+    );
+  },
+});
+
+Template.wipLimitGroupsPopup.events({
+  'click .js-toggle-wip-limit-group-enabled'(event) {
+    event.preventDefault();
+    const board = Utils.getCurrentBoard();
+    const groupId = $(event.currentTarget).closest('.wip-limit-group').data('id');
+    const group = board && board.getWipLimitGroups().find(g => g._id === groupId);
+    if (!board || !group) return;
+    board.updateWipLimitGroup(groupId, { enabled: !group.enabled });
+  },
+  'click .js-remove-wip-limit-group'(event) {
+    event.preventDefault();
+    const board = Utils.getCurrentBoard();
+    const groupId = $(event.currentTarget).closest('.wip-limit-group').data('id');
+    if (!board || !groupId) return;
+    board.removeWipLimitGroup(groupId);
+  },
+  'submit .wip-limit-group'(event, tpl) {
+    event.preventDefault();
+    const board = Utils.getCurrentBoard();
+    const form = $(event.currentTarget);
+    const groupId = form.data('id');
+    if (!board || !groupId) return;
+
+    const listIds = form
+      .find('.js-wip-limit-group-list-toggle:checked')
+      .map((_, el) => $(el).data('list-id'))
+      .get();
+    const name = form.find('.js-wip-limit-group-name').val();
+    const limit = parseInt(form.find('.js-wip-limit-group-limit-value').val(), 10);
+    if (!Number.isFinite(limit) || limit < 1) return;
+    if (listIds.length < 2) return;
+
+    board.updateWipLimitGroup(groupId, { listIds, name, limit });
+  },
+  // #2380: "apply to whole swimlane" quick-select - checks the boxes of
+  // exactly the lists that belong to the chosen swimlane (models/lists.js
+  // swimlaneId), reusing the same #2489 group creation flow rather than a
+  // separate swimlane-limit mechanism. Also fills the group name with the
+  // swimlane's own title as a convenient default (still editable).
+  'click .js-wip-limit-group-apply-swimlane'(event, tpl) {
+    event.preventDefault();
+    const board = Utils.getCurrentBoard();
+    const form = $(event.currentTarget).closest('.wip-limit-group-new');
+    const swimlaneId = form.find('.js-wip-limit-group-swimlane').val();
+    if (!board || !swimlaneId) return;
+
+    const lists = ReactiveCache.getLists(
+      { boardId: board._id, archived: false },
+      { sort: { sort: 1 } },
+    );
+    const listIds = listIdsForSwimlane(lists, swimlaneId);
+
+    form.find('.js-wip-limit-group-new-list').each((_, el) => {
+      $(el).prop('checked', listIds.includes($(el).data('list-id')));
+    });
+  },
+  'submit .wip-limit-group-new'(event, tpl) {
+    event.preventDefault();
+    const board = Utils.getCurrentBoard();
+    if (!board) return;
+    const form = $(event.currentTarget);
+
+    const listIds = form
+      .find('.js-wip-limit-group-new-list:checked')
+      .map((_, el) => $(el).data('list-id'))
+      .get();
+    const limit = parseInt(form.find('.js-wip-limit-group-new-limit').val(), 10);
+    if (!Number.isFinite(limit) || limit < 1) return;
+    // A "group" of fewer than two lists is just that list's own individual
+    // wipLimit - refuse rather than silently create a pointless group.
+    if (listIds.length < 2) return;
+
+    board.addWipLimitGroup(listIds, limit);
+    form.find('.js-wip-limit-group-new-list').prop('checked', false);
+    form.find('.js-wip-limit-group-new-limit').val(1);
+  },
 });
 
 Template.boardMenuPopup.helpers({
+  sinceVisitCount() {
+    return Template.instance().sinceVisitCount.get();
+  },
+  // #2217: a member reads the board's Rules when both switches allow it.
+  rulesReadable() { return currentRulesAccess() === 'read'; },
   isBoardAdmin() {
-    return ReactiveCache.getCurrentUser().isBoardAdmin();
+    return ReactiveCache.getCurrentUser()?.isBoardAdmin();
   },
   withApi() {
     return Template.instance().apiEnabled.get();
@@ -448,6 +1025,7 @@ Template.memberPopup.events({
     Popup.back();
   },
   'click .js-change-role': Popup.open('changePermissions'),
+  'click .js-map-imported-member': Popup.open('mapImportedMember'),
   'click .js-remove-member': Popup.afterConfirm('removeMember', async function() {
     // This works from removing member from board, card members and assignees.
     const boardId = Session.get('currentBoard');
@@ -471,6 +1049,115 @@ Template.memberPopup.events({
 
 });
 
+// REAL (non-imported), active members of the current board that a virtual (placeholder)
+// member can be mapped onto. Shown when the search box is empty, because mapping onto
+// someone who is already on the board is the common case and changes no roles at all.
+function importedMapTargets(placeholderId) {
+  const board = Utils.getCurrentBoard();
+  if (!board) return [];
+  return (board.activeMembers() || [])
+    .map(m => ReactiveCache.getUser(m.userId))
+    .filter(u => u && u._id !== placeholderId && u.authenticationMethod !== 'imported')
+    .map(u => ({ ...u, isBoardMember: true }));
+}
+
+// #6519: after a Trello/CSV import the real people usually are NOT board members yet, so
+// a list limited to board members showed nothing but the admin and there was no way to
+// reach anyone else. Typing searches every real user through the same `searchUsers`
+// method (and therefore the same permission and same-org/team rules) the normal
+// add-member typeahead uses; picking a non-member maps AND adds them to the board with
+// the imported member's own role. Imported placeholders are filtered out — mapping a
+// virtual member onto another virtual member would only move the problem.
+Template.mapImportedMemberPopup.onCreated(function () {
+  this.searchResults = new ReactiveVar(null); // null = not searching, show board members
+  this.searching = new ReactiveVar(false);
+  this.searchTimeout = null;
+
+  this.runSearch = query => {
+    if (!query || query.length < 2) {
+      this.searchResults.set(null);
+      this.searching.set(false);
+      return;
+    }
+    const boardId = Session.get('currentBoard');
+    const placeholderId = this.data && this.data.userId;
+    this.searching.set(true);
+    Meteor.call('searchUsers', query, boardId, (error, results) => {
+      this.searching.set(false);
+      if (error) {
+        console.error('mapImportedMemberPopup search failed:', error);
+        this.searchResults.set([]);
+        return;
+      }
+      const board = Utils.getCurrentBoard();
+      const memberIds = new Set(
+        ((board && board.activeMembers()) || []).map(m => m.userId),
+      );
+      this.searchResults.set(
+        (results || [])
+          .filter(u => u && u._id !== placeholderId && u.authenticationMethod !== 'imported')
+          .map(u => ({ ...u, isBoardMember: memberIds.has(u._id) })),
+      );
+    });
+  };
+});
+
+Template.mapImportedMemberPopup.onDestroyed(function () {
+  if (this.searchTimeout) clearTimeout(this.searchTimeout);
+});
+
+Template.mapImportedMemberPopup.helpers({
+  mapTargets() {
+    const tpl = Template.instance();
+    const found = tpl.searchResults.get();
+    return found === null ? importedMapTargets(this.userId) : found;
+  },
+  hasMapTargets() {
+    const tpl = Template.instance();
+    const found = tpl.searchResults.get();
+    return (found === null ? importedMapTargets(this.userId) : found).length > 0;
+  },
+  searching() {
+    return Template.instance().searching.get();
+  },
+  // Empty for a different reason depending on whether a search ran: "nobody matched"
+  // is not the same message as "this board has no other real members yet".
+  mapTargetsEmptyText() {
+    const tpl = Template.instance();
+    return TAPi18n.__(
+      tpl.searchResults.get() === null
+        ? 'map-to-existing-user-none'
+        : 'map-to-existing-user-no-results',
+    );
+  },
+});
+
+Template.mapImportedMemberPopup.events({
+  'keyup .js-map-target-search-input'(event, tpl) {
+    const query = (event.target.value || '').trim();
+    if (tpl.searchTimeout) clearTimeout(tpl.searchTimeout);
+    // Same 300ms debounce as the add-member typeahead.
+    tpl.searchTimeout = setTimeout(() => tpl.runSearch(query), 300);
+  },
+  'click .js-pick-map-target'(event) {
+    const targetId = event.currentTarget.dataset.id;
+    const placeholderId = this.userId;
+    const boardId = Session.get('currentBoard');
+    if (targetId && placeholderId && boardId) {
+      Meteor.call('mapImportedBoardMember', boardId, placeholderId, targetId, error => {
+        // Surface a refused mapping (e.g. the same-org/team restriction) instead of
+        // closing the popup as if it had worked.
+        if (error) {
+          console.error('mapImportedBoardMember failed:', error);
+          window.alert(error.reason || error.message || String(error));
+          return;
+        }
+        Popup.back();
+      });
+    }
+  },
+});
+
 Template.removeMemberPopup.helpers({
   user() {
     return ReactiveCache.getUser(this.userId);
@@ -486,35 +1173,40 @@ Template.leaveBoardPopup.helpers({
   },
 });
 
-Template.membersWidget.onCreated(function() {
-  this.error = new ReactiveVar('');
-  this.loading = new ReactiveVar(false);
-  this.findOrgsOptions = new ReactiveVar({});
-  this.findTeamsOptions = new ReactiveVar({});
-
-  this.page = new ReactiveVar(1);
-  this.teamPage = new ReactiveVar(1);
-  this.autorun(() => {
-    const limitOrgs = this.page.get() * Number.MAX_SAFE_INTEGER;
-    this.subscribe('org', this.findOrgsOptions.get(), limitOrgs, () => {});
+// The state the board's organization and team pickers share: an error and a
+// loading flag, and a subscription to `publication` that follows the paged
+// find options - with a second one to people for the pickers that list a
+// team's or organization's members.
+function initGroupPickerState(tpl, publication, { withPeople = false } = {}) {
+  tpl.error = new ReactiveVar('');
+  tpl.loading = new ReactiveVar(false);
+  tpl.findOrgsOptions = new ReactiveVar({});
+  tpl.page = new ReactiveVar(1);
+  tpl.autorun(() => {
+    const limit = tpl.page.get() * Number.MAX_SAFE_INTEGER;
+    tpl.subscribe(publication, tpl.findOrgsOptions.get(), limit, () => {});
   });
+  if (withPeople) {
+    tpl.findUsersOptions = new ReactiveVar({});
+    tpl.userPage = new ReactiveVar(1);
+    tpl.autorun(() => {
+      const limitUsers = tpl.userPage.get() * Number.MAX_SAFE_INTEGER;
+      tpl.subscribe('people', tpl.findUsersOptions.get(), limitUsers, () => {});
+    });
+  }
+  tpl.setError = error => tpl.error.set(error);
+  tpl.setLoading = w => tpl.loading.set(w);
+  tpl.isLoading = () => tpl.loading.get();
+}
 
+Template.membersWidget.onCreated(function() {
+  initGroupPickerState(this, 'org');
+  this.findTeamsOptions = new ReactiveVar({});
+  this.teamPage = new ReactiveVar(1);
   this.autorun(() => {
     const limitTeams = this.teamPage.get() * Number.MAX_SAFE_INTEGER;
     this.subscribe('team', this.findTeamsOptions.get(), limitTeams, () => {});
   });
-
-  this.setError = function(error) {
-    this.error.set(error);
-  };
-
-  this.setLoading = function(w) {
-    this.loading.set(w);
-  };
-
-  this.isLoading = function() {
-    return this.loading.get();
-  };
 });
 
 Template.membersWidget.onRendered(function() {
@@ -529,14 +1221,12 @@ Template.membersWidget.helpers({
   },
   isWorker() {
     const user = ReactiveCache.getCurrentUser();
-    if (user) {
-      return Meteor.call(Boards.hasWorker(user.memberId));
-    } else {
-      return false;
-    }
+    // Boards.hasWorker is not a function of the collection; the board's own
+    // helper answers for the current user.
+    return !!(user && user.isWorker());
   },
   isBoardAdmin() {
-    return ReactiveCache.getCurrentUser().isBoardAdmin();
+    return ReactiveCache.getCurrentUser()?.isBoardAdmin();
   },
   AtLeastOneOrgWasCreated(){
     let orgs = ReactiveCache.getOrgs({}, {sort: { createdAt: -1 }});
@@ -558,6 +1248,7 @@ Template.membersWidget.helpers({
       { name: TAPi18n.__('people'), slug: 'people' },
       { name: TAPi18n.__('organizations'), slug: 'organizations' },
       { name: TAPi18n.__('teams'), slug: 'teams' },
+      { name: TAPi18n.__('domains'), slug: 'domains' },
     ];
   },
 });
@@ -568,23 +1259,26 @@ Template.membersWidget.events({
   'click .js-manage-board-members': Popup.open('addMember'),
   'click .js-manage-board-addOrg': Popup.open('addBoardOrg'),
   'click .js-manage-board-addTeam': Popup.open('addBoardTeam'),
-  'click .js-import': Popup.open('boardImportBoard'),
+  'click .js-manage-board-addDomain': Popup.open('addBoardDomain'),
   'click .js-import-board': Popup.open('chooseBoardSource'),
+  // Boards in Archive is a SECTION of All Boards, not a page of its own: the
+  // row in its left menu. `/archive` is the full-width page that section
+  // replaced. docs/Features/All-Boards/Archive.md
   'click .js-open-archived-board'() {
-    Modal.open('archivedBoards');
+    FlowRouter.go(allBoardsPath(SECTION_ARCHIVE, []));
   },
   'click .sandstorm-powerbox-request-identity'() {
-    window.sandstormRequestIdentity();
+    window.sandstormRequestIdentity(Session.get('currentBoard'));
   },
   'click .js-member-invite-accept'() {
     const boardId = Session.get('currentBoard');
-    ReactiveCache.getCurrentUser().removeInvite(boardId);
+    Meteor.call('acceptInvite', boardId);
   },
   'click .js-member-invite-decline'() {
     const boardId = Session.get('currentBoard');
     Meteor.call('quitBoard', boardId, (err, ret) => {
       if (!err && ret) {
-        ReactiveCache.getCurrentUser().removeInvite(boardId);
+        // quitBoard already clears the invitation on the server.
         FlowRouter.go('home');
       }
     });
@@ -592,6 +1286,20 @@ Template.membersWidget.events({
 });
 
 Template.outgoingWebhooksPopup.helpers({
+  // #2026 / #1377: the activity picker of an existing webhook (this).
+  webhookPicker() {
+    const { pickerState } = require('/models/lib/webhookActivityPicker');
+    return pickerState(this.activities);
+  },
+  webhookActivityGroups() {
+    const { pickerState } = require('/models/lib/webhookActivityPicker');
+    const { GROUP_KEYS } = require('/models/lib/notificationActivityGroups');
+    const state = pickerState(this.activities);
+    return GROUP_KEYS.map(key => ({ key, labelKey: `notification-activity-${key}`, checked: !state.all && state.groups.includes(key) }));
+  },
+  webhookGranted(integrationId) {
+    return webhookGrants.get(integrationId) === true;
+  },
   boardId() {
     return Session.get('currentBoard') || Integrations.Const.GLOBAL_WEBHOOK_ID;
   },
@@ -613,8 +1321,33 @@ Template.outgoingWebhooksPopup.helpers({
   },
 });
 
+// Which webhooks this grain may already reach (Sandstorm only), asked once
+// per webhook when the popup shows it.
+const webhookGrants = new ReactiveDict();
+Template.outgoingWebhooksPopup.onRendered(function () {
+  if (!(Meteor.settings.public && Meteor.settings.public.sandstorm)) return;
+  this.autorun(() => {
+    const boardId = Session.get('currentBoard') || Integrations.Const.GLOBAL_WEBHOOK_ID;
+    for (const integration of ReactiveCache.getIntegrations({ boardId })) {
+      Meteor.callAsync('sandstormWebhookGrantStatus', integration._id)
+        .then(({ granted }) => webhookGrants.set(integration._id, granted))
+        .catch(() => webhookGrants.set(integration._id, false));
+    }
+  });
+});
+
 Template.outgoingWebhooksPopup.events({
-  'click .js-toggle-webhook-enabled'(evt) {
+  async 'click .js-sandstorm-webhook-grant'(evt) {
+    evt.preventDefault();
+    const integration = this;
+    try {
+      const granted = await window.sandstormRequestWebhook(integration._id, integration.title || integration.url);
+      webhookGrants.set(integration._id, !!granted);
+    } catch (error) {
+      console.error('sandstormRequestWebhook', error);
+    }
+  },
+  'click .js-toggle-webhook-enabled, click .js-toggle-webhook-mattermost-dm, click .js-toggle-webhook-activity-all, click .js-toggle-webhook-activity-group'(evt) {
     evt.preventDefault();
     $(evt.currentTarget).find(MCB).toggleClass(CKCLS);
   },
@@ -632,12 +1365,25 @@ Template.outgoingWebhooksPopup.events({
       .find(MCB)
       .hasClass(CKCLS);
     let remove = false;
+    // #2026 / #1377: the picked activities, in an existing webhook's form.
+    const allToggle = $(evt.target).find('.js-toggle-webhook-activity-all');
+    let pickedActivities;
+    if (allToggle.length) {
+      const { activitiesFor } = require('/models/lib/webhookActivityPicker');
+      pickedActivities = activitiesFor({ all: allToggle.find(MCB).hasClass(CKCLS),
+        groups: $(evt.target).find('.js-toggle-webhook-activity-group').toArray()
+          .filter(el => $(el).find(MCB).hasClass(CKCLS)).map(el => el.dataset.group) });
+    }
+    // #1297: present only in an existing webhook's form.
+    const dmToggle = $(evt.target).find('.js-toggle-webhook-mattermost-dm');
     const values = {
       url,
       type,
       token,
       title,
       enabled,
+      ...(dmToggle.length ? { mattermostDirectMessages: dmToggle.find(MCB).hasClass(CKCLS) } : {}),
+      ...(pickedActivities ? { activities: pickedActivities } : {}),
     };
 
     const findIntegration = function(cond) {
@@ -674,101 +1420,111 @@ Template.outgoingWebhooksPopup.events({
       }
       Popup.back();
     } catch (error) {
-      alert(error?.reason || error?.message || 'Failed to save webhook');
+      alert(errorMessage(error));
     }
   },
 });
 
+// The board popup is the shared export body (client/components/boards/exportScope.js)
+// with the widest scope: every format, every filename and the URL builder behind
+// them live in that one table, so this popup has nothing of its own to compute
+// except the NAME of what is being exported. The nineteen helpers that used to
+// build those URLs here are gone with the markup that called them - two lists of
+// formats was how the board menu and the other three menus drifted apart.
 Template.exportBoardPopup.helpers({
-  withApi() {
-    return Template.instance().apiEnabled.get();
-  },
-  exportUrl() {
-    const params = {
-      boardId: Session.get('currentBoard'),
-    };
-    const queryParams = {
-      authToken: Accounts._storedLoginToken(),
-    };
-    return FlowRouter.path('/api/boards/:boardId/export', params, queryParams);
-  },
-  exportUrlExcel() {
-    const params = {
-      boardId: Session.get('currentBoard'),
-    };
-    const queryParams = {
-      authToken: Accounts._storedLoginToken(),
-    };
-    return FlowRouter.path(
-      '/api/boards/:boardId/exportExcel',
-      params,
-      queryParams,
-    );
-  },
-  exportFilenameExcel() {
-    const boardId = Session.get('currentBoard');
-    return `export-board-excel-${boardId}.xlsx`;
-  },
-  exportCsvUrl() {
-    const params = {
-      boardId: Session.get('currentBoard'),
-    };
-    const queryParams = {
-      authToken: Accounts._storedLoginToken(),
-      delimiter: ',',
-    };
-    return FlowRouter.path(
-      '/api/boards/:boardId/export/csv',
-      params,
-      queryParams,
-    );
-  },
-  exportScsvUrl() {
-    const params = {
-      boardId: Session.get('currentBoard'),
-    };
-    const queryParams = {
-      authToken: Accounts._storedLoginToken(),
-      delimiter: ';',
-    };
-    return FlowRouter.path(
-      '/api/boards/:boardId/export/csv',
-      params,
-      queryParams,
-    );
-  },
-  exportTsvUrl() {
-    const params = {
-      boardId: Session.get('currentBoard'),
-    };
-    const queryParams = {
-      authToken: Accounts._storedLoginToken(),
-      delimiter: '\t',
-    };
-    return FlowRouter.path(
-      '/api/boards/:boardId/export/csv',
-      params,
-      queryParams,
-    );
-  },
-  exportJsonFilename() {
-    const boardId = Session.get('currentBoard');
-    return `export-board-${boardId}.json`;
-  },
-  exportCsvFilename() {
-    const boardId = Session.get('currentBoard');
-    return `export-board-${boardId}.csv`;
-  },
-  exportTsvFilename() {
-    const boardId = Session.get('currentBoard');
-    return `export-board-${boardId}.tsv`;
+  // #1173: the shared export body names the file after what was exported, and
+  // for this popup that is the board.
+  boardTitle() {
+    const board = ReactiveCache.getBoard(Session.get('currentBoard'));
+    return (board && board.title) || 'export-board';
   },
 });
 
 Template.exportBoardPopup.events({
+  'click .js-export-to-trello': Popup.open('exportToTrello'),
   'click .html-export-board': async event => {
     event.preventDefault();
-    await ExportHtml(Popup)();
+    const { default: createHtmlExport } = await import('/client/lib/exportHTML');
+    await createHtmlExport(Popup)();
+  },
+  // #3392: export the board's card dependency ("Red Strings") lines.
+  'click .js-export-dependencies-json'(event) {
+    event.preventDefault();
+    exportDependenciesJson(Session.get('currentBoard'));
+    Popup.close();
+  },
+  'click .js-export-dependencies-svg'(event) {
+    event.preventDefault();
+    exportDependenciesSvg(Session.get('currentBoard'));
+    Popup.close();
+  },
+});
+
+// #3392: import dependency ("Red Strings") lines from a JSON/SVG file into a
+// chosen board. Reachable from All Boards / New / Import / Dependencies.
+Template.chooseBoardSourcePopup.events({
+  'click .js-import-dependencies': Popup.open('importDependencies'),
+});
+
+Template.importDependenciesPopup.onCreated(function () {
+  this.fileText = new ReactiveVar('');
+  this.importResult = new ReactiveVar('');
+});
+
+Template.importDependenciesPopup.helpers({
+  boardsForDependencyImport() {
+    const userId = Meteor.userId();
+    return ReactiveCache.getBoards(
+      { 'members.userId': userId, archived: false },
+      { sort: { sort: 1, title: 1 } },
+    );
+  },
+  importResult() {
+    return Template.instance().importResult.get();
+  },
+});
+
+Template.importDependenciesPopup.events({
+  'change .js-import-dependencies-file'(event, tpl) {
+    const file = event.currentTarget.files && event.currentTarget.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = e => tpl.fileText.set(e.target.result || '');
+    reader.readAsText(file);
+  },
+  'submit .js-import-dependencies-form'(event, tpl) {
+    event.preventDefault();
+    const boardId = tpl.find('.js-import-dependencies-board').value;
+    const fileEl = tpl.find('.js-import-dependencies-file');
+    const filename =
+      fileEl && fileEl.files && fileEl.files[0] ? fileEl.files[0].name : '';
+    const text =
+      tpl.fileText.get() || tpl.find('.js-import-dependencies-text').value || '';
+    let lines = [];
+    try {
+      lines = parseDependencyLines(text, filename);
+    } catch (e) {
+      tpl.importResult.set(TAPi18n.__('import-dependencies-parse-error'));
+      return;
+    }
+    if (!boardId || lines.length === 0) {
+      tpl.importResult.set(TAPi18n.__('import-dependencies-empty'));
+      return;
+    }
+    Meteor.call('importBoardDependencies', boardId, lines, (err, res) => {
+      if (err) {
+        tpl.importResult.set(err.reason || err.message || String(err));
+        return;
+      }
+      // #6732: an import combines - it also says how many were already there.
+      tpl.importResult.set(
+        TAPi18n.__('import-dependencies-merged', {
+          imported: res.imported,
+          skipped: res.skipped,
+          unmatched: res.unmatched,
+        }),
+      );
+    });
   },
 });
 
@@ -779,7 +1535,7 @@ Template.labelsWidget.events({
 
 Template.labelsWidget.helpers({
   isBoardAdmin() {
-    return ReactiveCache.getCurrentUser().isBoardAdmin();
+    return ReactiveCache.getCurrentUser()?.isBoardAdmin();
   },
 });
 
@@ -827,25 +1583,8 @@ function draggableMembersLabelsWidgets() {
 Template.membersWidget.onRendered(draggableMembersLabelsWidgets);
 Template.labelsWidget.onRendered(draggableMembersLabelsWidgets);
 
-Template.boardChangeColorPopup.helpers({
-  backgroundColors() {
-    return BOARD_COLORS;
-  },
-  isSelected() {
-    const currentBoard = Utils.getCurrentBoard();
-    return currentBoard.color === Template.currentData().toString();
-  },
-});
-
-Template.boardChangeColorPopup.events({
-  async 'click .js-select-background'(evt) {
-    evt.preventDefault();
-    evt.stopPropagation();
-    const currentBoard = Utils.getCurrentBoard();
-    const newColor = this.toString();
-    await currentBoard.setColor(newColor);
-  },
-});
+// docs/Theme/Theme.md: the board color popup now renders the shared themeColorPicker
+// (scope="board"); its logic lives in client/components/main/themeColorPicker.js.
 
 Template.boardChangeBackgroundImagePopup.events({
   async submit(event, tpl) {
@@ -872,12 +1611,95 @@ Template.boardChangeBackgroundImagePopup.helpers({
   },
 });
 
-// Manage the board's stored background images (upload / set active / download /
-// delete). Backgrounds are board-level Attachments (meta.boardId, no cardId,
+// Uploading one. It sits with the Background Image URL field
+// (boardChangeBackgroundImagePopup) rather than with the list of images already
+// uploaded: a URL and a file are the same question answered two ways.
+// Backgrounds are board-level Attachments (meta.boardId, no cardId,
 // meta.source === 'board-background') in the default attachments storage.
-Template.boardBackgroundsPopup.onCreated(function () {
+Template.boardBackgroundUpload.onCreated(function () {
   this.uploading = new ReactiveVar(false);
   this.error = new ReactiveVar('');
+  const board = Utils.getCurrentBoard();
+  this.boardId = board && board._id;
+});
+
+Template.boardBackgroundUpload.helpers({
+  uploading() {
+    return Template.instance().uploading;
+  },
+  error() {
+    return Template.instance().error;
+  },
+});
+
+Template.boardBackgroundUpload.events({
+  'click .js-bg-upload-button'(event, tpl) {
+    event.preventDefault();
+    tpl.find('.js-bg-upload-input').click();
+  },
+  async 'change .js-bg-upload-input'(event, tpl) {
+    const file = event.currentTarget.files && event.currentTarget.files[0];
+    if (!file) return;
+    tpl.error.set('');
+    tpl.uploading.set(true);
+    // The config comes from the shared builder, which is the whole reason this
+    // upload works: it stamps the generated `fileId` into `meta.fileId`, and
+    // Attachments' namingFunction reads the stored file's NAME out of there.
+    // Written by hand here, without it, every background upload was stored
+    // under `undefined` and never arrived. client/lib/attachmentUploadConfig.js
+    // allow re-selecting the same file later - done FIRST, so a failure below
+    // does not also leave the picker refusing to offer the same file again.
+    const input = event.currentTarget;
+    try {
+      const uploader = await Attachments.insertAsync(
+        buildAttachmentUploadConfig({
+          file,
+          meta: { boardId: tpl.boardId, source: 'board-background' },
+        }),
+        false,
+      );
+      // A finished upload puts itself BEHIND THE BOARD. "Add background image"
+      // is asked for by somebody who wants that picture there; an upload that
+      // only lands in a list, with the board unchanged, reads as one that did
+      // not work - which is exactly how this looked. The list under it still
+      // has the check that switches between the pictures already uploaded.
+      uploader.on('uploaded', async (err, fileRef) => {
+        if (err || !fileRef || !fileRef._id) return;
+        const board = Utils.getCurrentBoard();
+        if (!board) return;
+        await board.setBackgroundImage(fileRef._id);
+        Utils.setBackgroundImage();
+      });
+      uploader.on('end', (err) => {
+        tpl.uploading.set(false);
+        if (err) {
+          console.error('board background upload failed', err);
+          tpl.error.set(err.reason || err.message || 'upload-failed');
+        }
+      });
+      uploader.on('error', (err) => {
+        tpl.uploading.set(false);
+        console.error('board background upload failed', err);
+        tpl.error.set((err && (err.reason || err.message)) || 'upload-failed');
+      });
+      uploader.start();
+    } catch (error) {
+      // An upload can fail BEFORE there is an uploader to listen to - a config
+      // the collection refuses, a name its namingFunction cannot build. That
+      // used to reject into nothing: the spinner stopped, no message appeared,
+      // and the picture simply never showed up in the list. Say so instead.
+      tpl.uploading.set(false);
+      console.error('board background upload failed', error);
+      tpl.error.set((error && (error.reason || error.message)) || 'upload-failed');
+    }
+    input.value = '';
+  },
+});
+
+// The board's stored background images: set active, download, delete. Drawn in
+// BOTH the Change Background Image popup (under the upload that adds to it) and
+// the Board backgrounds popup, from this one template and one subscription.
+Template.boardBackgroundList.onCreated(function () {
   const board = Utils.getCurrentBoard();
   this.boardId = board && board._id;
   if (this.boardId) {
@@ -885,20 +1707,16 @@ Template.boardBackgroundsPopup.onCreated(function () {
   }
 });
 
-Template.boardBackgroundsPopup.helpers({
-  uploading() {
-    return Template.instance().uploading;
-  },
-  error() {
-    return Template.instance().error;
-  },
+Template.boardBackgroundList.helpers({
   backgrounds() {
     // Raw collection docs don't carry the .link() helper, so compute the URL.
+    // Live ones only (History.md §12.1): a deleted background is soft-deleted
+    // like every attachment, and stays out of the picker.
     return Attachments.collection
-      .find({
+      .find(liveAttachments({
         'meta.boardId': Template.instance().boardId,
         'meta.source': 'board-background',
-      })
+      }))
       .fetch()
       .map(att => ({
         _id: att._id,
@@ -912,38 +1730,14 @@ Template.boardBackgroundsPopup.helpers({
   },
 });
 
-Template.boardBackgroundsPopup.events({
-  'click .js-bg-upload-button'(event, tpl) {
+Template.boardBackgroundList.events({
+  // Clicking a picture - the thumbnail or its name - puts that one behind the
+  // board, and the URL field above the list follows, because setBackgroundImage
+  // writes both the id and the address it resolves to.
+  async 'click .js-set-board-background'(event) {
     event.preventDefault();
-    tpl.find('.js-bg-upload-input').click();
-  },
-  async 'change .js-bg-upload-input'(event, tpl) {
-    const file = event.currentTarget.files && event.currentTarget.files[0];
-    if (!file) return;
-    tpl.error.set('');
-    tpl.uploading.set(true);
-    const uploader = await Attachments.insertAsync(
-      {
-        file,
-        chunkSize: 'dynamic',
-        meta: { boardId: tpl.boardId, source: 'board-background' },
-      },
-      false,
-    );
-    uploader.on('end', (err) => {
-      tpl.uploading.set(false);
-      if (err) tpl.error.set(err.reason || 'upload-failed');
-    });
-    uploader.on('error', (err) => {
-      tpl.uploading.set(false);
-      tpl.error.set((err && err.reason) || 'upload-failed');
-    });
-    uploader.start();
-    // allow re-selecting the same file later
-    event.currentTarget.value = '';
-  },
-  async 'click .js-set-board-background'() {
     const board = Utils.getCurrentBoard();
+    if (!board || !this._id) return;
     await board.setBackgroundImage(this._id);
     Utils.setBackgroundImage();
   },
@@ -968,13 +1762,51 @@ Template.boardInfoOnMyBoardsPopup.helpers({
     const tpl = Template.instance();
     return tpl.currentBoard.allowsCardCounterList;
   },
+  cardAging() {
+    const tpl = Template.instance();
+    return tpl.currentBoard.cardAging;
+  },
+  cardAgingDays1() {
+    return Template.instance().currentBoard.cardAgingDays1 ?? 7;
+  },
+  autoArchiveInactiveDays() {
+    return Template.instance().currentBoard.autoArchiveInactiveDays || '';
+  },
+  cardAgingDays2() {
+    return Template.instance().currentBoard.cardAgingDays2 ?? 14;
+  },
+  cardAgingDays3() {
+    return Template.instance().currentBoard.cardAgingDays3 ?? 28;
+  },
   allowsBoardMemberList() {
     const tpl = Template.instance();
     return tpl.currentBoard.allowsBoardMemberList;
   },
+  allowsPersonalListWidth() {
+    const tpl = Template.instance();
+    return tpl.currentBoard.allowsPersonalListWidth;
+  },
 });
 
 Template.boardInfoOnMyBoardsPopup.events({
+  'click .js-field-has-personal-list-width'(evt, tpl) {
+    // #6409: toggle whether list widths are shared (board default, everyone
+    // sees the same) or personal (per user).
+    evt.preventDefault();
+    tpl.currentBoard.allowsPersonalListWidth = !tpl.currentBoard
+      .allowsPersonalListWidth;
+    tpl.currentBoard.setAllowsPersonalListWidth(
+      tpl.currentBoard.allowsPersonalListWidth,
+    );
+    $(`.js-field-has-personal-list-width ${MCB}`).toggleClass(
+      CKCLS,
+      tpl.currentBoard.allowsPersonalListWidth,
+    );
+    $('.js-field-has-personal-list-width').toggleClass(
+      CKCLS,
+      tpl.currentBoard.allowsPersonalListWidth,
+    );
+  },
   'click .js-field-has-cardcounterlist'(evt, tpl) {
     evt.preventDefault();
     tpl.currentBoard.allowsCardCounterList = !tpl.currentBoard
@@ -990,6 +1822,23 @@ Template.boardInfoOnMyBoardsPopup.events({
       CKCLS,
       tpl.currentBoard.allowsCardCounterList,
     );
+  },
+  'click .js-field-has-cardaging'(evt, tpl) {
+    evt.preventDefault();
+    tpl.currentBoard.cardAging = !tpl.currentBoard.cardAging;
+    tpl.currentBoard.setCardAging(tpl.currentBoard.cardAging);
+    $(`.js-field-has-cardaging ${MCB}`).toggleClass(CKCLS, tpl.currentBoard.cardAging);
+    $('.js-field-has-cardaging').toggleClass(CKCLS, tpl.currentBoard.cardAging);
+  },
+  'change .js-auto-archive-days'(evt, tpl) {
+    tpl.currentBoard.setAutoArchiveInactiveDays(evt.currentTarget.value.trim());
+  },
+  'change .js-card-aging-days'(evt, tpl) {
+    // #3984: save the three board-configurable card-aging day thresholds.
+    const vals = $('.js-card-aging-days')
+      .map((i, el) => parseInt(el.value, 10) || 0)
+      .get();
+    tpl.currentBoard.setCardAgingDays(vals[0], vals[1], vals[2]);
   },
   'click .js-field-has-boardmemberlist'(evt, tpl) {
     evt.preventDefault();
@@ -1009,11 +1858,20 @@ Template.boardInfoOnMyBoardsPopup.events({
   },
 });
 
-Template.boardSubtaskSettingsPopup.onCreated(function() {
-  this.currentBoard = Utils.getCurrentBoard();
+// The settings themselves - drawn by Board Settings and by the menu of a
+// subtask on an opened card, from this one template with its own state and
+// handlers, so neither place needs code of its own.
+// client/components/sidebar/sidebar.jade
+Template.boardSubtaskSettingsBody.onCreated(function() {
+  // Same reactive-snapshot fix as boardCardSettingsPopup (#6385): the
+  // allowsSubtasks toggle reads tpl.currentBoard, so keep it current in an
+  // autorun so the setting can be reversed without a page refresh.
+  this.autorun(() => {
+    this.currentBoard = Utils.getCurrentBoard();
+  });
 });
 
-Template.boardSubtaskSettingsPopup.helpers({
+Template.boardSubtaskSettingsBody.helpers({
   allowsSubtasks() {
     // Get the current board reactively using board ID from Session
     const boardId = Session.get('currentBoard');
@@ -1050,9 +1908,14 @@ Template.boardSubtaskSettingsPopup.helpers({
   },
   lists() {
     const tpl = Template.instance();
+    // The landing list belongs to the configured deposit board
+    // (subtasksDefaultBoardId), which may differ from the current board
+    // (#3414): when a different deposit board is chosen, show its lists.
+    const depositBoardId =
+      tpl.currentBoard.subtasksDefaultBoardId || tpl.currentBoard._id;
     return ReactiveCache.getLists(
       {
-        boardId: tpl.currentBoard._id,
+        boardId: depositBoardId,
         archived: false,
       },
       {
@@ -1062,9 +1925,11 @@ Template.boardSubtaskSettingsPopup.helpers({
   },
   hasLists() {
     const tpl = Template.instance();
+    const depositBoardId =
+      tpl.currentBoard.subtasksDefaultBoardId || tpl.currentBoard._id;
     const lists = ReactiveCache.getLists(
       {
-        boardId: tpl.currentBoard._id,
+        boardId: depositBoardId,
         archived: false,
       },
       {
@@ -1073,9 +1938,29 @@ Template.boardSubtaskSettingsPopup.helpers({
     );
     return lists.length > 0;
   },
-  isListSelected() {
+  // #1953: the deposit board's swimlanes, for the landing swimlane picker.
+  depositSwimlanes() {
     const tpl = Template.instance();
-    return tpl.currentBoard.subtasksDefaultBoardId === Template.currentData()._id;
+    const depositBoardId =
+      tpl.currentBoard.subtasksDefaultBoardId || tpl.currentBoard._id;
+    return ReactiveCache.getSwimlanes(
+      { boardId: depositBoardId, archived: false },
+      { sort: { sort: 1 } },
+    );
+  },
+  isSwimlaneSelected() {
+    const tpl = Template.instance();
+    return tpl.currentBoard.subtasksDefaultSwimlaneId === Template.currentData()._id;
+  },
+  isNullSwimlaneSelected() {
+    const tpl = Template.instance();
+    return !tpl.currentBoard.subtasksDefaultSwimlaneId;
+  },
+  isListSelected() {
+    // #3876 / #4947: the selected landing list must be compared against
+    // subtasksDefaultListId (the stored list id), NOT subtasksDefaultBoardId.
+    const tpl = Template.instance();
+    return tpl.currentBoard.subtasksDefaultListId === Template.currentData()._id;
   },
   presentParentTask() {
     // Get the current board reactively using board ID from Session
@@ -1090,7 +1975,7 @@ Template.boardSubtaskSettingsPopup.helpers({
   },
 });
 
-Template.boardSubtaskSettingsPopup.events({
+Template.boardSubtaskSettingsBody.events({
   'click .js-field-has-subtasks'(evt, tpl) {
     evt.preventDefault();
     const newValue = !tpl.currentBoard.allowsSubtasks;
@@ -1105,11 +1990,32 @@ Template.boardSubtaskSettingsPopup.events({
     if (value === 'null') {
       value = null;
     }
+    // #4849: changing the deposit board makes any previously-stored landing
+    // list (which belongs to the old board) stale and would otherwise
+    // override the new board's setting. Reset it so the list dropdown for the
+    // newly-selected board starts fresh.
+    if (value !== tpl.currentBoard.subtasksDefaultBoardId) {
+      tpl.currentBoard.setSubtasksDefaultListId(null);
+      // #1953: the swimlane belonged to the old board as well.
+      tpl.currentBoard.setSubtasksDefaultSwimlaneId(null);
+    }
     tpl.currentBoard.setSubtasksDefaultBoardId(value);
     evt.preventDefault();
   },
   'change .js-field-deposit-list'(evt, tpl) {
-    tpl.currentBoard.setSubtasksDefaultListId(evt.target.value);
+    let value = evt.target.value;
+    if (value === 'null' || value === '') {
+      value = null;
+    }
+    tpl.currentBoard.setSubtasksDefaultListId(value);
+    evt.preventDefault();
+  },
+  'change .js-field-deposit-swimlane'(evt, tpl) {
+    let value = evt.target.value;
+    if (value === 'null' || value === '') {
+      value = null;
+    }
+    tpl.currentBoard.setSubtasksDefaultSwimlaneId(value);
     evt.preventDefault();
   },
   'click .js-field-show-parent-in-minicard'(evt, tpl) {
@@ -1124,15 +2030,260 @@ Template.boardSubtaskSettingsPopup.events({
   },
 });
 
-Template.boardCardSettingsPopup.onCreated(function() {
-  this.currentBoard = Utils.getCurrentBoard();
-});
+// Every template that draws Card Settings - the popup, the opened card's own
+// Card Settings and its hamburgers - has the state its shared handlers read
+// (cardSettingsEvents below).
+function setUpCardSettings() {
+  // The one checkbox that animates: the one just clicked.
+  this.animating = new ReactiveVar(null);
+  // Keep currentBoard reactive. The toggle handlers compute the new value from
+  // tpl.currentBoard.allowsX, so a one-time snapshot went stale after the first
+  // toggle: reversing a setting (e.g. "Mark as complete") recomputed !oldValue
+  // and never switched back until the page was refreshed (#6385). Re-reading the
+  // board in an autorun keeps it current, so every Card Settings toggle works
+  // both ways without a refresh.
+  this.autorun(() => {
+    this.currentBoard = Utils.getCurrentBoard();
+  });
+}
 
-Template.boardCardSettingsPopup.helpers({
+
+// The rows of one column of Board Settings / Card, ready for the template:
+// the board's order for that side (models/lib/cardFieldOrder.js) applied to
+// the row table (models/lib/cardSettingsRows.js), each row with the checkbox
+// state its own helper reports, its icons, its translated label, and whether
+// each arrow would do anything. `data` is the popup's data context, so the
+// helpers that read it (showsListOnMinicard) see what they
+// saw when the rows were written out by hand.
+function buildCardSettingsRows(side, data) {
+  const boardId = Session.get('currentBoard');
+  const currentBoard = ReactiveCache.getBoard(boardId);
+  const layout = side === 'card' ? CARD_LAYOUT : MINICARD_LAYOUT;
+  const stored = side === 'card' ? currentBoard?.cardFieldOrder : currentBoard?.minicardFieldOrder;
+  const order = applyLayoutOrder(stored, layout);
+  return rowsForSide(side, order)
+    // "List title" is a CARD's own setting (`needsCard`): Card Settings is
+    // Board Settings / Card, about every card of the board, with no card for
+    // the row to change - so it is never drawn here; each card sets it in its
+    // own menu (cardDetails.js js-toggle-show-list-on-minicard).
+    .filter(row => !row[side].needsCard)
+    // A field the administrator unticked in Admin Panel / Settings /
+    // Visibility / Features is not offered on any board; the board keeps its
+    // own choice for when it is ticked again. models/lib/cardFieldVisibility.js
+    .filter(row => isRowVisible(ReactiveCache.getCurrentSetting(), row.key))
+    .map(row => {
+      const spec = row[side];
+      const helper = boardCardSettingsHelpers[spec.field];
+      // Head and tail rows are drawn at a fixed place: not dragged either.
+      const positioned = !spec.after && isMovableKey(layout, row.key);
+      return {
+        key: row.key,
+        // A row with a place of its own is dragged; a modifier follows its row.
+        positioned,
+        toggle: spec.toggle,
+        // A Scrum row's checkbox is that field's Scrum visibility flag; a
+        // plain flag row's is the board field, or its default when unset.
+        checked: spec.scrum ? currentBoard?.scrum?.visibility?.[spec.scrum] === true
+          : spec.flag ? (typeof currentBoard?.[spec.field] === 'boolean' ? currentBoard[spec.field] : spec.default) === true
+          : typeof helper === 'function' ? Boolean(helper.call(data)) : false,
+        // The personal "Labels text" row of each side: whether the user overrides
+        // the board, and the link back to following it.
+        labelTextOverridden: Boolean(spec.labelTextOverride) && (side === 'card'
+          ? hasCardLabelTextOverride() : boardCardSettingsHelpers.hasLabelTextOverride()),
+        labelTextResetClass: side === 'card' ? 'js-reset-card-label-text-override' : 'js-reset-minicard-label-text-override',
+        icons: row.icons,
+        title: row.label.map(k => TAPi18n.__(k)).join(row.labelSeparator || ' '),
+        personal: Boolean(spec.personal),
+        labelTextOverride: Boolean(spec.labelTextOverride),
+      };
+    });
+}
+
+// A named object rather than an inline `.helpers({...})`: the row builder
+// (buildCardSettingsRows) asks each row's
+// "is it checked" helper by name - allowsLabels(), showsListOnMinicard(), ...
+// - so a row's checkbox reads exactly what its old hand-written `{{#if
+// allowsLabels}}` read, defaults and fallbacks included, without a second
+// copy of that logic. Registered at the end of the object.
+// The rows of section `id` on one side, in that side's own order - the open
+// pane's rows in the popup, and each checklist of the opened card's Card
+// Settings. `animatingKey` is the checkbox just clicked.
+function sectionRowsOf(id, data, side, animatingKey) {
+  const section = cardSettingsSections.SECTIONS.find(s => s.id === id);
+  const keys = new Set(section ? section.keys : []);
+  const board = ReactiveCache.getBoard(Session.get('currentBoard'));
+  const writable = Boolean(board && Utils.canModifyBoard && Utils.canModifyBoard());
+  const showDragHandles = Utils.showDragHandles();
+  const rowOf = key => CARD_SETTINGS_ROWS.find(r => r.key === key);
+  return buildCardSettingsRows(side, data)
+    .filter(built => keys.has(built.key))
+    .map(built => ({
+      key: built.key,
+      side,
+      icons: built.icons,
+      title: cardSettingsSections.labelInSection(rowOf(built.key), section).map(k => TAPi18n.__(k)).join(rowOf(built.key).labelSeparator || ' '),
+      toggle: built.toggle,
+      checked: built.checked,
+      personal: Boolean(built.personal),
+      // The board's rows for a board admin; a personal row for its owner.
+      writable: writable || Boolean(built.personal),
+      animating: animatingKey === `${built.key}:${side}`,
+      positioned: built.positioned,
+      // Dragged: a row with a place of its own, by a board admin.
+      draggable: writable && built.positioned,
+      showDragHandles,
+      labelTextOverride: built.labelTextOverride,
+      labelTextOverridden: built.labelTextOverridden,
+      labelTextResetClass: built.labelTextResetClass,
+    }));
+}
+
+// The board actions of section `id`, in that section's hamburger in Card
+// Settings (models/lib/cardSettingsSections.js CARD_ACTIONS): for who may
+// change the board.
+function sectionCardActionsOf(id) {
+  const mayBoard = Boolean(Utils.canModifyBoard && Utils.canModifyBoard());
+  return cardSettingsSections.cardActionsOf(id)
+    .filter(action => action.board && mayBoard)
+    .map(action => ({
+      ...action,
+      title: action.label.map(k => TAPi18n.__(k)).join(action.labelSeparator || ' '),
+    }));
+}
+
+const boardCardSettingsHelpers = {
+  // Read from the board, so the checkbox follows its own click (tpl.currentBoard
+  // is a plain property, which no helper re-runs for).
+  askForMoveReason() { return ReactiveCache.getBoard(Session.get('currentBoard'))?.askForMoveReason === true; },
+
+  isAnimating(key) { return Template.instance().animating.get() === key; },
+  allowsMinicardCollapse() { return ReactiveCache.getBoard(Session.get('currentBoard'))?.allowsMinicardCollapse !== false; },
+  labelsAboveTitleOnMinicard() { return ReactiveCache.getBoard(Session.get('currentBoard'))?.labelsAboveTitleOnMinicard === true; },
+  allowsChecklistDueDate() { return ReactiveCache.getBoard(Session.get('currentBoard'))?.allowsChecklistDueDate !== false; },
+  allowsChecklistTitle() { return ReactiveCache.getBoard(Session.get('currentBoard'))?.allowsChecklistTitle !== false; },
+  // The work item type badge was on every minicard before it had a row: on unless turned off.
+  allowsIssueTypeOnMinicard() { return ReactiveCache.getBoard(Session.get('currentBoard'))?.allowsIssueTypeOnMinicard !== false; },
+
+  // Board-level DEFAULT (#4256, Board Settings): whether this board shows
+  // label text on its minicards unless a user overrides it. Checked means
+  // shown, which is what a board does unless an admin turns it off.
+  allowsLabelText() {
+    const boardId = Session.get('currentBoard');
+    const currentBoard = ReactiveCache.getBoard(boardId);
+    return currentBoard ? currentBoard.showLabelText !== false : true;
+  },
+
+  // The user's own PERSONAL override on top of the board's default, tri-state:
+  // no override (follow the board), forced shown, or forced hidden. Checked
+  // means the resolved value is "shown" - so the checkbox always reflects what
+  // the minicard is currently doing, not just whether an override is set.
+  // client/lib/minicardLabelText.js
+  showsMinicardLabelText() {
+    const boardId = Session.get('currentBoard');
+    const currentBoard = ReactiveCache.getBoard(boardId);
+    return resolveShowLabelText(currentBoard);
+  },
+
+  // Whether the user has an explicit override set at all, so the template can
+  // show "(follows board default)" vs. "(overridden)".
+  hasLabelTextOverride() {
+    const currentUser = ReactiveCache.getCurrentUser();
+    if (!currentUser) return false;
+    return typeof (currentUser.profile || {}).showLabelTextOverride === 'boolean';
+  },
+
+  // The labels text of the OPENED card, the user's override included.
+  showsCardLabelText() {
+    return resolveShowCardLabelText(ReactiveCache.getBoard(Session.get('currentBoard')));
+  },
   allowsReceivedDate() {
     const boardId = Session.get('currentBoard');
     const currentBoard = ReactiveCache.getBoard(boardId);
     return currentBoard ? currentBoard.allowsReceivedDate : false;
+  },
+  // #2530: "Time spent" Card Settings toggles. Both default true
+  // (models/boards.js) since the card detail view/minicard already show it
+  // unconditionally today; this only lets an admin turn it off.
+  allowsSpentTime() {
+    const boardId = Session.get('currentBoard');
+    const currentBoard = ReactiveCache.getBoard(boardId);
+    return currentBoard && currentBoard.allowsSpentTime !== false;
+  },
+  allowsSpentTimeOnMinicard() {
+    const boardId = Session.get('currentBoard');
+    const currentBoard = ReactiveCache.getBoard(boardId);
+    return currentBoard && currentBoard.allowsSpentTimeOnMinicard !== false;
+  },
+  // #6688: the sections and badges that rendered unconditionally before they
+  // had a toggle. All default TRUE (models/boards.js), so like Spent time
+  // above they read `!== false`: a board without the field shows the thing.
+  allowsStickers() {
+    const board = ReactiveCache.getBoard(Session.get('currentBoard'));
+    return board && board.allowsStickers !== false;
+  },
+  allowsStickersOnMinicard() {
+    const board = ReactiveCache.getBoard(Session.get('currentBoard'));
+    return board && board.allowsStickersOnMinicard !== false;
+  },
+  allowsLocation() {
+    const board = ReactiveCache.getBoard(Session.get('currentBoard'));
+    return board && board.allowsLocation !== false;
+  },
+  allowsDependencies() {
+    const board = ReactiveCache.getBoard(Session.get('currentBoard'));
+    return board && board.allowsDependencies !== false;
+  },
+  allowsDependenciesOnMinicard() {
+    const board = ReactiveCache.getBoard(Session.get('currentBoard'));
+    return board && board.allowsDependenciesOnMinicard !== false;
+  },
+  allowsFlowtime() {
+    const board = ReactiveCache.getBoard(Session.get('currentBoard'));
+    return board && board.allowsFlowtime !== false;
+  },
+  allowsPomodoro() {
+    const board = ReactiveCache.getBoard(Session.get('currentBoard'));
+    return board && board.allowsPomodoro !== false;
+  },
+  allowsVote() {
+    const board = ReactiveCache.getBoard(Session.get('currentBoard'));
+    return board && board.allowsVote !== false;
+  },
+  allowsVoteOnMinicard() {
+    const board = ReactiveCache.getBoard(Session.get('currentBoard'));
+    return board && board.allowsVoteOnMinicard !== false;
+  },
+  allowsPoker() {
+    const board = ReactiveCache.getBoard(Session.get('currentBoard'));
+    return board && board.allowsPoker !== false;
+  },
+  allowsPokerOnMinicard() {
+    const board = ReactiveCache.getBoard(Session.get('currentBoard'));
+    return board && board.allowsPokerOnMinicard !== false;
+  },
+  allowsTextNotes() {
+    const board = ReactiveCache.getBoard(Session.get('currentBoard'));
+    return board && board.allowsTextNotes !== false;
+  },
+  allowsCommentCountOnMinicard() {
+    const board = ReactiveCache.getBoard(Session.get('currentBoard'));
+    return board && board.allowsCommentCountOnMinicard !== false;
+  },
+  // The field and its click handler predate #6688; only the row and this
+  // helper were missing (the row sat commented out in sidebar.jade).
+  allowsActivities() {
+    const board = ReactiveCache.getBoard(Session.get('currentBoard'));
+    return board && board.allowsActivities !== false;
+  },
+  allowsDueComplete() {
+    const boardId = Session.get('currentBoard');
+    const currentBoard = ReactiveCache.getBoard(boardId);
+    return currentBoard ? currentBoard.allowsDueComplete : false;
+  },
+  allowsDueCompleteOnMinicard() {
+    const boardId = Session.get('currentBoard');
+    const currentBoard = ReactiveCache.getBoard(boardId);
+    return currentBoard ? currentBoard.allowsDueCompleteOnMinicard : false;
   },
   allowsReceivedDateOnMinicard() {
     const boardId = Session.get('currentBoard');
@@ -1187,7 +2338,10 @@ Template.boardCardSettingsPopup.helpers({
   allowsCreatorOnMinicard() {
     const boardId = Session.get('currentBoard');
     const currentBoard = ReactiveCache.getBoard(boardId);
-    return getMinicardSetting(currentBoard, 'allowsCreatorOnMinicard', 'allowsCreator', false);
+    // #3823: creator visibility on the opened card and on its minicard are
+    // separate choices. Old boards predate the minicard field, so they must
+    // stay opted out instead of inheriting the card-details setting.
+    return getMinicardSetting(currentBoard, 'allowsCreatorOnMinicard', null, false);
   },
   allowsMembers() {
     const boardId = Session.get('currentBoard');
@@ -1249,10 +2403,25 @@ Template.boardCardSettingsPopup.helpers({
     const currentBoard = ReactiveCache.getBoard(boardId);
     return getMinicardSetting(currentBoard, 'allowsLabelsOnMinicard', 'allowsLabels', true);
   },
+  allowsCustomFields() {
+    const board = ReactiveCache.getBoard(Session.get('currentBoard'));
+    return board ? board.allowsCustomFields !== false : true;
+  },
+  allowsCustomFieldsOnMinicard() {
+    const board = ReactiveCache.getBoard(Session.get('currentBoard'));
+    return board?.allowsCustomFieldsOnMinicard === true;
+  },
   allowsShowListsOnMinicard() {
     const boardId = Session.get('currentBoard');
     const currentBoard = ReactiveCache.getBoard(boardId);
     return getMinicardSetting(currentBoard, 'allowsShowListsOnMinicard', 'allowsShowLists', false);
+  },
+  // #2426: board-wide toggle for showing the swimlane name at the bottom of
+  // a minicard in List view. Defaults to false, matching "Show lists".
+  allowsSwimlaneNameOnMinicard() {
+    const boardId = Session.get('currentBoard');
+    const currentBoard = ReactiveCache.getBoard(boardId);
+    return currentBoard ? currentBoard.allowsSwimlaneNameOnMinicard === true : false;
   },
   allowsChecklists() {
     const boardId = Session.get('currentBoard');
@@ -1263,6 +2432,28 @@ Template.boardCardSettingsPopup.helpers({
     const boardId = Session.get('currentBoard');
     const currentBoard = ReactiveCache.getBoard(boardId);
     return getMinicardSetting(currentBoard, 'allowsChecklistsOnMinicard', 'allowsChecklists', true);
+  },
+  // #6431: compact checklist count badge on minicard, opt-in and OFF by default.
+  allowsChecklistCountBadgeOnMinicard() {
+    const boardId = Session.get('currentBoard');
+    const currentBoard = ReactiveCache.getBoard(boardId);
+    return currentBoard ? currentBoard.allowsChecklistCountBadgeOnMinicard : false;
+  },
+  // #6431 follow-up: new opt-in (OFF by default) card-side options.
+  allowsChecklistCountBadgeOnCard() {
+    const boardId = Session.get('currentBoard');
+    const currentBoard = ReactiveCache.getBoard(boardId);
+    return currentBoard ? currentBoard.allowsChecklistCountBadgeOnCard : false;
+  },
+  allowsAttachmentCountOnCard() {
+    const boardId = Session.get('currentBoard');
+    const currentBoard = ReactiveCache.getBoard(boardId);
+    return currentBoard ? currentBoard.allowsAttachmentCountOnCard : false;
+  },
+  allowsCoverAttachmentOnCard() {
+    const boardId = Session.get('currentBoard');
+    const currentBoard = ReactiveCache.getBoard(boardId);
+    return currentBoard ? currentBoard.allowsCoverAttachmentOnCard !== false : false;
   },
   allowsAttachments() {
     const boardId = Session.get('currentBoard');
@@ -1278,6 +2469,13 @@ Template.boardCardSettingsPopup.helpers({
     const boardId = Session.get('currentBoard');
     const currentBoard = ReactiveCache.getBoard(boardId);
     return currentBoard ? currentBoard.allowsComments : false;
+  },
+  // #4285: show a card's comments directly on the minicard, opt-in and OFF by
+  // default so existing boards are unaffected.
+  allowsCommentsOnMinicard() {
+    const boardId = Session.get('currentBoard');
+    const currentBoard = ReactiveCache.getBoard(boardId);
+    return currentBoard ? currentBoard.allowsCommentsOnMinicard : false;
   },
   allowsCardNumber() {
     const boardId = Session.get('currentBoard');
@@ -1380,13 +2578,218 @@ Template.boardCardSettingsPopup.helpers({
       tpl.currentBoard.dateSettingsDefaultBoardId === Template.currentData()._id
     );
   },
-});
+};
+boardCardSettingsHelpers.showDragHandles = () => Utils.showDragHandles();
 
-Template.boardCardSettingsPopup.events({
+// The order of each side is set with the up and down arrows of a row's side
+// cell (moveCardSettingsRow below), or the Up and Down keys on a focused
+// arrow. The sections show a few rows at a time, so a drag between them had
+// nowhere to drop.
+
+// #4448: an up/down arrow of Board Settings / Card. The row says which field
+// and which side (data-key / data-side, because `each row in` keeps the
+// popup's own data context); the board's CURRENT order is re-read on every
+// click rather than taken from the row, so two quick clicks each move from
+// where the previous one actually left it; and the move goes through the
+// board's setter, which normalises it. models/lib/cardFieldOrder.js
+// Each list of Card Settings - Show on Card, Show on Minicard - reorders by
+// drag and drop. A list shows one section's rows, so where the row was
+// dropped is turned into a place among ALL the side's fields that have one:
+// right after the row now above it (or right before the row now below it, at
+// the top). placeKey walks the same steps one at a time, so the layout's rules
+// - a pinned header first, a section moving as one - still hold
+// (models/lib/cardFieldOrder.js), and the field lands as near as they allow.
+function dropTargetIndex(stored, layout, key, listKeys) {
+  const movable = applyLayoutOrder(stored, layout).filter(k => isMovableKey(layout, k) && k !== key);
+  const keys = listKeys.filter(k => isMovableKey(layout, k));
+  const at = keys.indexOf(key);
+  if (at > 0) return movable.indexOf(keys[at - 1]) + 1;
+  if (keys.length > 1) return movable.indexOf(keys[1]);
+  return -1;
+}
+
+// `keys`: the list's rows in their new order, `key` the one that moved.
+function placeInListOrder(side, key, keys) {
+  const board = ReactiveCache.getBoard(Session.get('currentBoard'));
+  if (!board || !(Utils.canModifyBoard && Utils.canModifyBoard())) return;
+  const layout = side === 'minicard' ? MINICARD_LAYOUT : CARD_LAYOUT;
+  const stored = side === 'minicard' ? board.minicardFieldOrder : board.cardFieldOrder;
+  const target = dropTargetIndex(stored, layout, key, keys);
+  if (target < 0) return;
+  const order = placeKey(stored, key, target, layout);
+  if (order.join(' ') === applyLayoutOrder(stored, layout).join(' ')) return;
+  if (side === 'minicard') board.setMinicardFieldOrder(order);
+  else board.setCardFieldOrder(order);
+}
+
+// The keyboard way to drag: one step up or down in the list as it is shown -
+// past the row above or below it - placed the same way as a drop.
+function moveCardSettingsRow(evt, direction) {
+  evt.preventDefault();
+  const rowEl = evt.currentTarget.closest('.js-card-field-order-row');
+  const list = rowEl && rowEl.closest('.js-card-field-order-sortable');
+  if (!rowEl || !list || !rowEl.classList.contains('is-positioned')) return;
+  const keys = [...list.querySelectorAll(':scope > .js-card-field-order-row.is-positioned')].map(el => el.dataset.key);
+  const at = keys.indexOf(rowEl.dataset.key);
+  const to = direction === 'up' ? at - 1 : at + 1;
+  if (at < 0 || to < 0 || to >= keys.length) return;
+  keys.splice(at, 1);
+  keys.splice(to, 0, rowEl.dataset.key);
+  placeInListOrder(list.dataset.side, rowEl.dataset.key, keys);
+}
+
+// The handlers of Card Settings: the popup Board Settings opens, and the same
+// handlers on the opened card's own Card Settings (cardSettingsInline) and its
+// hamburgers, so a checkbox does the same thing wherever it is drawn.
+const cardSettingsEvents = {
+  // The same animated checkbox as the rows; a board admin's.
+  async 'click .js-ask-move-reason'(evt, tpl) {
+    evt.preventDefault();
+    const board = ReactiveCache.getBoard(Session.get('currentBoard'));
+    if (!board || !(Utils.canModifyBoard && Utils.canModifyBoard())) return;
+    tpl.animating.set('askForMoveReason');
+    try {
+      await board.setAskForMoveReason(board.askForMoveReason !== true);
+    } catch (error) {
+      console.error(error);
+    }
+  },
+
+  // A row is dragged by its handle or its name: a click on them does nothing.
+  'click .js-card-field-order-handle'(evt) { evt.preventDefault(); },
+  // Only the checkbox just clicked animates; its own handler does the change.
+  'click .card-field-order-toggle'(evt, tpl) {
+    const cell = evt.currentTarget.closest('.js-card-field-order-row');
+    if (cell) tpl.animating.set(`${cell.dataset.key}:${cell.dataset.side}`);
+  },
+  // The checkbox left of a section's title: whether the whole section is
+  // shown on the side Card Settings shows (models/lib/cardSettingsSections.js
+  // hiddenSectionsOf). Its rows keep their own ticks. A board admin's.
+  async 'click .js-card-settings-section-shown'(evt, tpl) {
+    evt.preventDefault();
+    const sectionEl = evt.currentTarget.closest('.js-card-settings-section');
+    const id = sectionEl && sectionEl.dataset.section;
+    const side = evt.currentTarget.dataset.side;
+    const board = ReactiveCache.getBoard(Session.get('currentBoard'));
+    if (!board || !id || !cardSettingsSections.SIDES.includes(side)) return;
+    if (!(Utils.canModifyBoard && Utils.canModifyBoard())) return;
+    tpl.animating.set(`section:${id}:${side}`);
+    try {
+      await board.setCardSettingsSectionShown(side, id, !cardSettingsSections.sectionShown(board, side, id));
+    } catch (error) {
+      console.error(error);
+    }
+  },
+  // A section with one row on this side is one line (inlineSectionsOf
+  // `single`): its one checkbox is "this field is shown on this side". It sets
+  // the row's own flag through the row's own handler - the row's real
+  // checkbox, kept in the line out of sight - and, turning it on, also shows
+  // the section again if it was hidden whole.
+  async 'click .js-card-settings-single-toggle'(evt, tpl) {
+    evt.preventDefault();
+    const sectionEl = evt.currentTarget.closest('.js-card-settings-section');
+    const real = sectionEl && sectionEl.querySelector('.js-card-settings-single-real .card-field-order-toggle');
+    const id = sectionEl && sectionEl.dataset.section;
+    const side = evt.currentTarget.dataset.side;
+    const board = ReactiveCache.getBoard(Session.get('currentBoard'));
+    if (!board || !real || real.classList.contains('is-disabled') || !cardSettingsSections.SIDES.includes(side)) return;
+    const rowOn = real.getAttribute('aria-checked') === 'true';
+    const shown = cardSettingsSections.sectionShown(board, side, id);
+    if (rowOn && shown) {
+      real.click();
+      return;
+    }
+    if (!rowOn) real.click();
+    if (!shown) {
+      try {
+        await board.setCardSettingsSectionShown(side, id, true);
+      } catch (error) {
+        console.error(error);
+      }
+    }
+  },
+  // The keyboard way to drag: Up and Down on a focused handle or name move
+  // the row one step in its list's order.
+  'keydown .js-card-field-order-handle'(evt) {
+    const direction = ARROW_KEYS[evt.key];
+    if (direction) moveCardSettingsRow(evt, direction);
+  },
+  // "Scrum settings: Sprint" and the other Scrum rows: the field's Scrum
+  // visibility flag for this side, through the same method the Scrum settings
+  // checkboxes used (server-side board-admin check).
+  async 'click .js-scrum-field-toggle'(evt, tpl) {
+    evt.preventDefault();
+    const row = evt.currentTarget.closest('.js-card-field-order-row');
+    const board = ReactiveCache.getBoard(Session.get('currentBoard'));
+    const spec = CARD_SETTINGS_ROWS.find(r => r.key === row?.dataset.key)?.[row?.dataset.side];
+    if (!board || !spec?.scrum) return;
+    const visible = board.scrum?.visibility?.[spec.scrum] === true;
+    try {
+      await Meteor.callAsync('scrum.configure', board._id, { visibility: { [spec.scrum]: !visible } }, board.scrumRevision || 0);
+      invalidateScrumNames();
+    } catch (error) {
+      alert(error.reason || error.message);
+    }
+  },
+  'click .js-field-has-issue-type-on-minicard'(evt, tpl) {
+    evt.preventDefault();
+    const newValue = tpl.currentBoard.allowsIssueTypeOnMinicard === false;
+    Boards.update(tpl.currentBoard._id, { $set: { allowsIssueTypeOnMinicard: newValue } });
+  },
+  // Board-level default for #4256: whether labels show their TEXT on this
+  // board's minicards, unless a user's own override (below) says otherwise.
+  'click .js-field-has-label-text'(evt, tpl) {
+    evt.preventDefault();
+    const newValue = !(tpl.currentBoard.showLabelText !== false);
+    Boards.update(tpl.currentBoard._id, { $set: { showLabelText: newValue } });
+  },
+  // The one row of this table that is the user's own, not the board's.
+  'click .js-toggle-minicard-label-text'(evt) {
+    evt.preventDefault();
+    toggleMinicardLabelText();
+  },
+  // Explicit "back to the board's own setting" for the per-user override,
+  // rather than making somebody cycle the checkbox through both states again.
+  'click .js-reset-minicard-label-text-override'(evt) {
+    evt.preventDefault();
+    evt.stopPropagation();
+    Meteor.call('setShowLabelTextOverride', null);
+  },
+  // ...and the one that is this CARD's. The board-wide "Show lists" row further
+  // down turns the list name on for every card; this turns it on for one.
+  // Every plain board flag of the table (`flag: true` in cardSettingsRows.js):
+  // the field the row names, from its default when the board never set it.
+  'click .js-board-card-flag'(evt, tpl) {
+    evt.preventDefault();
+    const row = evt.currentTarget.closest('.js-card-field-order-row');
+    const spec = CARD_SETTINGS_ROWS.find(r => r.key === row?.dataset.key)?.[row?.dataset.side];
+    if (!spec?.flag || !tpl.currentBoard) return;
+    const current = typeof tpl.currentBoard[spec.field] === 'boolean' ? tpl.currentBoard[spec.field] : spec.default;
+    Boards.update(tpl.currentBoard._id, { $set: { [spec.field]: !current } });
+  },
+  'click .js-toggle-card-label-text'(evt) {
+    evt.preventDefault();
+    toggleCardLabelText();
+  },
+  'click .js-reset-card-label-text-override'(evt) {
+    evt.preventDefault();
+    evt.stopPropagation();
+    resetCardLabelTextOverride();
+  },
   'click .js-field-has-receiveddate'(evt, tpl) {
     evt.preventDefault();
     const newValue = !tpl.currentBoard.allowsReceivedDate;
     Boards.update(tpl.currentBoard._id, { $set: { allowsReceivedDate: newValue } });
+  },
+  'click .js-field-has-duecomplete'(evt, tpl) {
+    evt.preventDefault();
+    const newValue = !tpl.currentBoard.allowsDueComplete;
+    Boards.update(tpl.currentBoard._id, { $set: { allowsDueComplete: newValue } });
+  },
+  'click .js-field-has-duecomplete-on-minicard'(evt, tpl) {
+    evt.preventDefault();
+    const newValue = !tpl.currentBoard.allowsDueCompleteOnMinicard;
+    Boards.update(tpl.currentBoard._id, { $set: { allowsDueCompleteOnMinicard: newValue } });
   },
   'click .js-field-has-receiveddate-on-minicard'(evt, tpl) {
     evt.preventDefault();
@@ -1503,10 +2906,29 @@ Template.boardCardSettingsPopup.events({
     const newValue = !tpl.currentBoard.allowsLabelsOnMinicard;
     Boards.update(tpl.currentBoard._id, { $set: { allowsLabelsOnMinicard: newValue } });
   },
+  'click .js-field-has-custom-fields'(evt, tpl) {
+    evt.preventDefault();
+    const currentValue = tpl.currentBoard.allowsCustomFields !== false;
+    Boards.update(tpl.currentBoard._id, {
+      $set: { allowsCustomFields: !currentValue },
+    });
+  },
+  'click .js-field-has-custom-fields-on-minicard'(evt, tpl) {
+    evt.preventDefault();
+    const currentValue = tpl.currentBoard.allowsCustomFieldsOnMinicard === true;
+    Boards.update(tpl.currentBoard._id, {
+      $set: { allowsCustomFieldsOnMinicard: !currentValue },
+    });
+  },
   'click .js-field-has-card-show-lists-on-minicard'(evt, tpl) {
     evt.preventDefault();
     const newValue = !tpl.currentBoard.allowsShowListsOnMinicard;
     Boards.update(tpl.currentBoard._id, { $set: { allowsShowListsOnMinicard: newValue } });
+  },
+  'click .js-field-has-swimlane-name-on-minicard'(evt, tpl) {
+    evt.preventDefault();
+    const newValue = !tpl.currentBoard.allowsSwimlaneNameOnMinicard;
+    Boards.update(tpl.currentBoard._id, { $set: { allowsSwimlaneNameOnMinicard: newValue } });
   },
   'click .js-field-has-description-title'(evt, tpl) {
     evt.preventDefault();
@@ -1538,6 +2960,26 @@ Template.boardCardSettingsPopup.events({
     const newValue = !tpl.currentBoard.allowsDescriptionText;
     Boards.update(tpl.currentBoard._id, { $set: { allowsDescriptionText: newValue } });
   },
+  'click .js-field-minicard-collapse'(evt, tpl) {
+    evt.preventDefault();
+    const value = tpl.currentBoard.allowsMinicardCollapse !== false;
+    Boards.update(tpl.currentBoard._id, { $set: { allowsMinicardCollapse: !value } });
+  },
+  'click .js-field-labels-above-title'(evt, tpl) {
+    evt.preventDefault();
+    const value = tpl.currentBoard.labelsAboveTitleOnMinicard === true;
+    Boards.update(tpl.currentBoard._id, { $set: { labelsAboveTitleOnMinicard: !value } });
+  },
+  'click .js-field-checklist-due-date'(evt, tpl) {
+    evt.preventDefault();
+    const value = tpl.currentBoard.allowsChecklistDueDate !== false;
+    Boards.update(tpl.currentBoard._id, { $set: { allowsChecklistDueDate: !value } });
+  },
+  'click .js-field-checklist-title'(evt, tpl) {
+    evt.preventDefault();
+    const value = tpl.currentBoard.allowsChecklistTitle !== false;
+    Boards.update(tpl.currentBoard._id, { $set: { allowsChecklistTitle: !value } });
+  },
   'click .js-field-has-checklists'(evt, tpl) {
     evt.preventDefault();
     const newValue = !tpl.currentBoard.allowsChecklists;
@@ -1547,6 +2989,103 @@ Template.boardCardSettingsPopup.events({
     evt.preventDefault();
     const newValue = !tpl.currentBoard.allowsChecklistsOnMinicard;
     Boards.update(tpl.currentBoard._id, { $set: { allowsChecklistsOnMinicard: newValue } });
+  },
+  'click .js-field-has-checklist-count-on-minicard'(evt, tpl) {
+    evt.preventDefault();
+    const newValue = !tpl.currentBoard.allowsChecklistCountBadgeOnMinicard;
+    Boards.update(tpl.currentBoard._id, { $set: { allowsChecklistCountBadgeOnMinicard: newValue } });
+  },
+  'click .js-field-has-checklist-count'(evt, tpl) {
+    evt.preventDefault();
+    const newValue = !tpl.currentBoard.allowsChecklistCountBadgeOnCard;
+    Boards.update(tpl.currentBoard._id, { $set: { allowsChecklistCountBadgeOnCard: newValue } });
+  },
+  'click .js-field-has-attachment-count'(evt, tpl) {
+    evt.preventDefault();
+    const newValue = !tpl.currentBoard.allowsAttachmentCountOnCard;
+    Boards.update(tpl.currentBoard._id, { $set: { allowsAttachmentCountOnCard: newValue } });
+  },
+  'click .js-field-has-cover-attachment-on-card'(evt, tpl) {
+    evt.preventDefault();
+    const newValue = !tpl.currentBoard.allowsCoverAttachmentOnCard;
+    Boards.update(tpl.currentBoard._id, { $set: { allowsCoverAttachmentOnCard: newValue } });
+  },
+  'click .js-field-has-spent-time'(evt, tpl) {
+    evt.preventDefault();
+    const currentValue = tpl.currentBoard.allowsSpentTime !== false;
+    Boards.update(tpl.currentBoard._id, { $set: { allowsSpentTime: !currentValue } });
+  },
+  'click .js-field-has-spent-time-on-minicard'(evt, tpl) {
+    evt.preventDefault();
+    const currentValue = tpl.currentBoard.allowsSpentTimeOnMinicard !== false;
+    Boards.update(tpl.currentBoard._id, { $set: { allowsSpentTimeOnMinicard: !currentValue } });
+  },
+  // #6688: default-true toggles, so a missing field counts as ON and the
+  // first click turns it OFF - the same `!== false` the Spent time pair uses.
+  'click .js-field-has-stickers'(evt, tpl) {
+    evt.preventDefault();
+    const currentValue = tpl.currentBoard.allowsStickers !== false;
+    Boards.update(tpl.currentBoard._id, { $set: { allowsStickers: !currentValue } });
+  },
+  'click .js-field-has-stickers-on-minicard'(evt, tpl) {
+    evt.preventDefault();
+    const currentValue = tpl.currentBoard.allowsStickersOnMinicard !== false;
+    Boards.update(tpl.currentBoard._id, { $set: { allowsStickersOnMinicard: !currentValue } });
+  },
+  'click .js-field-has-location'(evt, tpl) {
+    evt.preventDefault();
+    const currentValue = tpl.currentBoard.allowsLocation !== false;
+    Boards.update(tpl.currentBoard._id, { $set: { allowsLocation: !currentValue } });
+  },
+  'click .js-field-has-dependencies'(evt, tpl) {
+    evt.preventDefault();
+    const currentValue = tpl.currentBoard.allowsDependencies !== false;
+    Boards.update(tpl.currentBoard._id, { $set: { allowsDependencies: !currentValue } });
+  },
+  'click .js-field-has-dependencies-on-minicard'(evt, tpl) {
+    evt.preventDefault();
+    const currentValue = tpl.currentBoard.allowsDependenciesOnMinicard !== false;
+    Boards.update(tpl.currentBoard._id, { $set: { allowsDependenciesOnMinicard: !currentValue } });
+  },
+  'click .js-field-has-flowtime'(evt, tpl) {
+    evt.preventDefault();
+    const currentValue = tpl.currentBoard.allowsFlowtime !== false;
+    Boards.update(tpl.currentBoard._id, { $set: { allowsFlowtime: !currentValue } });
+  },
+  'click .js-field-has-pomodoro'(evt, tpl) {
+    evt.preventDefault();
+    const currentValue = tpl.currentBoard.allowsPomodoro !== false;
+    Boards.update(tpl.currentBoard._id, { $set: { allowsPomodoro: !currentValue } });
+  },
+  'click .js-field-has-vote'(evt, tpl) {
+    evt.preventDefault();
+    const currentValue = tpl.currentBoard.allowsVote !== false;
+    Boards.update(tpl.currentBoard._id, { $set: { allowsVote: !currentValue } });
+  },
+  'click .js-field-has-vote-on-minicard'(evt, tpl) {
+    evt.preventDefault();
+    const currentValue = tpl.currentBoard.allowsVoteOnMinicard !== false;
+    Boards.update(tpl.currentBoard._id, { $set: { allowsVoteOnMinicard: !currentValue } });
+  },
+  'click .js-field-has-poker'(evt, tpl) {
+    evt.preventDefault();
+    const currentValue = tpl.currentBoard.allowsPoker !== false;
+    Boards.update(tpl.currentBoard._id, { $set: { allowsPoker: !currentValue } });
+  },
+  'click .js-field-has-poker-on-minicard'(evt, tpl) {
+    evt.preventDefault();
+    const currentValue = tpl.currentBoard.allowsPokerOnMinicard !== false;
+    Boards.update(tpl.currentBoard._id, { $set: { allowsPokerOnMinicard: !currentValue } });
+  },
+  'click .js-field-has-text-notes'(evt, tpl) {
+    evt.preventDefault();
+    const currentValue = tpl.currentBoard.allowsTextNotes !== false;
+    Boards.update(tpl.currentBoard._id, { $set: { allowsTextNotes: !currentValue } });
+  },
+  'click .js-field-has-comment-count-on-minicard'(evt, tpl) {
+    evt.preventDefault();
+    const currentValue = tpl.currentBoard.allowsCommentCountOnMinicard !== false;
+    Boards.update(tpl.currentBoard._id, { $set: { allowsCommentCountOnMinicard: !currentValue } });
   },
   'click .js-field-has-attachments'(evt, tpl) {
     evt.preventDefault();
@@ -1562,6 +3101,12 @@ Template.boardCardSettingsPopup.events({
     evt.preventDefault();
     const newValue = !tpl.currentBoard.allowsComments;
     Boards.update(tpl.currentBoard._id, { $set: { allowsComments: newValue } });
+  },
+  // #4285: card comments shown on the minicard.
+  'click .js-field-has-comments-on-minicard'(evt, tpl) {
+    evt.preventDefault();
+    const newValue = !tpl.currentBoard.allowsCommentsOnMinicard;
+    Boards.update(tpl.currentBoard._id, { $set: { allowsCommentsOnMinicard: newValue } });
   },
   'click .js-field-has-activities'(evt, tpl) {
     evt.preventDefault();
@@ -1583,6 +3128,521 @@ Template.boardCardSettingsPopup.events({
     const newValue = !tpl.currentBoard.allowsCardSortingByNumberOnMinicard;
     Boards.update(tpl.currentBoard._id, { $set: { allowsCardSortingByNumberOnMinicard: newValue } });
   },
+};
+
+// ── Card Settings: Board Settings / Card ────────────────────────────────────
+// docs/Features/Cards/Card-Settings.md. Two panes, Show on Minicard and Show
+// on Card, each the same template with its own fixed side, and in each the
+// sections as checklists - each a title with its own checkbox (the whole
+// section shown on that side) and its rows as items, the checkbox the side's
+// board-wide Show on Minicard or Show on Card. Sections and
+// rows are dragged like checklists and their items, and collapse like them;
+// what else a section or a row has is in its hamburger, drawn only when it has
+// something in it. The opened card has no Card Settings of its own.
+
+// Where the collapsed sections are kept: the user's collapsed card sections
+// (models/users.js), under the BOARD's id, because Card Settings is the
+// board's and not one card's.
+// Per side, since each pane is its own list: the Card pane keeps the key the
+// one list had (`card-settings-<id>`), so what a user collapsed before stays
+// collapsed there. A whole pane is `card-settings-pane-<side>`.
+const inlineCollapseKey = (id, side) => (side === 'minicard' ? `card-settings-minicard-${id}` : `card-settings-${id}`);
+const paneCollapseKey = side => `card-settings-pane-${side === 'minicard' ? 'minicard' : 'card'}`;
+
+function collapsedOnBoard(key) {
+  const user = ReactiveCache.getCurrentUser();
+  const boardId = Session.get('currentBoard');
+  return Boolean(user && boardId && user.getCollapsedCardSection(boardId, key) === true);
+}
+
+function inlineSectionCollapsed(id, side) {
+  return collapsedOnBoard(inlineCollapseKey(id, side));
+}
+
+// What a row's hamburger holds: only Labels text's way back to the board's
+// default, while the user overrides it. A row with nothing in it has no
+// hamburger at all - the icon is not drawn.
+function inlineRowMenu(row) {
+  return {
+    labelTextReset: Boolean(row.labelTextOverride && row.labelTextOverridden),
+  };
+}
+
+// Whether a section's hamburger has anything in it: Card's always does (Ask
+// for a reason when moving cards, the Draggable table); any other section only
+// when it has card or board actions for this user here (sectionCardActionsOf).
+// Without, the icon is not drawn.
+function sectionHasMenu(section) {
+  if (section && section.general) return true;
+  return Boolean(section) && sectionCardActionsOf(section.id).length > 0;
+}
+
+function inlineSectionsOf(tpl, data) {
+  const board = ReactiveCache.getBoard(Session.get('currentBoard'));
+  const side = tpl.showSide.get();
+  const mayBoard = Boolean(Utils.canModifyBoard && Utils.canModifyBoard());
+  const showDragHandles = Utils.showDragHandles();
+  const animating = tpl.animating.get();
+  // The one hamburger of this pane whose panel is open (cardSettingsInlinePanel).
+  const open = tpl.openPanel ? tpl.openPanel.get() : null;
+  // This pane's side's own section order: the order its surface draws them in.
+  return cardSettingsSections.orderedSections(cardSettingsSections.SECTIONS,
+    board && board[cardSettingsSections.SECTION_ORDER_FIELD[side]], side)
+    .map(section => {
+      const rows = sectionRowsOf(section.id, data, side, animating).map(row => {
+        const menu = inlineRowMenu(row);
+        // Blaze keeps a row's element by _id, so switching Show moves each
+        // row to its place on the other side rather than relabelling the rows
+        // where they stand - a click in between would land on another field.
+        return { ...row, _id: row.key, menu, hasMenu: menu.labelTextReset, menuOpen: open === `row:${row.key}` };
+      });
+      // Whether the WHOLE section is shown on this side - the checkbox left
+      // of its title; its rows keep their own ticks while it is not.
+      const shown = cardSettingsSections.sectionShown(board, side, section.id);
+      // Custom Fields: its items are the board's custom fields, its own
+      // checkbox the board's Custom Fields flag of this side - the row that
+      // was its only item (models/lib/cardSettingsCustomFields.js).
+      const customFields = section.id === cardSettingsCustomFields.CUSTOM_FIELDS_SECTION;
+      const customFieldItems = customFields ? customFieldItemsOf(side, animating, mayBoard, showDragHandles)
+        .map(item => ({ ...item, menuOpen: open === `field:${item.id}` })) : [];
+      // One row on this side: one line - its checkbox, its name, the
+      // section's hamburger (cardSettingsSections.js isSingleRowSection).
+      const single = !customFields && cardSettingsSections.isSingleRowSection(rows);
+      const flagRow = single ? rows[0]
+        : customFields ? rows.find(r => r.key === cardSettingsCustomFields.CUSTOM_FIELDS_ROW) || null : null;
+      const items = customFields ? customFieldItems : rows;
+      return {
+        // Blaze keeps a section's element (and the drag bound to it) by _id.
+        // A section turning into one line (or back) is another element.
+        _id: `${section.id}${single ? ':single' : ''}`,
+        id: section.id,
+        icon: section.icon,
+        title: TAPi18n.__(section.labelKey),
+        side,
+        sideTitle: TAPi18n.__(side === 'minicard' ? 'show-on-minicard' : 'show-on-card'),
+        rows: customFields ? [] : rows,
+        shown,
+        writable: mayBoard,
+        animatingShown: animating === `section:${section.id}:${side}`,
+        single,
+        customFields,
+        customFieldItems,
+        // The checkbox of one line and of Custom Fields: the row's flag, and
+        // the section not hidden whole - "this field is shown on this side".
+        flagRow,
+        flagChecked: Boolean(flagRow) && cardSettingsSections.singleLineChecked(board, side, section.id, flagRow.checked),
+        flagWritable: Boolean(flagRow && flagRow.writable),
+        hasMenu: sectionHasMenu(section),
+        menuOpen: open === `section:${section.id}`,
+        createOpen: customFields && open === 'create',
+        checkedCount: items.filter(r => r.checked).length,
+        total: items.length,
+        collapsed: inlineSectionCollapsed(section.id, side),
+        draggable: mayBoard,
+        showDragHandles,
+      };
+    })
+    // A section with no row on this side is left out - except Card, whose
+    // hamburger holds what is not a field, and Custom Fields while its flag
+    // row is offered.
+    .filter(section => section.rows.length || section.flagRow
+      || cardSettingsSections.SECTIONS.find(s => s.id === section.id)?.general);
+}
+
+// The board's custom fields as Custom Fields' items in Card Settings, in their
+// `sort` order (models/lib/cardSettingsCustomFields.js): each a checkbox - its
+// Show on Card (alwaysOnCard) or Show on Minicard (showOnCard) - its name, and
+// a hamburger opening its edit form, for a board admin.
+function boardCustomFieldDefinitions() {
+  const boardId = Session.get('currentBoard');
+  if (!boardId) return [];
+  return cardSettingsCustomFields.orderedDefinitions(
+    ReactiveCache.getCustomFields({ boardIds: { $in: [boardId] } }, { sort: { sort: 1, name: 1 } }) || []);
+}
+
+function customFieldItemsOf(side, animating, mayBoard, showDragHandles) {
+  const sideTitle = TAPi18n.__(side === 'minicard' ? 'show-on-minicard' : 'show-on-card');
+  return boardCustomFieldDefinitions().map(definition => ({
+    // Blaze keeps an item's element by _id, as it keeps the rows'.
+    _id: `customField:${definition._id}`,
+    id: definition._id,
+    name: definition.name,
+    side,
+    sideTitle,
+    checked: cardSettingsCustomFields.definitionChecked(definition, side),
+    writable: mayBoard,
+    animating: animating === `customField:${definition._id}:${side}`,
+    draggable: mayBoard,
+    showDragHandles,
+    hasMenu: mayBoard,
+  }));
+}
+
+// Custom Fields' items dropped in a new order, or one moved a step by Up and
+// Down: each definition whose place changed gets its new `sort`, through the
+// same CustomFields write as the board sidebar's own list.
+function placeCustomFieldOrder(ids) {
+  if (!(Utils.canModifyBoard && Utils.canModifyBoard())) return;
+  const sorts = cardSettingsCustomFields.sortsAfterDrop(boardCustomFieldDefinitions(), ids);
+  Object.entries(sorts).forEach(([id, sort]) => CustomFields.update(id, { $set: { sort } }));
+}
+
+// Each pane's side is fixed by boardCardSettingsPopup (`side="minicard"` or
+// `side="card"`); everything that depends on the side reads it from here.
+function setUpCardSettingsInline() {
+  setUpCardSettings.call(this);
+  const side = Template.currentData() && Template.currentData().side;
+  this.showSide = new ReactiveVar(side === 'minicard' ? 'minicard' : 'card');
+  // Which hamburger's panel is open in this pane: `section:<id>`,
+  // `row:<key>`, `field:<customFieldId>` or `create` (the + under Custom
+  // Fields); null when none. Not kept: a reopened Card Settings starts closed.
+  this.openPanel = new ReactiveVar(null);
+}
+
+// A hamburger toggles its panel: open, or closed when it is the one open -
+// and opening one closes the pane's other.
+function togglePanel(tpl, key) {
+  tpl.animating.set(null);
+  tpl.openPanel.set(tpl.openPanel.get() === key ? null : key);
+}
+
+// The Card Settings pane template instance around a view, for a panel's
+// helpers (its checkboxes animate in the pane's state).
+function paneInstanceOf(view) {
+  let v = view;
+  while (v && v.name !== 'Template.cardSettingsInline') v = v.parentView;
+  return v && v.templateInstance ? v.templateInstance() : null;
+}
+
+Template.cardSettingsInline.onCreated(setUpCardSettingsInline);
+Template.cardSettingsInline.onDestroyed(function () {
+  if (this._onPanelEscape) document.removeEventListener('keydown', this._onPanelEscape, true);
+});
+Template.cardSettingsInline.helpers({
+  ...boardCardSettingsHelpers,
+  inlineSections() { return inlineSectionsOf(Template.instance(), Template.currentData()); },
+  showSide() { return Template.instance().showSide.get(); },
+  paneTitle() {
+    return TAPi18n.__(Template.instance().showSide.get() === 'minicard' ? 'show-on-minicard' : 'show-on-card');
+  },
+  paneCollapsed() { return collapsedOnBoard(paneCollapseKey(Template.instance().showSide.get())); },
+});
+
+// ── The two panes and the splitter between them ─────────────────────────────
+// Board Settings / Card shows the Minicard pane and the Card pane at once
+// (sidebar.jade boardCardSettingsPopup). Side by side, the splitter between
+// them is dragged like the Admin Panel left menu's inner edge
+// (client/components/settings/leftMenu.js): pointer down on it, move, and the
+// Minicard pane's share of the width follows; it is saved once, at the end, in
+// the user's profile as a fraction (models/lib/cardSettingsSplit.js), with a
+// Session value in front so it does not jump back while the server answers.
+// The Arrow keys, Home and End move it too; a double-click goes back to half
+// and half.
+const CARD_SETTINGS_SPLIT_KEY = 'cardSettingsSplit';
+
+function savedCardSettingsSplit() {
+  const session = Session.get(CARD_SETTINGS_SPLIT_KEY);
+  if (typeof session === 'number') return session;
+  const user = ReactiveCache.getCurrentUser();
+  const stored = user && typeof user.getCardSettingsSplit === 'function' ? user.getCardSettingsSplit() : undefined;
+  return typeof stored === 'number' ? stored : cardSettingsSplit.DEFAULT_SPLIT;
+}
+
+function saveCardSettingsSplit(fraction) {
+  const value = cardSettingsSplit.normaliseSplit(fraction);
+  Session.set(CARD_SETTINGS_SPLIT_KEY, value === undefined ? cardSettingsSplit.DEFAULT_SPLIT : value);
+  const user = ReactiveCache.getCurrentUser();
+  if (user && typeof user.setCardSettingsSplit === 'function') {
+    Promise.resolve(user.setCardSettingsSplit(value)).catch(error => console.error(error));
+  }
+}
+
+const isRtlPage = () =>
+  (document.documentElement.getAttribute('dir') || getComputedStyle(document.documentElement).direction) === 'rtl';
+
+// The panes' geometry: the width the two panes share (the splitter's own
+// width left out) and the minimum of one pane in pixels, at the popup's font.
+function panesGeometry(panesEl, splitterEl) {
+  const total = panesEl.getBoundingClientRect().width - (splitterEl ? splitterEl.getBoundingClientRect().width : 0);
+  const em = parseFloat(getComputedStyle(panesEl).fontSize) || 16;
+  return { total, min: cardSettingsSplit.MIN_PANE_EM * em };
+}
+
+Template.boardCardSettingsPopup.helpers({
+  splitFraction() { return savedCardSettingsSplit(); },
+  splitPercent() { return cardSettingsSplit.splitPercent(savedCardSettingsSplit()); },
+  // With a pane collapsed the other takes the width and there is no splitter.
+  anyPaneCollapsed() {
+    return cardSettingsSections.SIDES.some(side => collapsedOnBoard(paneCollapseKey(side)));
+  },
+});
+
+Template.boardCardSettingsPopup.onRendered(function () {
+  const panesEl = this.find('.js-card-settings-panes');
+  const splitter = this.find('.js-card-settings-splitter');
+  if (!panesEl || !splitter) return;
+  let drag = null;
+  const show = fraction => {
+    panesEl.style.setProperty('--card-settings-split', String(fraction));
+    splitter.setAttribute('aria-valuenow', String(cardSettingsSplit.splitPercent(fraction)));
+  };
+  // The saved split, clamped against the width the popup has now.
+  const current = () => {
+    const { total, min } = panesGeometry(panesEl, splitter);
+    return cardSettingsSplit.clampSplit(savedCardSettingsSplit(), total, min);
+  };
+  const onMove = evt => {
+    if (!drag) return;
+    const { total, min } = panesGeometry(panesEl, splitter);
+    drag.last = cardSettingsSplit.splitAfterDrag(drag.start, evt.clientX - drag.x, total, min, isRtlPage());
+    // Straight onto the property while dragging: no write per pixel.
+    show(drag.last);
+    evt.preventDefault();
+  };
+  const onEnd = evt => {
+    if (!drag) return;
+    const { last, start, pointerId } = drag;
+    drag = null;
+    document.body.classList.remove('card-settings-splitting-active');
+    try { splitter.releasePointerCapture(pointerId); } catch (e) { /* already released */ }
+    // A press that did not move (half of a double-click) saves nothing.
+    if (last !== start) saveCardSettingsSplit(last);
+    if (evt && evt.preventDefault) evt.preventDefault();
+  };
+  const onDown = evt => {
+    if (evt.button !== undefined && evt.button !== 0) return;
+    const start = current();
+    drag = { x: evt.clientX, start, last: start, pointerId: evt.pointerId };
+    // Mouse, touch and pen alike; the splitter keeps the pointer while it is
+    // dragged, so a fast move off it does not end the drag.
+    try { splitter.setPointerCapture(evt.pointerId); } catch (e) { /* not capturable */ }
+    document.body.classList.add('card-settings-splitting-active');
+    evt.preventDefault();
+    evt.stopPropagation();
+  };
+  const onKey = evt => {
+    const { total, min } = panesGeometry(panesEl, splitter);
+    const next = cardSettingsSplit.splitAfterKey(current(), evt.key, total, min, isRtlPage());
+    if (next === null) return;
+    evt.preventDefault();
+    show(next);
+    saveCardSettingsSplit(next);
+  };
+  const onDouble = evt => {
+    evt.preventDefault();
+    show(cardSettingsSplit.DEFAULT_SPLIT);
+    saveCardSettingsSplit(undefined);
+  };
+  splitter.addEventListener('pointerdown', onDown, { passive: false });
+  splitter.addEventListener('pointermove', onMove, { passive: false });
+  splitter.addEventListener('pointerup', onEnd, { passive: false });
+  splitter.addEventListener('pointercancel', onEnd, { passive: false });
+  splitter.addEventListener('keydown', onKey);
+  splitter.addEventListener('dblclick', onDouble);
+  this._cardSettingsSplitCleanup = () => {
+    drag = null;
+    document.body.classList.remove('card-settings-splitting-active');
+  };
+});
+
+Template.boardCardSettingsPopup.onDestroyed(function () {
+  // A drag still going when the popup closed is not what the reader chose.
+  if (this._cardSettingsSplitCleanup) this._cardSettingsSplitCleanup();
+});
+
+// A section dropped above or below another: the shown sections in their new
+// order, written to the board as `side`'s section order - the Minicard pane's
+// to the minicard's, the Card pane's to the opened card's; the other side's
+// is untouched (models/lib/cardSettingsSections.js).
+function placeSectionOrder(ids, side) {
+  const board = ReactiveCache.getBoard(Session.get('currentBoard'));
+  if (!board || !(Utils.canModifyBoard && Utils.canModifyBoard())) return;
+  const which = side === 'minicard' ? 'minicard' : 'card';
+  const stored = board[cardSettingsSections.SECTION_ORDER_FIELD[which]];
+  const order = cardSettingsSections.sectionOrderAfterDrop(stored, ids, which);
+  if (order.join(' ') === cardSettingsSections.sectionOrder(stored, which).join(' ')) return;
+  board.setCardSettingsSectionOrder(order, which);
+}
+
+Template.cardSettingsInline.onRendered(function () {
+  const pane = this.find('.js-card-settings-pane');
+  // A form in a panel saved (sidebarCustomFields.js closeCardSettingsPanel):
+  // the panel closes, Card Settings stays.
+  this._onPanelDone = () => this.openPanel.set(null);
+  if (pane) pane.addEventListener('cardsettingspaneldone', this._onPanelDone);
+  // Escape closes the open panel, not Card Settings: before the popup's own
+  // Escape (EscapeActions on the document), in the capture phase.
+  this._onPanelEscape = evt => {
+    if (evt.key !== 'Escape' || !this.openPanel.get()) return;
+    evt.preventDefault();
+    evt.stopImmediatePropagation();
+    this.openPanel.set(null);
+  };
+  document.addEventListener('keydown', this._onPanelEscape, true);
+  reorderOnDrop(this.$('.js-card-settings-sections-sortable'), {
+    items: '> .js-card-settings-section.is-draggable', handle: '.js-card-settings-section-handle',
+    keyOf: el => el.dataset.section,
+    drop: (id, ids) => placeSectionOrder(ids, this.showSide.get()),
+  });
+});
+
+// Each section's rows reorder within it, as checklist items do, through the
+// board's order of that side (placeInListOrder). A row dropped on another
+// section goes back: the sections are unrelated kinds of fields. Dragged by
+// the handle with drag handles on, by the icon and name with them off
+// (cardSettingsRowLabel).
+Template.cardSettingsInlineSection.onRendered(function () {
+  // Custom Fields' items reorder within Custom Fields only, as rows do.
+  const fields = this.find('.js-card-settings-custom-fields-sortable');
+  if (fields) {
+    reorderOnDrop(this.$(fields), {
+      ownListOnly: true,
+      items: '> .js-card-settings-custom-field.is-positioned', handle: '.js-card-settings-custom-field-handle',
+      keyOf: el => el.dataset.id,
+      drop: (id, ids) => placeCustomFieldOrder(ids),
+    });
+  }
+  const list = this.find('.js-card-field-order-sortable');
+  if (!list) return;
+  reorderOnDrop(this.$(list), {
+    ownListOnly: true,
+    items: '> .js-card-field-order-row.is-positioned', handle: '.js-card-field-order-handle',
+    keyOf: el => el.dataset.key,
+    drop: (key, keys) => placeInListOrder(list.dataset.side, key, keys),
+  });
+});
+
+// The pane's handlers leave alone what a panel's own templates handle - the
+// custom field form, the subtask settings (`.js-card-settings-panel-own-handlers`):
+// the subtask settings' "Subtasks" checkbox has the same class as the
+// Subtasks row's, and both handlers toggling it was a click that did nothing.
+const paneEvents = Object.fromEntries(Object.entries(cardSettingsEvents).map(([key, handler]) => [key,
+  function paneHandler(evt, ...rest) {
+    if (evt && evt.target && evt.target.closest && evt.target.closest('.js-card-settings-panel-own-handlers')) return undefined;
+    return handler.call(this, evt, ...rest);
+  }]));
+
+Template.cardSettingsInline.events({
+  ...paneEvents,
+  // The caret at the top of a pane: the whole pane, only its header left.
+  async 'click .js-toggle-card-settings-pane'(evt, tpl) {
+    evt.preventDefault();
+    const user = ReactiveCache.getCurrentUser();
+    const boardId = Session.get('currentBoard');
+    if (!user || !boardId) return;
+    const key = paneCollapseKey(tpl.showSide.get());
+    await user.setCollapsedCardSection(boardId, key, !collapsedOnBoard(key));
+  },
+  async 'click .js-toggle-card-settings-section'(evt, tpl) {
+    evt.preventDefault();
+    const id = evt.currentTarget.closest('.js-card-settings-section')?.dataset.section;
+    const side = tpl.showSide.get();
+    const user = ReactiveCache.getCurrentUser();
+    const boardId = Session.get('currentBoard');
+    if (!id || !user || !boardId) return;
+    await user.setCollapsedCardSection(boardId, inlineCollapseKey(id, side), !inlineSectionCollapsed(id, side));
+  },
+  // A section is dragged by its handle or its title: a click there does nothing.
+  'click .js-card-settings-section-handle'(evt) { evt.preventDefault(); },
+  // The keyboard way to drag a section: Up and Down move it one step.
+  'keydown .js-card-settings-section-handle'(evt, tpl) {
+    const direction = ARROW_KEYS[evt.key];
+    if (!direction) return;
+    evt.preventDefault();
+    const sectionEl = evt.currentTarget.closest('.js-card-settings-section');
+    const list = sectionEl && sectionEl.closest('.js-card-settings-sections-sortable');
+    if (!list) return;
+    const ids = [...list.querySelectorAll(':scope > .js-card-settings-section')].map(el => el.dataset.section);
+    const at = ids.indexOf(sectionEl.dataset.section);
+    const to = direction === 'up' ? at - 1 : at + 1;
+    if (at < 0 || to < 0 || to >= ids.length) return;
+    ids.splice(at, 1);
+    ids.splice(to, 0, sectionEl.dataset.section);
+    placeSectionOrder(ids, tpl.showSide.get());
+  },
+  'click .js-open-card-settings-section-menu'(evt, tpl) {
+    const id = evt.currentTarget.closest('.js-card-settings-section')?.dataset.section;
+    evt.preventDefault();
+    if (!cardSettingsSections.SECTIONS.some(s => s.id === id)) return;
+    togglePanel(tpl, `section:${id}`);
+  },
+  // A panel's X.
+  'click .js-close-card-settings-panel'(evt, tpl) {
+    evt.preventDefault();
+    tpl.openPanel.set(null);
+  },
+  // Custom Fields' items: the checkbox is the definition's flag of this side.
+  'click .js-card-settings-custom-field-toggle'(evt, tpl) {
+    evt.preventDefault();
+    const item = evt.currentTarget.closest('.js-card-settings-custom-field');
+    const id = item && item.dataset.id;
+    const side = item && item.dataset.side;
+    if (!id || !(Utils.canModifyBoard && Utils.canModifyBoard())) return;
+    // From what the checkbox shows: the cached definition can still be the
+    // one before a click just made, and two quick clicks would both write on.
+    const definition = ReactiveCache.getCustomField(id);
+    const set = definition && cardSettingsCustomFields.definitionToggleSet(side,
+      evt.currentTarget.getAttribute('aria-checked') !== 'true');
+    if (!set) return;
+    tpl.animating.set(`customField:${id}:${side}`);
+    CustomFields.update(id, { $set: set });
+  },
+  // Dragged by its handle or its name: a click there does nothing.
+  'click .js-card-settings-custom-field-handle'(evt) { evt.preventDefault(); },
+  'keydown .js-card-settings-custom-field-handle'(evt) {
+    const direction = ARROW_KEYS[evt.key];
+    const item = evt.currentTarget.closest('.js-card-settings-custom-field');
+    if (!direction || !item) return;
+    evt.preventDefault();
+    placeCustomFieldOrder(cardSettingsCustomFields.idsAfterStep(boardCustomFieldDefinitions(), item.dataset.id, direction));
+  },
+  // Its hamburger: the custom field's own edit form - the board sidebar's -
+  // under the item.
+  'click .js-card-settings-edit-custom-field'(evt, tpl) {
+    evt.preventDefault();
+    const item = evt.currentTarget.closest('.js-card-settings-custom-field');
+    const definition = item && ReactiveCache.getCustomField(item.dataset.id);
+    if (!definition || !(Utils.canModifyBoard && Utils.canModifyBoard())) return;
+    togglePanel(tpl, `field:${definition._id}`);
+  },
+  // "+" under the items: a new custom field of the board's form, under the +.
+  'click .js-card-settings-add-custom-field'(evt, tpl) {
+    evt.preventDefault();
+    if (!(Utils.canModifyBoard && Utils.canModifyBoard())) return;
+    togglePanel(tpl, 'create');
+  },
+  'click .js-open-card-settings-item-menu'(evt, tpl) {
+    const row = evt.currentTarget.closest('.js-card-field-order-row');
+    if (!row) return;
+    evt.preventDefault();
+    togglePanel(tpl, `row:${row.dataset.key}`);
+  },
+});
+
+// What a hamburger holds, opened under its line inside the pane
+// (sidebar.jade cardSettingsInlinePanel). It has NO event map: the pane's
+// (cardSettingsEvents, registered once, on cardSettingsInline) handles its
+// checkboxes, so each click is handled exactly once; Blaze runs the event map
+// of every enclosing template, and a second registration here toggled every
+// checkbox twice. tests/cardSettingsInlinePanels.test.cjs.
+Template.cardSettingsInlinePanel.helpers({
+  ...boardCardSettingsHelpers,
+  isAnimating(key) {
+    const pane = paneInstanceOf(Template.instance().view);
+    return Boolean(pane && pane.animating.get() === key);
+  },
+  sectionIsGeneral() {
+    return Boolean(cardSettingsSections.SECTIONS.find(s => s.id === this.sectionId)?.general);
+  },
+  sectionActions() { return sectionCardActionsOf(this.sectionId); },
+  itemRow() {
+    const pane = paneInstanceOf(Template.instance().view);
+    const animating = pane ? pane.animating.get() : null;
+    const row = sectionRowsOf(this.sectionId, this, this.side, animating).find(r => r.key === this.rowKey);
+    return row ? { ...row, menu: inlineRowMenu(row) } : null;
+  },
+  fieldDefinition() { return this.fieldId ? ReactiveCache.getCustomField(this.fieldId) : null; },
+  createData() { return { boardId: Session.get('currentBoard') }; },
 });
 
 // Use Session variables instead of global ReactiveVars
@@ -1722,36 +3782,10 @@ Template.addMemberPopup.helpers({
     const board = ReactiveCache.getBoard(boardId);
     return board && board.hasMember(userId);
   }
-})
-
-Template.addMemberPopupTest.helpers({
-  searchResults() {
-    return Session.get('addMemberPopup.searchResults') || [];
-  }
-})
+});
 
 Template.addBoardOrgPopup.onCreated(function() {
-  this.error = new ReactiveVar('');
-  this.loading = new ReactiveVar(false);
-  this.findOrgsOptions = new ReactiveVar({});
-
-  this.page = new ReactiveVar(1);
-  this.autorun(() => {
-    const limitOrgs = this.page.get() * Number.MAX_SAFE_INTEGER;
-    this.subscribe('org', this.findOrgsOptions.get(), limitOrgs, () => {});
-  });
-
-  this.setError = function(error) {
-    this.error.set(error);
-  };
-
-  this.setLoading = function(w) {
-    this.loading.set(w);
-  };
-
-  this.isLoading = function() {
-    return this.loading.get();
-  };
+  initGroupPickerState(this, 'org');
 });
 
 Template.addBoardOrgPopup.onRendered(function() {
@@ -1759,9 +3793,12 @@ Template.addBoardOrgPopup.onRendered(function() {
 });
 
 Template.addBoardOrgPopup.helpers({
+  // #5141: only the admin's own organizations (all of them for a site admin).
   orgsDatas() {
-    let ret = ReactiveCache.getOrgs({}, {sort: { orgDisplayName: 1 }});
-    return ret;
+    const user = ReactiveCache.getCurrentUser();
+    const { offeredGroups } = require('/models/lib/boardGroupLinks');
+    return offeredGroups(ReactiveCache.getOrgs({}, { sort: { orgDisplayName: 1 } }),
+      ((user && user.orgs) || []).map(o => o && o.orgId), !!(user && user.isAdmin));
   },
 });
 
@@ -1786,7 +3823,7 @@ Template.addBoardOrgPopup.events({
         "orgId": selectedOrgId,
         "orgDisplayName": selectedOrgDisplayName,
         "isActive" : true,
-      })
+      });
 
       if (selectedOrgId != "-1") {
         Meteor.call('setBoardOrgs', boardOrganizations, currentBoard._id);
@@ -1798,34 +3835,7 @@ Template.addBoardOrgPopup.events({
 });
 
 Template.removeBoardOrgPopup.onCreated(function() {
-  this.error = new ReactiveVar('');
-  this.loading = new ReactiveVar(false);
-  this.findOrgsOptions = new ReactiveVar({});
-
-  this.page = new ReactiveVar(1);
-  this.autorun(() => {
-    const limitTeams = this.page.get() * Number.MAX_SAFE_INTEGER;
-    this.subscribe('team', this.findOrgsOptions.get(), limitTeams, () => {});
-  });
-
-  this.findUsersOptions = new ReactiveVar({});
-  this.userPage = new ReactiveVar(1);
-  this.autorun(() => {
-    const limitUsers = this.userPage.get() * Number.MAX_SAFE_INTEGER;
-    this.subscribe('people', this.findUsersOptions.get(), limitUsers, () => {});
-  });
-
-  this.setError = function(error) {
-    this.error.set(error);
-  };
-
-  this.setLoading = function(w) {
-    this.loading.set(w);
-  };
-
-  this.isLoading = function() {
-    return this.loading.get();
-  };
+  initGroupPickerState(this, 'team', { withPeople: true });
 });
 
 Template.removeBoardOrgPopup.onRendered(function() {
@@ -1863,35 +3873,90 @@ Template.removeBoardOrgPopup.events({
   },
 });
 
-Template.addBoardTeamPopup.onCreated(function() {
+// #5850: free-form "share board with an email domain" popups. Unlike orgs/teams
+// (which are a managed collection shown in a <select>), the owner simply types a
+// domain such as example.com.
+Template.addBoardDomainPopup.onCreated(function() {
   this.error = new ReactiveVar('');
-  this.loading = new ReactiveVar(false);
-  this.findOrgsOptions = new ReactiveVar({});
-
-  this.page = new ReactiveVar(1);
-  this.autorun(() => {
-    const limitTeams = this.page.get() * Number.MAX_SAFE_INTEGER;
-    this.subscribe('team', this.findOrgsOptions.get(), limitTeams, () => {});
-  });
-
-  this.findUsersOptions = new ReactiveVar({});
-  this.userPage = new ReactiveVar(1);
-  this.autorun(() => {
-    const limitUsers = this.userPage.get() * Number.MAX_SAFE_INTEGER;
-    this.subscribe('people', this.findUsersOptions.get(), limitUsers, () => {});
-  });
 
   this.setError = function(error) {
     this.error.set(error);
   };
+});
 
-  this.setLoading = function(w) {
-    this.loading.set(w);
-  };
+Template.addBoardDomainPopup.helpers({
+  error() {
+    return { get: () => Template.instance().error.get() };
+  },
+});
 
-  this.isLoading = function() {
-    return this.loading.get();
-  };
+Template.addBoardDomainPopup.events({
+  'keyup input'(event, tpl) {
+    tpl.setError('');
+  },
+  'submit .js-add-board-domain'(event, tpl) {
+    event.preventDefault();
+    const input = document.getElementById('jsBoardDomainInput');
+    const domain = (input ? input.value : '').trim().toLowerCase();
+
+    // Basic validation: must contain a '.', and no '@' or whitespace.
+    if (
+      domain.length === 0 ||
+      domain.indexOf('.') < 0 ||
+      domain.indexOf('@') >= 0 ||
+      /\s/.test(domain)
+    ) {
+      tpl.setError('invalid-domain');
+      return;
+    }
+
+    const currentBoard = Utils.getCurrentBoard();
+    const boardDomains = [];
+    if (currentBoard.domains !== undefined) {
+      for (let i = 0; i < currentBoard.domains.length; i++) {
+        boardDomains.push(currentBoard.domains[i]);
+      }
+    }
+
+    if (!boardDomains.some(d => d.domain === domain)) {
+      boardDomains.push({
+        domain,
+        isActive: true,
+      });
+      Meteor.call('setBoardDomains', boardDomains, currentBoard._id);
+    }
+
+    Popup.back();
+  },
+});
+
+Template.removeBoardDomainPopup.events({
+  'keyup input'(event, tpl) {
+    // no-op, kept for parity with the org/team remove popups
+  },
+  'click #leaveBoardDomainBtn'(){
+    const stringDomain = document.getElementById('hideDomain').value;
+    const currentBoard = Utils.getCurrentBoard();
+    const boardDomains = [];
+    if (currentBoard.domains !== undefined) {
+      for (let i = 0; i < currentBoard.domains.length; i++) {
+        if (currentBoard.domains[i].domain != stringDomain) {
+          boardDomains.push(currentBoard.domains[i]);
+        }
+      }
+    }
+
+    Meteor.call('setBoardDomains', boardDomains, currentBoard._id);
+
+    Popup.back();
+  },
+  'click #cancelLeaveBoardDomainBtn'(){
+    Popup.back();
+  },
+});
+
+Template.addBoardTeamPopup.onCreated(function() {
+  initGroupPickerState(this, 'team', { withPeople: true });
 });
 
 Template.addBoardTeamPopup.onRendered(function() {
@@ -1899,9 +3964,12 @@ Template.addBoardTeamPopup.onRendered(function() {
 });
 
 Template.addBoardTeamPopup.helpers({
+  // #5141: only the admin's own teams (all of them for a site admin).
   teamsDatas() {
-    let ret = ReactiveCache.getTeams({}, {sort: { teamDisplayName: 1 }});
-    return ret;
+    const user = ReactiveCache.getCurrentUser();
+    const { offeredGroups } = require('/models/lib/boardGroupLinks');
+    return offeredGroups(ReactiveCache.getTeams({}, { sort: { teamDisplayName: 1 } }),
+      ((user && user.teams) || []).map(t => t && t.teamId), !!(user && user.isAdmin));
   },
 });
 
@@ -1926,7 +3994,7 @@ Template.addBoardTeamPopup.events({
         "teamId": selectedTeamId,
         "teamDisplayName": selectedTeamDisplayName,
         "isActive" : true,
-      })
+      });
 
       if (selectedTeamId != "-1") {
         let members = currentBoard.members;
@@ -1943,7 +4011,7 @@ Template.addBoardTeamPopup.events({
           let index;
           if (boardTeamUsers && boardTeamUsers.length > 0) {
             boardTeamUsers.forEach((u) => {
-              index = members.findIndex(function(m){ return m.userId == u._id});
+              index = members.findIndex(function(m){ return m.userId == u._id;});
               if(index == -1){
                 members.push({
                   "isActive": true,
@@ -1966,34 +4034,7 @@ Template.addBoardTeamPopup.events({
 });
 
 Template.removeBoardTeamPopup.onCreated(function() {
-  this.error = new ReactiveVar('');
-  this.loading = new ReactiveVar(false);
-  this.findOrgsOptions = new ReactiveVar({});
-
-  this.page = new ReactiveVar(1);
-  this.autorun(() => {
-    const limitTeams = this.page.get() * Number.MAX_SAFE_INTEGER;
-    this.subscribe('team', this.findOrgsOptions.get(), limitTeams, () => {});
-  });
-
-  this.findUsersOptions = new ReactiveVar({});
-  this.userPage = new ReactiveVar(1);
-  this.autorun(() => {
-    const limitUsers = this.userPage.get() * Number.MAX_SAFE_INTEGER;
-    this.subscribe('people', this.findUsersOptions.get(), limitUsers, () => {});
-  });
-
-  this.setError = function(error) {
-    this.error.set(error);
-  };
-
-  this.setLoading = function(w) {
-    this.loading.set(w);
-  };
-
-  this.isLoading = function() {
-    return this.loading.get();
-  };
+  initGroupPickerState(this, 'team', { withPeople: true });
 });
 
 Template.removeBoardTeamPopup.onRendered(function() {
@@ -2035,7 +4076,7 @@ Template.removeBoardTeamPopup.events({
       let index;
       if (boardTeamUsers && boardTeamUsers.length > 0) {
         boardTeamUsers.forEach((u) => {
-          index = members.findIndex(function(m){ return m.userId == u._id});
+          index = members.findIndex(function(m){ return m.userId == u._id;});
           if(index !== -1 && !members[index].isAdmin){
             members.splice(index, 1);
           }
@@ -2053,6 +4094,15 @@ Template.removeBoardTeamPopup.events({
 });
 
 Template.changePermissionsPopup.events({
+  'click .js-set-custom-role'(event) {
+    event.preventDefault();
+    const currentBoard = Utils.getCurrentBoard();
+    const roleId = String($(event.currentTarget).data('role'));
+    Meteor.call('boards.setMemberCustomRole', currentBoard._id, this.userId, roleId, err => {
+      if (err) console.error('boards.setMemberCustomRole', err);
+      else Popup.back(1);
+    });
+  },
   async 'click .js-set-admin, click .js-set-normal, click .js-set-normal-assigned-only, click .js-set-no-comments, click .js-set-comment-only, click .js-set-comment-assigned-only, click .js-set-read-only, click .js-set-read-assigned-only, click .js-set-worker'(
     event,
   ) {
@@ -2088,6 +4138,17 @@ Template.changePermissionsPopup.events({
 });
 
 Template.changePermissionsPopup.helpers({
+  // Custom roles (#3022), with what each may do as its description.
+  customRoles() {
+    const currentBoard = Utils.getCurrentBoard();
+    const current = currentBoard && currentBoard.customRoleOf(this.userId);
+    return CustomBoardRoles.find({}, { sort: { sort: 1, name: 1 } }).map(role => {
+      const caps = normalizeCustomCapabilities(role.capabilities);
+      const summary = CUSTOM_ROLE_SUMMARY.filter(([cap]) => caps[cap]).map(([, key]) => TAPi18n.__(key)).join(', ');
+      return { _id: role._id, name: role.name, isCurrent: role._id === current, summary: summary || TAPi18n.__('read-assigned-only') };
+    });
+  },
+
   isAdmin() {
     const currentBoard = Utils.getCurrentBoard();
     return currentBoard.hasAdmin(this.userId);
@@ -2095,6 +4156,7 @@ Template.changePermissionsPopup.helpers({
 
   isNormal() {
     const currentBoard = Utils.getCurrentBoard();
+    if (currentBoard.customRoleOf(this.userId)) return false;
     return (
       !currentBoard.hasAdmin(this.userId) &&
       !currentBoard.hasNoComments(this.userId) &&
@@ -2109,6 +4171,7 @@ Template.changePermissionsPopup.helpers({
 
   isNormalAssignedOnly() {
     const currentBoard = Utils.getCurrentBoard();
+    if (currentBoard.customRoleOf(this.userId)) return false;
     return (
       !currentBoard.hasAdmin(this.userId) &&
       currentBoard.hasNormalAssignedOnly(this.userId)
@@ -2117,6 +4180,7 @@ Template.changePermissionsPopup.helpers({
 
   isNoComments() {
     const currentBoard = Utils.getCurrentBoard();
+    if (currentBoard.customRoleOf(this.userId)) return false;
     return (
       !currentBoard.hasAdmin(this.userId) &&
       currentBoard.hasNoComments(this.userId)
@@ -2125,6 +4189,7 @@ Template.changePermissionsPopup.helpers({
 
   isCommentOnly() {
     const currentBoard = Utils.getCurrentBoard();
+    if (currentBoard.customRoleOf(this.userId)) return false;
     return (
       !currentBoard.hasAdmin(this.userId) &&
       currentBoard.hasCommentOnly(this.userId)
@@ -2133,6 +4198,7 @@ Template.changePermissionsPopup.helpers({
 
   isCommentAssignedOnly() {
     const currentBoard = Utils.getCurrentBoard();
+    if (currentBoard.customRoleOf(this.userId)) return false;
     return (
       !currentBoard.hasAdmin(this.userId) &&
       currentBoard.hasCommentAssignedOnly(this.userId)
@@ -2141,6 +4207,7 @@ Template.changePermissionsPopup.helpers({
 
   isReadOnly() {
     const currentBoard = Utils.getCurrentBoard();
+    if (currentBoard.customRoleOf(this.userId)) return false;
     return (
       !currentBoard.hasAdmin(this.userId) &&
       currentBoard.hasReadOnly(this.userId)
@@ -2149,6 +4216,7 @@ Template.changePermissionsPopup.helpers({
 
   isReadAssignedOnly() {
     const currentBoard = Utils.getCurrentBoard();
+    if (currentBoard.customRoleOf(this.userId)) return false;
     return (
       !currentBoard.hasAdmin(this.userId) &&
       currentBoard.hasReadAssignedOnly(this.userId)
@@ -2157,6 +4225,7 @@ Template.changePermissionsPopup.helpers({
 
   isWorker() {
     const currentBoard = Utils.getCurrentBoard();
+    if (currentBoard.customRoleOf(this.userId)) return false;
     return (
       !currentBoard.hasAdmin(this.userId) && currentBoard.hasWorker(this.userId)
     );
@@ -2165,7 +4234,9 @@ Template.changePermissionsPopup.helpers({
   isLastAdmin() {
     const currentBoard = Utils.getCurrentBoard();
     return (
-      currentBoard.hasAdmin(this.userId) && currentBoard.activeAdmins() === 1
+      // activeAdmins() is a list: comparing it with 1 was always false, so the
+      // last admin was never stopped from giving the role away.
+      currentBoard.hasAdmin(this.userId) && currentBoard.activeAdmins().length === 1
     );
   },
 });

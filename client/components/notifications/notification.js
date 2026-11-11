@@ -1,6 +1,7 @@
+import { formatDateForDisplay } from '/client/lib/dateDisplay';
 import { ReactiveCache } from '/imports/reactiveCache';
-import { formatDateByUserPreference } from '/imports/lib/dateUtils';
 import Users from '/models/users';
+import { trayClearItemHtml } from '/client/lib/notificationTray';
 
 Template.notification.events({
   async 'click .read-status .materialCheckBox'() {
@@ -21,6 +22,9 @@ Template.notification.events({
 
 Template.notification.helpers({
   mode: 'board',
+  clearItem() {
+    return trayClearItemHtml(this.activityData);
+  },
   isOfActivityType(activityId, type) {
     const activity = ReactiveCache.getActivity(activityId);
     return activity && activity.activityType === type;
@@ -43,8 +47,7 @@ Template.notification.helpers({
     const dateObj = new Date(activity.createdAt);
     if (Number.isNaN(dateObj.getTime())) return '';
 
-    const dateFormat = user.getDateFormat ? user.getDateFormat() : 'YYYY-MM-DD';
-    const datePart = formatDateByUserPreference(dateObj, dateFormat, false);
+    const datePart = formatDateForDisplay(dateObj, false);
     const timePart = dateObj.toLocaleTimeString([], {
       hour: 'numeric',
       minute: '2-digit',

@@ -9,7 +9,7 @@
 # `uws` DDP transport plus `changeStreams` reactivity to work
 # correctly in this topology, namely:
 #
-#   - DDP_TRANSPORT=uws on every service
+#   - DDP_TRANSPORT=sockjs on every service
 #   - METEOR_REACTIVITY_ORDER=changeStreams,oplog,polling on every service
 #   - METEOR_SETTINGS with a DISTINCT uws.port per service (5001, 5002, …)
 #
@@ -21,7 +21,7 @@
 # opened exclusively. Give each service its own internal port via
 # METEOR_SETTINGS and they coexist cleanly.
 #
-# Reference: see docs/Platforms/FOSS/Docker/Meteor3/multitenancy.md
+# Reference: see docs/Platforms/FOSS/Container/Docker/Meteor3/multitenancy.md
 # and https://docs.meteor.com/performance/ddp-transport#multitenancy
 #
 # Setup:
@@ -35,8 +35,6 @@
 #   MONGO_URL database name, and the uws.port inside METEOR_SETTINGS
 #   to a fresh value (5003, 5004, …). The MongoDB service and the
 #   reverse proxy in front of WeKan don't need any change.
-
-version: '3.8'
 
 services:
 
@@ -93,12 +91,41 @@ services:
       - ROOT_URL=https://tenant1.example.com
       - MONGO_URL=mongodb://127.0.0.1:27017/wekan_tenant1?replicaSet=rs0
       - MONGO_OPLOG_URL=mongodb://127.0.0.1:27017/local?replicaSet=rs0
-      - DDP_TRANSPORT=uws
+      - DDP_TRANSPORT=sockjs
       - METEOR_REACTIVITY_ORDER=changeStreams,oplog,polling
       # Internal uws proxy port — MUST be distinct per service.
       - METEOR_SETTINGS={"packages":{"ddp-server":{"uws":{"port":5001,"host":"127.0.0.1"}}}}
       - WRITABLE_PATH=/data
       - WITH_API=true
+      # SAML overrides: Admin Panel / People / SAML
+      #- SAML_ENABLED=false
+      #- SAML_PROVIDER=
+      #- SAML_ENTRYPOINT=
+      #- SAML_ISSUER=
+      #- SAML_CERT=
+      #- SAML_IDPSLO_REDIRECTURL=
+      #- SAML_PRIVATE_KEYFILE=
+      #- SAML_PUBLIC_CERTFILE=
+      #- SAML_IDENTIFIER_FORMAT=
+      # SAML_LOCAL_PROFILE_MATCH_ATTRIBUTE : assertion attribute whose value becomes
+      # the WeKan username (e.g. username). Empty = the email / NameID. With
+      # SAML_MERGE_EXISTING_USERS=true an existing account is found by that
+      # username, or - when the value is the assertion's email - by a verified
+      # email, so an LDAP account with its own short username can be linked.
+      # Linking an existing account ALSO requires the assertion to carry the
+      # attribute email_verified=true (SAML has no standard one: add it at the
+      # IdP only if the IdP verifies addresses) and that email to be verified on
+      # the local account. A refused link logs its reason in the server log.
+      # docs/Features/Login-Page/SAML.md
+      #- SAML_LOCAL_PROFILE_MATCH_ATTRIBUTE=
+      # SAML_ATTRIBUTES : not used by login at the moment; attributes are read
+      # from the validated assertion as named (email, username, displayName).
+      #- SAML_ATTRIBUTES=
+      #- SAML_MERGE_EXISTING_USERS=false
+      #- SAML_IDP_PROFILE=standard
+      #- SAML_WANT_RESPONSE_SIGNED=
+      #- SAML_WANT_ASSERTIONS_SIGNED=
+      #- SAML_LOGIN_FLOW=
     volumes:
       - wekan-tenant1-data:/data
 
@@ -118,11 +145,40 @@ services:
       - ROOT_URL=https://tenant2.example.com
       - MONGO_URL=mongodb://127.0.0.1:27017/wekan_tenant2?replicaSet=rs0
       - MONGO_OPLOG_URL=mongodb://127.0.0.1:27017/local?replicaSet=rs0
-      - DDP_TRANSPORT=uws
+      - DDP_TRANSPORT=sockjs
       - METEOR_REACTIVITY_ORDER=changeStreams,oplog,polling
       - METEOR_SETTINGS={"packages":{"ddp-server":{"uws":{"port":5002,"host":"127.0.0.1"}}}}
       - WRITABLE_PATH=/data
       - WITH_API=true
+      # SAML overrides: Admin Panel / People / SAML
+      #- SAML_ENABLED=false
+      #- SAML_PROVIDER=
+      #- SAML_ENTRYPOINT=
+      #- SAML_ISSUER=
+      #- SAML_CERT=
+      #- SAML_IDPSLO_REDIRECTURL=
+      #- SAML_PRIVATE_KEYFILE=
+      #- SAML_PUBLIC_CERTFILE=
+      #- SAML_IDENTIFIER_FORMAT=
+      # SAML_LOCAL_PROFILE_MATCH_ATTRIBUTE : assertion attribute whose value becomes
+      # the WeKan username (e.g. username). Empty = the email / NameID. With
+      # SAML_MERGE_EXISTING_USERS=true an existing account is found by that
+      # username, or - when the value is the assertion's email - by a verified
+      # email, so an LDAP account with its own short username can be linked.
+      # Linking an existing account ALSO requires the assertion to carry the
+      # attribute email_verified=true (SAML has no standard one: add it at the
+      # IdP only if the IdP verifies addresses) and that email to be verified on
+      # the local account. A refused link logs its reason in the server log.
+      # docs/Features/Login-Page/SAML.md
+      #- SAML_LOCAL_PROFILE_MATCH_ATTRIBUTE=
+      # SAML_ATTRIBUTES : not used by login at the moment; attributes are read
+      # from the validated assertion as named (email, username, displayName).
+      #- SAML_ATTRIBUTES=
+      #- SAML_MERGE_EXISTING_USERS=false
+      #- SAML_IDP_PROFILE=standard
+      #- SAML_WANT_RESPONSE_SIGNED=
+      #- SAML_WANT_ASSERTIONS_SIGNED=
+      #- SAML_LOGIN_FLOW=
     volumes:
       - wekan-tenant2-data:/data
 

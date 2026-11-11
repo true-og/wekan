@@ -1,36 +1,34 @@
-## About markdown changes
+# Build WeKan and Create Pull Request
 
-Wekan v4.29 changes markdown rendering from [marked](https://github.com/markedjs/marked) to [markdown-it](https://github.com/markdown-it/markdown-it).
+WeKan currently uses Meteor 3.
 
-## About emoji
+## Before you commit: what not to add
 
-With markdown-it, also [markdown-it-emoji](https://github.com/markdown-it/markdown-it-emoji) plugin has been added, supporting [full list of GitHub emojis](https://github.com/markdown-it/markdown-it-emoji/blob/master/lib/data/full.json).
+A build writes two directories, both generated and both gitignored. Neither ever
+belongs in a pull request:
 
-Example emoji code, that you can add for example to card name, card description etc:
-```
-:rainbow: :thumbsup: :100:
-```
-That shows emojis :rainbow: :thumbsup: :100:
+- **`.build/`** — the release bundle, from `meteor build .build --directory`.
+  `.build/bundle` is what gets deployed, tested and packaged.
+- **`_build/`** — rspack's compiled output, written by any Meteor compile. Meteor
+  reads the app's main modules from `_build/main-prod/`, so it is a handoff
+  rather than a leftover. It is gitignored, but must **not** be added to
+  `.meteorignore`: ignoring it breaks the build.
 
-## About other markdown-it plugins
-
-For markdown-it, there are also other [syntax extensions](https://github.com/markdown-it/markdown-it#syntax-extensions) where some are listed at that markdown-it page, and [others at npmjs.com](https://www.npmjs.org/browse/keyword/markdown-it-plugin).
-
-For example, how to get some [mermaid plugin](https://www.npmjs.com/search?q=markdown-it-mermaid) working so that some syntax works for https://mermaid-js.github.io/mermaid/ ?
-
-## How you could add another plugin
+`git status` should never list either. If it does, the checkout's ignore files
+are out of date rather than the directories being something new — see
+[Directory-Structure.md](Directory-Structure.md).
 
 Using newest Ubuntu amd64:
 
-# Meteor 2
+# Meteor 3
 
 ### 1. Install git and configure it
 ```
 sudo apt -y install git
 
-git config --global user.name "Yourfirstname Yourlastname"
+git config --global user.name "YOUR-FIRSTNAME YOUR-LASTNAME"
 
-git config --global user.email email-address-you-use-at-github@example.com
+git config --global user.email YOUR-EMAIL-ADDRESS@gmail.com
 
 git config --global push.default simple
 
@@ -44,105 +42,74 @@ Host *
 
 Host github.com
         Hostname github.com
-        User xet7
-        IdentityFile ~/.ssh/id_xet7ed
+        User YOUR-GITHUB-USERNAME
+        IdentityFile ~/.ssh/id_github
 ```
 Save and Exit with Ctrl-o Enter Ctrl-x Enter
 
 If you do not have ssh key, create it:
 ```
-ssh-keygen
+ssh-keygen -t ed25519 -f ~/.ssh/id_github
 ```
-And press Enter about 3 times, until you have private key at `~/.ssh/id_rsa` and public key at `~/.ssh/id_rsa.pub`
+And press Enter about 3 times, until you have private key at `~/.ssh/id_github` and public key at `~/.ssh/id_github.pub`
 
-Add public key `.pub` to your github account web interface.
+Add public key `.pub` to your GitHub SSH Keys at https://github.com/settings/keys
 
-Add path to Meteor:
-```
-nano .bashrc
-```
-There at bottom add:
-```
-export PATH=~/.meteor:$PATH
-```
-Save and Exit with Ctrl-o Enter Ctrl-x Enter
-
-### 2. Create fork of `https://github.com/wekan/wekan` at GitHub web page
+### 2. Click Create fork at https://github.com/wekan/wekan webpage
 
 ```
 mkdir repos
 
 cd repos
 
-git clone git@github.com:YourGithubUsername/wekan.git
+git clone git@github.com:YOUR-GITHUB-USERNAME/wekan.git
 
 cd wekan
 ```
 
 ### IMPORTANT: Do NOT `npm audit fix --force`
 
-IMPORTANT: Do NOT `npm audit fix --force`, it downgrades @meteorjs/rspack and breaks builds.
-`npm audit` shows false info, it does not recognize that elliptic is already updated
-to 6.6.1 with override at package.json like you can see with  `npm list elliptic`.
-https://github.com/wekan/wekan/blob/main/CHANGELOG.md#v850-2026-04-03-wekan--release
+Because it downgrades @meteorjs/rspack and breaks builds.
 
-### 3. Select option 1 to install dependencies, and then Enter.
+### 3. Install dependencies, build WeKan, and run the dev server
 
+`build.sh` shows a two-level menu. The top level is `1) Setup 2) Dev server 3) Tests 4) Docker 5) Tools 6) Quit`; pick a category number, then the item number inside it (each submenu also has a `Back` entry).
 
 ```
-./rebuild-wekan.sh
+# Setup -> Install dependencies
+./build.sh
+1        # Setup
+1        # Install dependencies
 
-1
+# Setup -> Build WeKan
+./build.sh
+1        # Setup
+2        # Build WeKan
 
-./rebuild-wekan.sh
-
-2
-
-./rebuild-wekan.sh
-
-3
+# Dev server -> localhost:3000
+./build.sh
+2        # Dev server
+1        # localhost:3000
 ```
-That does: 1 install dependencies, 2 builds wekan, 3 starts wekan in development mode with command `meteor`, so it can detect if some file changes and try to rebuild automatically and reload webbroser. But, still sometimes, it may need stopping with Ctrl-c and full build with option 2.
+That does:
+- **Setup -> Install dependencies** installs dependencies,
+- **Setup -> Build WeKan** builds wekan,
+- **Dev server -> localhost:3000** starts wekan in development mode with command `meteor`, so it can detect if some file changes and try to rebuild automatically. If a dev server is already running on that port, it is stopped first and a fresh one started on the same port.
 
-And then [register and login](Adding-users) at http://localhost:4000
+And then [register and login](../Features/Login-Page/Adding-users.md) with webbrowser at http://localhost:3000
 
-### OPTIONAL, NOT NEEDED: 5. Add new plugin package
-```
-meteor npm install markdown-it-something --save
-```
+### 4. Make and test your changes
 
-Edit file `wekan/packages/markdown/src-integration.js` and add using that new package, using code example from that new plugin page, or similar like emoji plugin was added.
+Use `build.sh` to run all tests.
 
-### 7. Test
+### 5. If it works, create pull request
 
-Test does that new plugin syntax work, for example in card title, card description etc on other input fields.
-
-### 8. If it works, create pull request
-
-If normal markdown, emoji, and your new added plugin syntax all work, commit your changes:
+When your changes work, commit them:
 ```
 git add --all
 
-git commit -m "Added plugin markdown-it-something."
+git commit -m "Describe your change here."
 
 git push
 ```
 And then at your GitHub for `https://github.com/YOUR-GITHUB-USERNAME/wekan` click `Create pull request`.
-
-## Updating 
-
-Updating to next Meteor release:
-```
-meteor update
-
-meteor npm update
-```
-Updating to specific Meteor release:
-```
-meteor update --release METEOR@3.4
-```
-If you are changing Meteor and Node.js versions, you may need to reset Meteor:
-```
-meteor reset
-```
-Or alternatively, delete wekan repo (if you did not need any changes you made), and clone wekan repo again, and then build etc.

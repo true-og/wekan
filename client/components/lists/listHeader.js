@@ -1,3 +1,6 @@
+import { titlesFromComposer } from '/client/components/forms/multilineTitleChoice';
+import { relativePosition } from '/models/lib/relativePosition';
+import { formatDateForDisplay } from '/client/lib/dateDisplay';
 import { ReactiveCache } from '/imports/reactiveCache';
 import Lists from '../../../models/lists';
 import { TAPi18n } from '/imports/i18n';
@@ -5,27 +8,135 @@ import dragscroll from '@wekanteam/dragscroll';
 import { BoardSwimlaneListDialog } from '/client/lib/dialogWithBoardSwimlaneList';
 import Cards from '/models/cards';
 import { LIST_COLORS } from '/models/metadata/colors';
+import { isHexColor, toHex } from '/models/lib/contrastColor';
 import { MultiSelection } from '/client/lib/multiSelection';
 import { Utils } from '/client/lib/utils';
+import { lazyListCardCount } from '/client/lib/lazyCards';
+import { currentUserWith } from '/client/lib/currentUserWith';
+import {
+  isFixedListWidth,
+  fixedListWidthValue,
+  setAnonFixedListWidthEnabled,
+  setAnonFixedListWidth,
+} from '/client/lib/fixedListWidth';
+import {
+  sumCustomFieldValues,
+  numberFieldStats,
+  dateFieldRange,
+} from '/models/lib/customFieldsSum';
+import {
+  isListInExceededWipLimitGroup,
+} from '/models/lib/wipLimitGroupDecision';
+// #5659: single source of truth for the default/minimum list width, shared
+// with client/components/lists/list.js and models/users.js.
+import {
+  DEFAULT_LIST_WIDTH,
+  MIN_LIST_WIDTH,
+  parseListWidthInput,
+  normalizeListWidth,
+} from '/models/lib/listWidth';
+// List sync (docs/Features/Board-Sidebar/Board-Settings/Import-Export/Sync.md): UI wiring only, calls the
+// EXISTING setListSyncSource/hasListSyncCredential/syncListNow methods in
+// server/methods/listSync.js. SYNC_CAPABLE_SOURCES is the same list those
+// methods validate `type` against, reused here so the picker can never offer
+// a source the backend would reject.
+import { SYNC_CAPABLE_SOURCES } from '/models/lib/externalParsers';
+const { ISSUE_DETAIL_SOURCES } = require('/models/lib/listSyncIssueDetails');
+const { WRITE_BACK_SOURCES } = require('/models/lib/listSyncWriteBack');
+import { fromNow } from '/imports/lib/dateUtils';
 
 let listsColors;
 Meteor.startup(() => {
   listsColors = LIST_COLORS;
 });
 
+// A board-wide list (no swimlaneId of its own) renders once per swimlane in
+// Swimlanes view - the SAME list document, one row per swimlane - so any
+// per-swimlane state (which cards show, whether THIS row is collapsed) needs
+// to know which swimlane row it is currently rendering inside. #6660 already
+// solved this for card visibility by walking up parent data contexts rather
+// than relying on Jade's fragile `../../_id` traversal; the collapse toggle
+// (#list-collapse-swimlane-bleed) reuses the exact same resolution, from
+// inside both a helper and an event handler - Template.parentData() works in
+// either, since Blaze keeps the current view active for both.
+// #2075: shared by numberFieldsSum()/numberFieldsStats()/dateFieldsRange()
+// below - the "which flagged custom fields of this type, which cards" lookup
+// is identical for a number-field sum/min/max and a date-field range; only
+// the aggregation function applied to the result differs.
+function summarizableCustomFields(boardId, type) {
+  return (
+    ReactiveCache.getCustomFields({
+      boardIds: { $in: [boardId] },
+      showSumAtTopOfList: true,
+      type,
+    }) || []
+  );
+}
+
+function listCardsForSummary(list, containerSwimlaneId) {
+  // Same swimlane-scoping decision as cardsCount() below: in Swimlanes view,
+  // scope to the swimlane row this header is rendered in (the SAME id the
+  // card body / card count already use), so a shared list does not report
+  // the whole-list figure under every swimlane row.
+  const selector = { listId: list._id, archived: false };
+  if (Utils.boardView() === 'board-view-swimlanes') {
+    const swimlaneId =
+      typeof containerSwimlaneId === 'string' && containerSwimlaneId
+        ? containerSwimlaneId
+        : list.swimlaneId || '';
+    if (swimlaneId) {
+      selector.swimlaneId = swimlaneId;
+    }
+  }
+  return ReactiveCache.getCards(selector);
+}
+
+function resolveContainerSwimlaneId(list) {
+  if (!list || Utils.boardView() !== 'board-view-swimlanes') {
+    return undefined;
+  }
+  for (let depth = 1; depth <= 5; depth += 1) {
+    const candidate = Template.parentData(depth);
+    if (
+      candidate &&
+      candidate._id &&
+      candidate._id !== list._id &&
+      candidate.boardId === list.boardId
+    ) {
+      return candidate._id;
+    }
+  }
+  return undefined;
+}
+
 Template.listHeader.helpers({
+  // #6745: this template asks the current user only about its board role
+  // (isBoardMember, isCommentOnly, isWorker, ...), which comes from the board
+  // and the user's _id. The global currentUser helper hands it the WHOLE user
+  // document, so every write to the user - a card open is one - re-ran every
+  // role check of every list header on the board.
+  currentUser() {
+    return currentUserWith(['username']);
+  },
+  isCurrentList() {
+    const list = Template.currentData();
+    return Boolean(list && Utils.getCurrentListId() === list._id);
+  },
+  containerSwimlaneId() {
+    return resolveContainerSwimlaneId(Template.currentData());
+  },
   canSeeAddCard() {
     const list = Template.currentData();
     return (
       (!list.getWipLimit('enabled') ||
         list.getWipLimit('soft') ||
         !Template.instance().reachedWipLimit()) &&
-      !ReactiveCache.getCurrentUser().isWorker()
+      !ReactiveCache.getCurrentUser()?.isWorker()
     );
   },
 
   isBoardAdmin() {
-    return ReactiveCache.getCurrentUser().isBoardAdmin();
+    return ReactiveCache.getCurrentUser()?.isBoardAdmin();
   },
 
   starred() {
@@ -35,7 +146,7 @@ Template.listHeader.helpers({
 
   collapsed() {
     const list = Template.currentData();
-    return Utils.getListCollapseState(list);
+    return Utils.getListCollapseState(list, resolveContainerSwimlaneId(list));
   },
 
   isWatching() {
@@ -52,31 +163,63 @@ Template.listHeader.helpers({
     }
   },
 
-  cardsCount() {
+  cardsCount(containerSwimlaneId) {
     const list = Template.currentData();
     let swimlaneId = '';
     if (Utils.boardView() === 'board-view-swimlanes') {
-      swimlaneId = list.swimlaneId || '';
+      // Scope the count to the swimlane this header is rendered IN — the SAME id
+      // the card body uses — resolved explicitly from the parent swimlane data
+      // instead of fragile Jade `../../_id` traversal. A SHARED list renders
+      // under every swimlane, so scoping by the list's OWN swimlaneId (== '' for a
+      // shared list) reported the whole-list count in every swimlane while the
+      // cards rendered below were swimlane-scoped — e.g. "5 Cards" over an empty
+      // second swimlane. Fall back to the list's own binding when no container id
+      // is provided (older callers / non-swimlane include paths).
+      swimlaneId =
+        typeof containerSwimlaneId === 'string' && containerSwimlaneId
+          ? containerSwimlaneId
+          : list.swimlaneId || '';
     }
 
-    const ret = list.cards(swimlaneId).length;
-    return ret;
+    // In lazy mode minimongo holds only the loaded window, so use the accurate
+    // server count for the same selector; fall back to the loaded length.
+    const lazyCount = lazyListCardCount(list, swimlaneId);
+    return lazyCount !== null ? lazyCount : list.cards(swimlaneId).length;
   },
 
   reachedWipLimit() {
     const list = Template.currentData();
-    return (
-      list.getWipLimit('enabled') &&
-      list.getWipLimit('value') <= list.cards().length
-    );
+    const lazyCount = lazyListCardCount(list, undefined);
+    const count = lazyCount !== null ? lazyCount : list.cards().length;
+    return list.getWipLimit('enabled') && list.getWipLimit('value') <= count;
   },
 
   exceededWipLimit() {
     const list = Template.currentData();
+    const lazyCount = lazyListCardCount(list, undefined);
+    const count = lazyCount !== null ? lazyCount : list.cards().length;
     return (
-      list.getWipLimit('enabled') &&
-      list.getWipLimit('value') < list.cards().length
+      (list.getWipLimit('enabled') && list.getWipLimit('value') < count) ||
+      Template.instance().exceededWipLimitGroup()
     );
+  },
+
+  // #2489: is this list a member of a board-level WIP limit GROUP that is
+  // currently over its own shared limit? Reuses the exact same `.highlight`
+  // styling as the per-list `exceededWipLimit` above (see listHeader.jade) -
+  // the group feature only supplies a different reason the list is flagged,
+  // not a second visual language.
+  exceededWipLimitGroup() {
+    return Template.instance().exceededWipLimitGroup();
+  },
+
+  // Accurate whole-list card count (used by the badge visibility, WIP-limit
+  // number and pluralization in the template). In lazy mode `cards.length`
+  // (= list.cards().length) is only the loaded window, so prefer the server count.
+  cardsCountWhole() {
+    const list = Template.currentData();
+    const lazyCount = lazyListCardCount(list, undefined);
+    return lazyCount !== null ? lazyCount : list.cards().length;
   },
 
   showCardsCountForList(count) {
@@ -93,62 +236,162 @@ Template.listHeader.helpers({
     }
   },
 
-  numberFieldsSum() {
+  numberFieldsSum(containerSwimlaneId) {
     const list = Template.currentData();
     if (!list) return 0;
     const boardId = Session.get('currentBoard');
-    const fields = ReactiveCache.getCustomFields({
-      boardIds: { $in: [boardId] },
-      showSumAtTopOfList: true,
-      type: 'number',
-    });
-    if (!fields || !fields.length) return 0;
-    const cards = ReactiveCache.getCards({ listId: list._id, archived: false });
-    let total = 0;
-    if (cards && cards.length) {
-      cards.forEach(card => {
-        const cfs = (card.customFields || []);
-        fields.forEach(field => {
-          const cf = cfs.find(f => f && f._id === field._id);
-          if (!cf || cf.value === null || cf.value === undefined) return;
-          let v = cf.value;
-          if (typeof v === 'string') {
-            const parsed = parseFloat(v.replace(',', '.'));
-            if (isNaN(parsed)) return;
-            v = parsed;
-          }
-          if (typeof v === 'number' && isFinite(v)) {
-            total += v;
-          }
-        });
-      });
-    }
-    return total;
+    const fields = summarizableCustomFields(boardId, 'number');
+    if (!fields.length) return 0;
+    const cards = listCardsForSummary(list, containerSwimlaneId);
+    return sumCustomFieldValues(cards, fields.map(field => field._id));
   },
 
   hasNumberFieldsSum() {
     const boardId = Session.get('currentBoard');
-    const fields = ReactiveCache.getCustomFields({
-      boardIds: { $in: [boardId] },
-      showSumAtTopOfList: true,
-      type: 'number',
-    });
-    return !!(fields && fields.length);
+    return !!summarizableCustomFields(boardId, 'number').length;
+  },
+
+  // #2075: min/max/"how many cards have the field set" alongside the #3319
+  // sum, for the SAME flagged number field(s) - no separate field-selection
+  // setting. Returns null when there is nothing to show so the template can
+  // keep the primary "∑ N" badge unadorned (no min/max yet flagged/no data).
+  numberFieldsStats(containerSwimlaneId) {
+    const list = Template.currentData();
+    if (!list) return null;
+    const boardId = Session.get('currentBoard');
+    const fields = summarizableCustomFields(boardId, 'number');
+    if (!fields.length) return null;
+    const cards = listCardsForSummary(list, containerSwimlaneId);
+    const stats = numberFieldStats(cards, fields.map(field => field._id));
+    return stats.min === null ? null : stats;
+  },
+
+  // A tooltip for the "∑ N" badge that adds the min/max range and the
+  // "N of M cards have a value" count WITHOUT any extra always-visible
+  // number in the header itself - hover/long-press only. Deliberately
+  // wordless (min–max, count/total) so it needs no new translatable label.
+  numberFieldsSumTooltip(containerSwimlaneId) {
+    const label = TAPi18n.__('sum-of-number-fields');
+    const list = Template.currentData();
+    if (!list) return label;
+    const boardId = Session.get('currentBoard');
+    const fields = summarizableCustomFields(boardId, 'number');
+    if (!fields.length) return label;
+    const cards = listCardsForSummary(list, containerSwimlaneId);
+    const s = numberFieldStats(cards, fields.map(field => field._id));
+    if (s.min === null) return label;
+    return `${label} (${s.min}–${s.max}, ${s.count}/${s.total})`;
+  },
+
+  // #2075: a date-type field flagged showSumAtTopOfList=true (the SAME
+  // per-field checkbox #3319 already ships, just no longer number-only) is
+  // shown as an earliest-latest range instead of a sum - a sum of dates has
+  // no meaning. Mutually exclusive in practice with the number badge: a
+  // field is either type 'number' or type 'date', never both.
+  hasDateFieldsRange() {
+    const boardId = Session.get('currentBoard');
+    return !!summarizableCustomFields(boardId, 'date').length;
+  },
+
+  // A short "earliest – latest" badge label. Formatted here (rather than via
+  // a nested Jade subexpression calling the shared `displayDate` helper) to
+  // keep the template simple and honor the selected calendar.
+  dateFieldsRangeLabel(containerSwimlaneId) {
+    const stats = dateFieldsRangeStats(containerSwimlaneId);
+    if (!stats || stats.earliest === null) return '';
+    const iso = t => formatDateForDisplay(new Date(t), false);
+    return stats.earliest === stats.latest
+      ? iso(stats.earliest)
+      : `${iso(stats.earliest)} – ${iso(stats.latest)}`;
+  },
+
+  dateFieldsRangeTooltip(containerSwimlaneId) {
+    const label = TAPi18n.__('date-range-of-fields');
+    const stats = dateFieldsRangeStats(containerSwimlaneId);
+    if (!stats || stats.earliest === null) return label;
+    return `${label} (${stats.count}/${stats.total})`;
   },
 });
+
+// Shared by the three dateFieldsRange* helpers above - same "recompute the
+// range" logic, once, keyed the same way as the number-field helpers.
+function dateFieldsRangeStats(containerSwimlaneId) {
+  const list = Template.currentData();
+  if (!list) return null;
+  const boardId = Session.get('currentBoard');
+  const fields = summarizableCustomFields(boardId, 'date');
+  if (!fields.length) return null;
+  const cards = listCardsForSummary(list, containerSwimlaneId);
+  return dateFieldRange(cards, fields.map(field => field._id));
+}
 
 // Helper function on template instance for reachedWipLimit check
 Template.listHeader.onCreated(function () {
   this.reachedWipLimit = function () {
     const list = Template.currentData();
-    return (
-      list.getWipLimit('enabled') &&
-      list.getWipLimit('value') <= list.cards().length
-    );
+    const lazyCount = lazyListCardCount(list, undefined);
+    const count = lazyCount !== null ? lazyCount : list.cards().length;
+    return list.getWipLimit('enabled') && list.getWipLimit('value') <= count;
+  };
+
+  // #2489: board-level WIP limit groups - the combined count/over-limit
+  // decision itself is the pure models/lib/wipLimitGroupDecision.js module;
+  // this only gathers the (reactive) inputs it needs: the board's groups and
+  // the current card count of every list any of them names.
+  this.exceededWipLimitGroup = function () {
+    const list = Template.currentData();
+    if (!list) return false;
+    const board = ReactiveCache.getBoard(list.boardId);
+    const groups = board ? board.getWipLimitGroups() : [];
+    if (!groups.length) return false;
+
+    const cardCountsByListId = {};
+    groups.forEach(group => {
+      (group.listIds || []).forEach(listId => {
+        if (cardCountsByListId[listId] !== undefined) return;
+        const memberList = ReactiveCache.getList(listId);
+        const lazyCount = memberList ? lazyListCardCount(memberList, undefined) : null;
+        cardCountsByListId[listId] =
+          lazyCount !== null ? lazyCount : memberList ? memberList.cards().length : 0;
+      });
+    });
+
+    return isListInExceededWipLimitGroup(groups, list._id, cardCountsByListId);
   };
 });
 
+// #459: accessible reordering — move a list left/right via sr-only buttons by
+// inserting beside an adjacent visible list (no drag-and-drop required).
+async function moveListBy(list, delta) {
+  const swimlaneId = resolveContainerSwimlaneId(list);
+  const selector = { boardId: list.boardId, archived: false, deletedAt: null };
+  if (Utils.boardView() === 'board-view-swimlanes' && swimlaneId) {
+    selector.swimlaneId = { $in: [swimlaneId, null, ''] };
+  }
+  const siblings = ReactiveCache.getLists(selector, { sort: { sort: 1 } });
+  const idx = siblings.findIndex(l => l._id === list._id);
+  const target = siblings[idx + delta];
+  if (idx < 0 || !target) return;
+  try {
+    const plan = relativePosition(siblings, target._id, delta < 0 ? 'above' : 'below', list._id);
+    for (const update of plan.updates) {
+      await Meteor.callAsync('updateListSort', update.id, list.boardId, { sort: update.sort });
+    }
+    await Meteor.callAsync('updateListSort', list._id, list.boardId, { sort: plan.sort });
+  } catch (error) {
+    window.alert(error.reason || error.message || TAPi18n.__('server-error'));
+  }
+}
+
 Template.listHeader.events({
+  'click .js-list-move-left'(event) {
+    event.preventDefault();
+    moveListBy(Template.currentData(), -1);
+  },
+  'click .js-list-move-right'(event) {
+    event.preventDefault();
+    moveListBy(Template.currentData(), 1);
+  },
   async 'click .js-list-star'(event) {
     event.preventDefault();
     const list = Template.currentData();
@@ -158,10 +401,30 @@ Template.listHeader.events({
   'click .js-collapse'(event) {
     event.preventDefault();
     const list = Template.currentData();
-    const status = Utils.getListCollapseState(list);
-    Utils.setListCollapseState(list, !status);
+    const swimlaneId = resolveContainerSwimlaneId(list);
+    const status = Utils.getListCollapseState(list, swimlaneId);
+    Utils.setListCollapseState(list, !status, swimlaneId);
   },
   'click .js-open-list-menu': Popup.open('listAction'),
+  // #6465: open the inline Add List composer after this list. Record the
+  // swimlane it is displayed in (board-wide lists are not bound to one) so the
+  // new list is created in the right swimlane; the composer renders after this
+  // list in the DOM (right in LTR / left in RTL).
+  'click .js-add-list-here'(event) {
+    event.preventDefault();
+    // In mobile mode the whole list row is an `a.js-select-list` and this button sits
+    // INSIDE it, so without this the same click also opened the list - you asked to
+    // add a list and got taken into one. preventDefault alone does not help: the
+    // click still bubbles to the ancestor's handler.
+    event.stopPropagation();
+    const list = Template.currentData();
+    const swimlaneDom = $(event.currentTarget).closest('.js-swimlane');
+    const swimlaneId = swimlaneDom.length
+      ? swimlaneDom.attr('id').replace('swimlane-', '')
+      : null;
+    Session.set('wekan-add-list-swimlane', swimlaneId);
+    Session.set('wekan-add-list-after', list._id);
+  },
   'click .js-add-card.list-header-plus-top'(event) {
     const listDom = $(event.target).parents(
       `#js-list-${Template.currentData()._id}`,
@@ -189,7 +452,7 @@ Template.listHeader.events({
 
 Template.listActionPopup.helpers({
   isBoardAdmin() {
-    return ReactiveCache.getCurrentUser().isBoardAdmin();
+    return ReactiveCache.getCurrentUser()?.isBoardAdmin();
   },
 
   isWipLimitEnabled() {
@@ -198,11 +461,53 @@ Template.listActionPopup.helpers({
 
   isWatching() {
     return this.findWatcher(Meteor.userId());
-  }
+  },
+
+  // #3847: board-wide, but surfaced from the List hamburger menu - see
+  // models/boards.js's stickyListHeaders.
+  isStickyListHeaders() {
+    const list = Template.currentData();
+    const board = list && ReactiveCache.getBoard(list.boardId);
+    return !!(board && board.getStickyListHeaders());
+  },
+
+  // #1172: per-user star, same shape as toggleBoardStar - not to be confused
+  // with `starred()`/`isStarred()` above, which is the list's own per-board
+  // "starred" field (models/lists.js `star()`).
+  isListItemStarred() {
+    const list = Template.currentData();
+    const user = ReactiveCache.getCurrentUser();
+    return !!(list && user && user.hasStarredList(list._id));
+  },
 });
 
 Template.listActionPopup.events({
+  'click .js-list-history'(event) {
+    Popup.open('history', { titleKey: 'history' })(event, {
+      dataContextIfCurrentDataIsUndefined: { scope: 'list', scopeId: this._id },
+    });
+  },
+  // Copy the list's own address. `absoluteUrl` so what lands in the
+  // clipboard can be pasted anywhere - a relative path is only a link inside
+  // this page. The popup stays open long enough to show "Copied"; it is the
+  // confirmation, and a menu that vanishes the instant you click leaves you
+  // wondering whether anything happened. models/lib/boardItemUrl.js
+  'click .js-copy-list-link'(event, tpl) {
+    event.preventDefault();
+    const list = Template.currentData();
+    if (!list) return;
+    const url = list.absoluteUrl();
+    if (!url) return;
+    Utils.showCopied(Utils.copyTextToClipboard(url), tpl.$('.copied-tooltip'));
+  },
   'click .js-list-subscribe'() {},
+  // #1172: star/unstar this list for the current user only.
+  async 'click .js-star-list-item'(event) {
+    event.preventDefault();
+    const list = Template.currentData();
+    if (!list) return;
+    await Meteor.callAsync('toggleListStar', list._id);
+  },
   'click .js-add-card.list-header-plus-top'(event) {
     const listDom = $(`#js-list-${this._id}`)[0];
     const view = Blaze.getView(listDom, 'Template.list');
@@ -225,14 +530,54 @@ Template.listActionPopup.events({
     }
     Popup.back();
   },
+  'click .js-export-list': Popup.open('exportList'),
+  'click .js-import-list': Popup.open('importList'),
   'click .js-add-list': Popup.open('addList'),
   'click .js-set-list-width': Popup.open('setListWidth'),
   'click .js-set-color-list': Popup.open('setListColor'),
+  'click .js-list-sync': Popup.open('listSync'),
   'click .js-select-cards'() {
-    const cardIds = this.allCards().map(card => card._id);
+    // Scope "select all cards" to the current swimlane when invoked from a
+    // swimlane context (#5623). In swimlanes board view the list carries its
+    // swimlaneId; otherwise there is genuinely no swimlane context and we keep
+    // the historical list-wide selection (swimlaneId stays undefined).
+    let swimlaneId;
+    if (Utils.boardView() === 'board-view-swimlanes' && this.swimlaneId) {
+      swimlaneId = this.swimlaneId;
+    }
+    const cardIds = this.allCards(swimlaneId).map(card => card._id);
     MultiSelection.add(cardIds);
     Popup.back();
   },
+  // #3383: "archive all cards in this list" as one click (behind a confirm
+  // popup, same shape as "Archive list" below), instead of having to open
+  // the checkbox multi-select sidebar first. Scoped exactly like "Select all
+  // cards" above (current swimlane in swimlanes view, the whole list
+  // otherwise) and reuses the very same server method the multi-select
+  // sidebar's "Archive selection" button calls
+  // (client/components/sidebar/sidebarFilters.js's `archiveSelectedCards`
+  // handler) - no new archiving logic, only the card-id list is built here.
+  'click .js-archive-list-cards': Popup.afterConfirm(
+    'listArchiveCards',
+    async function () {
+      let swimlaneId;
+      if (Utils.boardView() === 'board-view-swimlanes' && this.swimlaneId) {
+        swimlaneId = this.swimlaneId;
+      }
+      const cardIds = this.allCards(swimlaneId).map(card => card._id);
+      Popup.close();
+      if (!cardIds.length) return;
+      try {
+        await Meteor.callAsync(
+          'archiveSelectedCards',
+          Session.get('currentBoard'),
+          cardIds,
+        );
+      } catch (error) {
+        alert(error.reason || error.message || TAPi18n.__('server-error'));
+      }
+    },
+  ),
   'click .js-toggle-watch-list'() {
     const currentList = this;
     const level = currentList.findWatcher(Meteor.userId()) ? null : 'watching';
@@ -244,7 +589,18 @@ Template.listActionPopup.events({
     await this.archive();
     Popup.close();
   }),
+  // #3847: board-wide toggle for pinning every list's header while its cards
+  // scroll underneath it, flipped from this per-list menu for discoverability.
+  'click .js-toggle-sticky-list-headers'(event) {
+    event.preventDefault();
+    const list = Template.currentData();
+    const board = ReactiveCache.getBoard(list.boardId);
+    const enabled = !(board && board.getStickyListHeaders());
+    Meteor.call('setStickyListHeaders', list.boardId, enabled);
+    Popup.back();
+  },
   'click .js-set-wip-limit': Popup.open('setWipLimit'),
+  'click .js-list-permissions': Popup.open('listPermissions'),
   'click .js-copy-list': Popup.open('copyList'),
   'click .js-move-list': Popup.open('moveList'),
   'click .js-more': Popup.open('listMore'),
@@ -268,11 +624,10 @@ Template.setWipLimitPopup.events({
   async 'click .js-enable-wip-limit'() {
     const list = Template.currentData();
     // Prevent user from using previously stored wipLimit.value if it is less than the current number of cards in the list
-    if (
-      !list.getWipLimit('enabled') &&
-      list.getWipLimit('value') < list.cards().length
-    ) {
-      await list.setWipLimit(list.cards().length);
+    const lazyCount = lazyListCardCount(list, undefined);
+    const count = lazyCount !== null ? lazyCount : list.cards().length;
+    if (!list.getWipLimit('enabled') && list.getWipLimit('value') < count) {
+      await list.setWipLimit(count);
     }
     Meteor.call('enableWipLimit', list._id);
   },
@@ -282,6 +637,16 @@ Template.setWipLimitPopup.events({
       tpl.$('.wip-limit-value').val(),
       10,
     );
+
+    // An empty or non-numeric field parses to NaN, and NaN passes `check(limit,
+    // Number)` on the server - it is a number - so it reached the document and
+    // the schema rejected the write with no visible reason. The field is the
+    // popup's own `min="1" max="99"`, so anything outside that is the same
+    // mistake as a limit below the card count: say so, do not write it.
+    if (!Number.isFinite(limit) || limit < 1 || limit > 99) {
+      tpl.$('.wip-limit-error').click();
+      return;
+    }
 
     if (limit < list.cards().length && !list.getWipLimit('soft')) {
       tpl.$('.wip-limit-error').click();
@@ -320,8 +685,10 @@ Template.listMorePopup.events({
         ],
       }).length === 0
     ) {
-      allCardIds.map(_id => Cards.remove(_id));
-      Lists.remove(list._id);
+      // Soft delete (docs/Features/Undo/Undo.md): mark the list + its cards deleted
+      // (server cascades) instead of destroying them, so the delete is restorable
+      // and undoable (#1023). Replaces the old hard Cards.remove / Lists.remove.
+      Meteor.call('lists.softRemove', list._id);
     } else {
       const message = `${TAPi18n.__(
         'delete-linked-cards-before-this-list',
@@ -334,28 +701,50 @@ Template.listMorePopup.events({
   }),
 });
 
+
+// The three selects of the copy/move list dialogs, in one template. The dialog
+// is kept on THIS instance: inside `each boards` the data context is a board,
+// so a helper reaching into the context for it would find nothing.
+Template.listDestinationPicker.onCreated(function () {
+  this.autorun(() => {
+    const data = Template.currentData();
+    this.dialog = data && data.dialog;
+  });
+});
+
+Template.listDestinationPicker.helpers({
+  boards() {
+    return Template.instance().dialog.boards();
+  },
+  swimlanes() {
+    return Template.instance().dialog.swimlanes();
+  },
+  lists() {
+    return Template.instance().dialog.lists();
+  },
+  isDialogOptionBoardId(boardId) {
+    return Template.instance().dialog.isDialogOptionBoardId(boardId);
+  },
+  isDialogOptionSwimlaneId(swimlaneId) {
+    return Template.instance().dialog.isDialogOptionSwimlaneId(swimlaneId);
+  },
+  isDialogOptionListId(listId) {
+    return Template.instance().dialog.isDialogOptionListId(listId);
+  },
+  isTitleDefault(title) {
+    return Template.instance().dialog.isTitleDefault(title);
+  },
+});
+
 function registerListDialogTemplate(templateName) {
+  // The markup those helpers feed is one template - `listDestinationPicker` in
+  // listHeader.jade, included by both popups - so the helpers are registered on
+  // it, once, below. Each popup provides the `dialog` and keeps the events: a
+  // change or a click inside the picker bubbles up to the popup that includes
+  // it, which is the one holding the dialog.
   Template[templateName].helpers({
-    boards() {
-      return Template.instance().dialog.boards();
-    },
-    swimlanes() {
-      return Template.instance().dialog.swimlanes();
-    },
-    lists() {
-      return Template.instance().dialog.lists();
-    },
-    isDialogOptionBoardId(boardId) {
-      return Template.instance().dialog.isDialogOptionBoardId(boardId);
-    },
-    isDialogOptionSwimlaneId(swimlaneId) {
-      return Template.instance().dialog.isDialogOptionSwimlaneId(swimlaneId);
-    },
-    isDialogOptionListId(listId) {
-      return Template.instance().dialog.isDialogOptionListId(listId);
-    },
-    isTitleDefault(title) {
-      return Template.instance().dialog.isTitleDefault(title);
+    dialog() {
+      return Template.instance().dialog;
     },
   });
 
@@ -424,7 +813,16 @@ Template.setListColorPopup.onCreated(function () {
   const data = Template.currentData();
   this.currentList = Lists.findOne(data._id) || data;
   this.currentColor = new ReactiveVar(this.currentList.color);
+  this.cardsUseListColor = new ReactiveVar(this.currentList.cardsUseListColor === true);
 });
+
+// #4756: save the colour and whether cards follow it, together.
+async function saveListColor(tpl, color) {
+  await tpl.currentList.setColor(color);
+  if ((tpl.currentList.cardsUseListColor === true) !== tpl.cardsUseListColor.get()) {
+    await tpl.currentList.setCardsUseListColor(tpl.cardsUseListColor.get());
+  }
+}
 
 Template.setListColorPopup.helpers({
   colors() {
@@ -439,6 +837,13 @@ Template.setListColorPopup.helpers({
       return tpl.currentColor.get() === color;
     }
   },
+  cardsUseListColor() {
+    return Template.instance().cardsUseListColor.get();
+  },
+  // #5514: current color as a '#rrggbb' hex for the native color wheel <input>.
+  currentColorHex() {
+    return toHex(Template.instance().currentColor.get()) || '#0079bf';
+  },
 });
 
 Template.setListColorPopup.events({
@@ -446,12 +851,21 @@ Template.setListColorPopup.events({
     const paletteData = Blaze.getData(event.currentTarget);
     tpl.currentColor.set(paletteData?.color);
   },
+  'click .js-cards-use-list-color'(event, tpl) {
+    event.preventDefault();
+    tpl.cardsUseListColor.set(!tpl.cardsUseListColor.get());
+  },
+  // #5514: picking from the native color wheel stores a custom hex.
+  'input .js-list-color-wheel'(event, tpl) {
+    const value = event.currentTarget.value;
+    if (isHexColor(value)) {
+      tpl.currentColor.set(value);
+    }
+  },
   async 'submit form'(event, tpl) {
     event.preventDefault();
-    console.log('[ListColor] submit form, color:', tpl.currentColor.get(), 'listId:', tpl.currentList?._id, 'setColor type:', typeof tpl.currentList?.setColor);
     try {
-      const result = await tpl.currentList.setColor(tpl.currentColor.get());
-      console.log('[ListColor] submit form setColor result:', result);
+      await saveListColor(tpl, tpl.currentColor.get());
     } catch (err) {
       console.error('[ListColor] submit form setColor error:', err);
     }
@@ -459,10 +873,8 @@ Template.setListColorPopup.events({
   },
   async 'click .js-submit'(event, tpl) {
     event.preventDefault();
-    console.log('[ListColor] click submit, color:', tpl.currentColor.get(), 'listId:', tpl.currentList?._id, 'setColor type:', typeof tpl.currentList?.setColor);
     try {
-      const result = await tpl.currentList.setColor(tpl.currentColor.get());
-      console.log('[ListColor] click submit setColor result:', result);
+      await saveListColor(tpl, tpl.currentColor.get());
     } catch (err) {
       console.error('[ListColor] click submit setColor error:', err);
     }
@@ -470,7 +882,6 @@ Template.setListColorPopup.events({
   },
   async 'click .js-remove-color'(event, tpl) {
     event.preventDefault();
-    console.log('[ListColor] remove color, listId:', tpl.currentList?._id);
     try {
       await tpl.currentList.setColor(null);
     } catch (err) {
@@ -480,50 +891,544 @@ Template.setListColorPopup.events({
   },
 });
 
+// List sync settings popup (docs/Features/Board-Sidebar/Board-Settings/Import-Export/Sync.md). UI wiring
+// only: reads the list's own (already published, credential-free) syncSource
+// fields and calls the configuration, Sync and conflict-resolution methods in
+// server/methods/listSync.js. Authority and fresh comparison checks stay there.
+const syncFieldLabel = field => ({ spentTime: 'spent-time-hours', estimate: 'scrum-estimate',
+  originalEstimate: 'sync-original-time', remainingEstimate: 'sync-remaining-time',
+  // Scrum planning (models/lib/listSyncPlanning.js); `scrum` is how a preview
+  // names a card whose planning changes.
+  sprint: 'sync-planning-sprint', releases: 'sync-planning-releases', scrum: 'sync-planning-fields' })[field] || field;
+// The fields each source can sync: planning only where its issues carry it
+// (models/lib/listSyncPlanning.js SOURCE_PLANNING).
+const syncFieldChoices = type => (type === 'jira'
+  ? ['title', 'description', 'spentTime', 'estimate', 'originalEstimate', 'remainingEstimate', 'sprint', 'releases']
+  : type === 'gitlab' ? ['title', 'description', 'estimate', 'sprint', 'releases']
+    : type ? ['title', 'description', 'releases'] : ['title', 'description']);
+
+Template.listSyncPopup.onCreated(function () {
+  const tpl = this;
+  const list = Template.currentData();
+  // Which of the picker's radio/select values is "currently chosen" - starts
+  // at whatever the list already has, then tracks the user's picks so the
+  // form fields below (url/projectKey/credential) show/hide live.
+  tpl.selectedSyncType = new ReactiveVar((list && list.syncSource && list.syncSource.type) || '');
+  tpl.selectedSyncEnabled = new ReactiveVar(
+    !(list && list.syncSource && list.syncSource.enabled === false),
+  );
+  // Never pre-filled with the real token - only whether ONE IS SET, fetched
+  // as a boolean from the existing hasListSyncCredential method, the same
+  // secret-safety discipline as the LDAP Admin Panel override's bind
+  // password (client/components/settings/settingBody.js, models/lib/configResolver.js).
+  tpl.selectedEstimateField = new ReactiveVar(list?.syncSource?.estimateCustomFieldId || '');
+  // GitLab: which of its estimates (models/lib/listSyncEstimate.js).
+  tpl.selectedEstimateSource = new ReactiveVar(list?.syncSource?.estimateSourceField || 'weight');
+  tpl.selectedSyncFields = new ReactiveVar(list?.syncSource?.fields || ['title', 'description']);
+  tpl.selectedSyncOperations = new ReactiveVar({
+    createCards: list?.syncSource?.createCards !== false,
+    archiveCards: list?.syncSource?.archiveCards !== false,
+    issueDetails: list?.syncSource?.issueDetails === true,
+    writeBack: list?.syncSource?.writeBack === true,
+  });
+  tpl.hasCredential = new ReactiveVar(false);
+  tpl.syncNowResult = new ReactiveVar('');
+  tpl.syncNowSuccess = new ReactiveVar(true);
+  tpl.syncConflicts = new ReactiveVar([]);
+  tpl.syncBusy = new ReactiveVar(false);
+  tpl.syncPreview = new ReactiveVar(null);
+  tpl.runReports = new ReactiveVar(null);
+  tpl.reportError = new ReactiveVar('');
+  tpl.reportsBusy = new ReactiveVar(false);
+  tpl.previewRequest = 0;
+  tpl.clearSyncPreview = () => { tpl.syncPreview.set(null); tpl.previewRequest++; };
+
+  const refreshCredentialStatus = () => {
+    if (!list || !list._id) return;
+    Meteor.call('hasListSyncCredential', list._id, (err, res) => {
+      if (!err) tpl.hasCredential.set(!!res);
+    });
+  };
+  tpl.refreshCredentialStatus = refreshCredentialStatus;
+  if (list && list.syncSource && list.syncSource.type) {
+    refreshCredentialStatus();
+  }
+  // Sandstorm: may this grain already reach the list's tracker?
+  tpl.syncGranted = new ReactiveVar(false);
+  tpl.syncGrantError = new ReactiveVar('');
+  if (Meteor.settings.public?.sandstorm && list?.syncSource?.type) {
+    Meteor.callAsync('sandstormSyncGrantStatus', list._id)
+      .then(({ granted }) => tpl.syncGranted.set(!!granted))
+      .catch(error => tpl.syncGrantError.set(error.reason || error.message));
+  }
+});
+
+Template.listSyncPopup.helpers({
+  syncSourceSaved() { return !!Template.currentData()?.syncSource?.type; },
+  syncGranted() { return Template.instance().syncGranted.get(); },
+  syncGrantError() { return Template.instance().syncGrantError.get(); },
+  syncReportsBusy() { return Template.instance().reportsBusy.get(); },
+  syncReportError() { return Template.instance().reportError.get(); },
+  syncReportsLoaded() { return Template.instance().runReports.get() !== null; },
+  syncRunReports() {
+    return (Template.instance().runReports.get() || []).map(report => ({ ...report,
+      when: new Date(report.startedAt).toLocaleString(),
+      hasCounts: report.created !== undefined,
+      statusLabel: `sync-report-${report.status}`,
+      sourceRows: (report.coverage?.source?.rows || []).map(row => ({ ...row,
+        reasonLabel: `sync-source-${row.reason}`,
+      })),
+    }));
+  },
+  syncPreview() { return Template.instance().syncPreview.get(); },
+  syncPreviewItems() {
+    return (Template.instance().syncPreview.get()?.items || []).map(row => ({ ...row,
+      actionLabel: `sync-preview-${row.action}`,
+      fieldsText: row.fields.map(field => TAPi18n.__(field === 'syncLastSource' ? 'sync-preview-baseline' :
+        syncFieldLabel(field))).join(', '),
+    }));
+  },
+  syncSourceOmissions() {
+    return (Template.instance().syncPreview.get()?.coverage.source?.rows || []).map(row => ({ ...row,
+      reasonLabel: `sync-source-${row.reason}`,
+    }));
+  },
+  syncPreviewOmissions() {
+    return (Template.instance().syncPreview.get()?.coverage.rows || []).map(row => ({ ...row,
+      fieldText: TAPi18n.__(({ column_name: 'status', swimlane_name: 'swimlane', date_due: 'due-date',
+        owner_username: 'owner', requested_by: 'requested-by', tags: 'labels', spentTime: 'spent-time-hours' })[row.field] || row.field),
+      reasonLabel: row.reason === 'excluded' ? 'sync-preview-excluded' : 'sync-preview-unmapped',
+    }));
+  },
+  syncConflicts() { return Template.instance().syncConflicts.get().filter(row => row.fingerprint).map(row => ({
+    ...row, label: row.creation ? 'sync-conflict-creation' : row.archive ? 'sync-conflict-archive' : row.duplicate ? 'sync-conflict-duplicate' : syncFieldLabel(row.field),
+  })); },
+  syncBusy() { return Template.instance().syncBusy.get(); },
+  syncOperations() {
+    const selected = Template.instance().selectedSyncOperations.get();
+    return [
+      { operation: 'createCards', label: 'add-card', checked: selected.createCards },
+      { operation: 'archiveCards', label: 'archive-card', checked: selected.archiveCards },
+      // GitHub, GitLab, Gitea and Forgejo issues: their comments, labels,
+      // state and files too (models/lib/listSyncIssueDetails.js).
+      ...(ISSUE_DETAIL_SOURCES.includes(Template.instance().selectedSyncType.get())
+        ? [{ operation: 'issueDetails', label: 'sync-issue-details', checked: selected.issueDetails }] : []),
+      // #2698: GitLab - WeKan's changes written back to the issues.
+      ...(WRITE_BACK_SOURCES.includes(Template.instance().selectedSyncType.get())
+        ? [{ operation: 'writeBack', label: 'sync-write-back', checked: selected.writeBack }] : []),
+    ];
+  },
+  syncEstimateEnabled() {
+    return ['jira', 'gitlab'].includes(Template.instance().selectedSyncType.get()) &&
+      Template.instance().selectedSyncFields.get().includes('estimate');
+  },
+  syncEstimateGitlab() { return Template.instance().selectedSyncType.get() === 'gitlab'; },
+  syncEstimateSources() {
+    const selected = Template.instance().selectedEstimateSource.get();
+    return [{ value: 'weight', label: 'sync-estimate-source-weight' },
+      { value: 'time_estimate', label: 'sync-estimate-source-time' }]
+      .map(source => ({ ...source, selected: source.value === selected }));
+  },
+  syncEstimateFields() {
+    const selected = Template.instance().selectedEstimateField.get();
+    const gitlab = Template.instance().selectedSyncType.get() === 'gitlab';
+    const fields = ReactiveCache.getCustomFields({ boardIds: Template.currentData().boardId, type: 'number' });
+    // GitLab writes into any numeric field the administrator picks.
+    if (gitlab) return fields.map(field => ({ _id: field._id, selected: field._id === selected, name: field.name }));
+    return fields
+      .filter(field => field.settings?.jiraEstimateFieldId && field.settings?.jiraEstimateUnit)
+      .map(field => ({ _id: field._id, selected: field._id === selected,
+        name: `${field.name} (${field.settings.jiraEstimateFieldId}, ${field.settings.jiraEstimateUnit})` }));
+  },
+  syncTimeEnabled() {
+    return Template.instance().selectedSyncFields.get().some(field => ['originalEstimate', 'remainingEstimate'].includes(field));
+  },
+  syncPlanningEnabled() {
+    return Template.instance().selectedSyncFields.get().some(field => ['sprint', 'releases'].includes(field));
+  },
+  syncTextFields() {
+    const fields = Template.instance().selectedSyncFields.get();
+    const choices = syncFieldChoices(Template.instance().selectedSyncType.get());
+    return choices.map(field => ({ field, label: syncFieldLabel(field), checked: fields.includes(field) }));
+  },
+  listSyncSourceTypes() {
+    return SYNC_CAPABLE_SOURCES;
+  },
+  listSyncSourceLabel(type) {
+    // Technical identifiers (source names), not language content - same
+    // reasoning as the LDAP env-var badges not being translated.
+    const labels = {
+      jira: 'Jira',
+      github: 'GitHub',
+      gitlab: 'GitLab',
+      gitea: 'Gitea',
+      forgejo: 'Forgejo',
+    };
+    return labels[type] || type;
+  },
+  isCurrentSyncType(type) {
+    return Template.instance().selectedSyncType.get() === type;
+  },
+  isSyncTypeSelected() {
+    return !!Template.instance().selectedSyncType.get();
+  },
+  currentSyncUrl() {
+    const list = Template.currentData();
+    return (list && list.syncSource && list.syncSource.url) || '';
+  },
+  currentSyncProjectKey() {
+    const list = Template.currentData();
+    return (list && list.syncSource && list.syncSource.projectKey) || '';
+  },
+  currentSyncUsername() {
+    const list = Template.currentData();
+    return (list && list.syncSource && list.syncSource.username) || '';
+  },
+  currentSyncEnabled() {
+    return Template.instance().selectedSyncEnabled.get();
+  },
+  listSyncCredentialStatusText() {
+    return Template.instance().hasCredential.get()
+      ? TAPi18n.__('list-sync-credential-status-set')
+      : TAPi18n.__('list-sync-credential-status-unset');
+  },
+  listSyncLastSyncedText() {
+    const list = Template.currentData();
+    const lastSyncedAt = list && list.syncSource && list.syncSource.lastSyncedAt;
+    if (!lastSyncedAt) return TAPi18n.__('list-sync-last-synced-never');
+    return fromNow(lastSyncedAt);
+  },
+  listSyncLastError() {
+    const list = Template.currentData();
+    return (list && list.syncSource && list.syncSource.lastSyncError) || '';
+  },
+  listSyncWriteBackError() {
+    const list = Template.currentData();
+    return (list && list.syncSource && list.syncSource.writeBack === true && list.syncWriteBackError) || '';
+  },
+  listSyncNowResult() {
+    return Template.instance().syncNowResult.get();
+  },
+  listSyncNowResultClass() {
+    return Template.instance().syncNowSuccess.get()
+      ? 'list-sync-now-success'
+      : 'list-sync-now-error';
+  },
+});
+
+Template.listSyncPopup.events({
+  async 'click .js-sandstorm-sync-grant'(evt, tpl) {
+    evt.preventDefault();
+    tpl.syncGrantError.set('');
+    try {
+      const granted = await window.sandstormRequestListSync(Template.currentData()._id, Template.currentData().title);
+      tpl.syncGranted.set(!!granted);
+    } catch (error) {
+      tpl.syncGrantError.set(error.reason || error.message);
+    }
+  },
+  'click .js-list-sync-reports'(event, tpl) {
+    event.preventDefault();
+    if (tpl.reportsBusy.get()) return;
+    const list = tpl.data;
+    tpl.runReports.set(null);
+    tpl.reportError.set('');
+    tpl.reportsBusy.set(true);
+    Meteor.call('listSyncRunReports', list._id, (error, reports) => {
+      if (tpl.view.isDestroyed) return;
+      tpl.reportsBusy.set(false);
+      if (error) tpl.reportError.set(TAPi18n.__('sync-report-unavailable'));
+      else tpl.runReports.set(reports);
+    });
+  },
+  'input .js-list-sync-url, input .js-list-sync-project-key, input .js-list-sync-token, input .js-list-sync-username'(event, tpl) {
+    tpl.clearSyncPreview();
+  },
+  'click .js-list-sync-preview'(event, tpl) {
+    event.preventDefault();
+    if (tpl.syncBusy.get()) return;
+    const list = tpl.data;
+    if (!list?._id) return;
+    tpl.clearSyncPreview();
+    const request = tpl.previewRequest;
+    tpl.syncBusy.set(true);
+    tpl.syncConflicts.set([]);
+    tpl.syncNowResult.set('');
+    Meteor.call('previewListSync', list._id, (err, result) => {
+      if (tpl.view.isDestroyed) return;
+      tpl.syncBusy.set(false);
+      if (request !== tpl.previewRequest) return;
+      if (err || result?.error || !result?.preview) {
+        tpl.syncNowSuccess.set(false);
+        tpl.syncNowResult.set(err?.reason || err?.message || result?.error || TAPi18n.__('sync-preview-unavailable'));
+        return;
+      }
+      tpl.syncPreview.set(result.preview);
+      tpl.syncConflicts.set(result.conflicts || []);
+    });
+  },
+  'click .js-resolve-sync-conflict'(event, tpl) {
+    tpl.clearSyncPreview();
+    event.preventDefault();
+    if (tpl.syncBusy.get()) return;
+    const list = tpl.data;
+    const resolution = { cardId: this.cardId, field: this.field, fingerprint: this.fingerprint,
+      choice: event.currentTarget.dataset.choice };
+    tpl.syncBusy.set(true);
+    Meteor.call('resolveListSyncConflict', list._id, resolution, (err, result) => {
+      if (tpl.view.isDestroyed) return;
+      tpl.syncBusy.set(false);
+      tpl.syncConflicts.set([]);
+      if (err || result?.error || !result?.resolved) {
+        tpl.syncNowSuccess.set(false);
+        tpl.syncNowResult.set(err?.reason || err?.message || result?.error || TAPi18n.__('sync-conflict-refresh'));
+      } else tpl.$('.js-list-sync-now').trigger('click');
+    });
+  },
+  'click .js-toggle-sync-operation'(event, tpl) {
+    tpl.clearSyncPreview();
+    event.preventDefault();
+    const operation = event.currentTarget.dataset.operation;
+    const selected = tpl.selectedSyncOperations.get();
+    tpl.selectedSyncOperations.set({ ...selected, [operation]: !selected[operation] });
+  },
+  'click .js-toggle-sync-field'(event, tpl) {
+    tpl.clearSyncPreview();
+    event.preventDefault();
+    const field = event.currentTarget.dataset.field;
+    const selected = tpl.selectedSyncFields.get();
+    tpl.selectedSyncFields.set(selected.includes(field) ? selected.filter(value => value !== field) : [...selected, field]);
+  },
+  'change .js-list-sync-estimate-source'(event, tpl) {
+    tpl.clearSyncPreview();
+    tpl.selectedEstimateSource.set(event.currentTarget.value);
+  },
+  'change .js-list-sync-estimate-field'(event, tpl) {
+    tpl.clearSyncPreview();
+    tpl.selectedEstimateField.set(event.currentTarget.value);
+  },
+  'change .js-list-sync-type'(event, tpl) {
+    tpl.clearSyncPreview();
+    tpl.selectedSyncType.set(event.currentTarget.value);
+    const kept = syncFieldChoices(event.currentTarget.value);
+    tpl.selectedSyncFields.set(tpl.selectedSyncFields.get().filter(field => kept.includes(field)));
+  },
+  'click a.js-toggle-list-sync-enabled'(event, tpl) {
+    tpl.clearSyncPreview();
+    event.preventDefault();
+    tpl.selectedSyncEnabled.set(!tpl.selectedSyncEnabled.get());
+  },
+  async 'click .js-list-sync-save'(event, tpl) {
+    tpl.clearSyncPreview();
+    event.preventDefault();
+    if (tpl.syncBusy.get()) return;
+    tpl.syncConflicts.set([]);
+    const list = Template.currentData();
+    const type = tpl.selectedSyncType.get();
+    if (!list || !list._id || !type) return;
+    const projectKey = tpl.$('.js-list-sync-project-key').val() || '';
+    const url = tpl.$('.js-list-sync-url').val() || '';
+    const token = tpl.$('.js-list-sync-token').val() || '';
+    const username = tpl.$('.js-list-sync-username').val() || '';
+    const config = {
+      type,
+      url,
+      projectKey,
+      enabled: tpl.selectedSyncEnabled.get(),
+      fields: tpl.selectedSyncFields.get(),
+      ...(['jira', 'gitlab'].includes(type) && tpl.selectedSyncFields.get().includes('estimate')
+        ? { estimateCustomFieldId: tpl.selectedEstimateField.get(),
+          ...(type === 'gitlab' ? { estimateSourceField: tpl.selectedEstimateSource.get() } : {}) } : {}),
+      ...tpl.selectedSyncOperations.get(),
+      // A blank credential is retained only for the same server/project.
+      // Switching source requires entering a credential for the new source.
+      token: token || null,
+      username,
+    };
+    Meteor.call('setListSyncSource', list._id, config, (err) => {
+      tpl.$('.js-list-sync-token').val('');
+      if (!err) {
+        tpl.refreshCredentialStatus();
+      } else {
+        tpl.syncNowSuccess.set(false);
+        tpl.syncNowResult.set(err.reason || err.message || String(err));
+      }
+    });
+  },
+  'click .js-list-sync-now'(event, tpl) {
+    tpl.clearSyncPreview();
+    event.preventDefault();
+    if (tpl.syncBusy.get()) return;
+    const list = Template.currentData();
+    if (!list || !list._id) return;
+    tpl.syncBusy.set(true);
+    tpl.syncConflicts.set([]);
+    tpl.syncNowResult.set(TAPi18n.__('list-sync-now-pending'));
+    Meteor.call('syncListNow', list._id, (err, res) => {
+      if (tpl.view.isDestroyed) return;
+      tpl.syncBusy.set(false);
+      tpl.syncConflicts.set(res?.conflicts || []);
+      if (err || res?.error) {
+        tpl.syncNowSuccess.set(false);
+        tpl.syncNowResult.set(
+          TAPi18n.__('list-sync-now-error', {
+            sprintf: [err?.reason || err?.message || res?.error || ''],
+          }),
+        );
+      } else {
+        tpl.syncNowSuccess.set(true);
+        tpl.syncNowResult.set(TAPi18n.__(res?.reviewOnly ? 'sync-conflict-review-complete' : 'list-sync-now-success'));
+      }
+    });
+  },
+  async 'click .js-list-sync-clear'(event, tpl) {
+    tpl.clearSyncPreview();
+    event.preventDefault();
+    if (tpl.syncBusy.get()) return;
+    const list = Template.currentData();
+    if (!list || !list._id) return;
+    Meteor.call('setListSyncSource', list._id, null, (err) => {
+      if (!err) {
+        tpl.selectedSyncType.set('');
+        tpl.hasCredential.set(false);
+        tpl.syncNowResult.set('');
+        Popup.close();
+      }
+    });
+  },
+});
+
+// #6409: the per-list width popup is now a single fixed-width value. Whether it
+// affects everyone (shared) or just the current user (personal) follows the
+// board setting `allowsPersonalListWidth`.
+function isPersonalListWidth(boardId) {
+  const board = ReactiveCache.getBoard(boardId);
+  return !!(board && board.allowsPersonalListWidth);
+}
+
 Template.setListWidthPopup.helpers({
+  listWidthMinimum() {
+    return MIN_LIST_WIDTH;
+  },
   listWidthValue() {
     const list = Template.currentData();
-    const board = list.boardId;
-    return ReactiveCache.getCurrentUser().getListWidth(board, list._id);
-  },
-
-  listConstraintValue() {
-    const list = Template.currentData();
-    const board = list.boardId;
-    return ReactiveCache.getCurrentUser().getListConstraint(board, list._id);
-  },
-
-  isAutoWidth() {
-    const boardId = Utils.getCurrentBoardId();
+    // #5729 In fixed width mode the input edits the single per-board value.
+    if (isFixedListWidth(list.boardId)) {
+      return fixedListWidthValue(list.boardId);
+    }
+    const shared = normalizeListWidth(list.width);
+    if (!isPersonalListWidth(list.boardId)) {
+      return shared;
+    }
     const user = ReactiveCache.getCurrentUser();
-    return user && user.isAutoWidth(boardId);
+    if (user) {
+      const widths = user.getListWidths();
+      const w = widths[list.boardId] && widths[list.boardId][list._id];
+      return normalizeListWidth(w, shared);
+    }
+    return shared;
+  },
+
+  listWidthScopeNote() {
+    const list = Template.currentData();
+    // #5729 In fixed width mode the note explains the all-lists behaviour.
+    if (isFixedListWidth(list.boardId)) {
+      return TAPi18n.__('fixed-list-width-note');
+    }
+    return isPersonalListWidth(list.boardId)
+      ? TAPi18n.__('list-width-personal-note')
+      : TAPi18n.__('list-width-shared-note');
+  },
+
+  // #6409: auto-width follows the same scope as fixed widths.
+  isAutoWidth() {
+    const list = Template.currentData();
+    if (isPersonalListWidth(list.boardId)) {
+      const user = ReactiveCache.getCurrentUser();
+      return !!(user && user.isAutoWidth(list.boardId));
+    }
+    const board = ReactiveCache.getBoard(list.boardId);
+    return !!(board && board.autoWidth);
+  },
+
+  // In shared mode only members with board write access may toggle the shared
+  // auto-width; in personal mode any logged-in user may toggle their own.
+  canChangeAutoWidth() {
+    const list = Template.currentData();
+    if (isPersonalListWidth(list.boardId)) {
+      return !!ReactiveCache.getCurrentUser();
+    }
+    return Utils.canModifyBoard();
+  },
+
+  // #5729 Whether "same width for all lists" mode is on for the current viewer.
+  isFixedListWidth() {
+    const list = Template.currentData();
+    return isFixedListWidth(list.boardId);
   },
 });
 
 Template.setListWidthPopup.events({
-  'click .js-auto-width-board'() {
-    dragscroll.reset();
-    ReactiveCache.getCurrentUser().toggleAutoWidth(Utils.getCurrentBoardId());
+  'click .js-toggle-auto-width'(event) {
+    event.preventDefault();
+    const list = Template.currentData();
+    const boardId = list.boardId;
+    if (isPersonalListWidth(boardId)) {
+      const user = ReactiveCache.getCurrentUser();
+      if (user) user.toggleAutoWidth(boardId);
+    } else {
+      const board = ReactiveCache.getBoard(boardId);
+      const current = !!(board && board.autoWidth);
+      Meteor.call('setBoardAutoWidth', boardId, !current);
+    }
+    Popup.back();
+  },
+  // #5729 Toggle "same width for all lists" (fixed width) for the current
+  // viewer. Enabling it turns off auto-width (the two modes are exclusive).
+  'click .js-toggle-fixed-list-width'(event) {
+    event.preventDefault();
+    const list = Template.currentData();
+    const boardId = list.boardId;
+    const enabled = !isFixedListWidth(boardId);
+    const user = ReactiveCache.getCurrentUser();
+    if (user) {
+      if (enabled && isPersonalListWidth(boardId) && user.isAutoWidth(boardId)) {
+        user.toggleAutoWidth(boardId);
+      }
+      Meteor.call('setFixedListWidthEnabled', boardId, enabled);
+    } else {
+      setAnonFixedListWidthEnabled(boardId, enabled);
+    }
+    Popup.back();
   },
   'click .list-width-apply'(event, tpl) {
     const list = Template.currentData();
-    const board = list.boardId;
-    const width = parseInt(
-      tpl.$('.list-width-value').val(),
-      10,
-    );
-    const constraint = parseInt(
-      tpl.$('.list-constraint-value').val(),
-      10,
-    );
+    const boardId = list.boardId;
+    const width = parseListWidthInput(tpl.$('.list-width-value').val());
 
-    // FIXME(mark-i-m): where do we put constants?
-    if (width < 270 || !width || constraint < 270 || !constraint) {
+    if (width === null) {
       tpl.$('.list-width-error').click();
-    } else {
-      Meteor.call('applyListWidth', board, list._id, width, constraint);
-      Popup.back();
+      return;
     }
+    const user = ReactiveCache.getCurrentUser();
+    // #5729 In fixed width mode the input applies to the single per-board value.
+    if (isFixedListWidth(boardId)) {
+      if (user) {
+        Meteor.call('setFixedListWidth', boardId, width);
+      } else {
+        setAnonFixedListWidth(boardId, width);
+      }
+      Popup.back();
+      return;
+    }
+    if (isPersonalListWidth(boardId)) {
+      if (user) {
+        Meteor.call('applyListWidthToStorage', boardId, list._id, width, width);
+      }
+    } else if (user) {
+      Meteor.call('applyListWidth', boardId, list._id, width, width);
+    }
+    Popup.back();
   },
   'click .list-width-error': Popup.open('listWidthError'),
 });
@@ -588,12 +1493,12 @@ Template.addListPopup.events({
     evt.preventDefault();
 
     const titleInput = tpl.find('.list-name-input');
-    const title = titleInput?.value.trim();
+    const titles = titlesFromComposer(titleInput);
 
-    if (!title) return;
+    if (!titles.length || tpl.creatingLists) return;
 
     const positionInput = tpl.find('.list-position-input');
-    const afterListId =
+    let afterListId =
       positionInput && positionInput.value ? positionInput.value.trim() : null;
     const nextListId =
       positionInput &&
@@ -606,18 +1511,30 @@ Template.addListPopup.events({
       (tpl.currentSwimlane && tpl.currentSwimlane._id) ||
       null;
 
+    tpl.creatingLists = true;
+    titleInput.disabled = true;
+    let created = 0;
     try {
-      await Meteor.callAsync('createListAfter', {
-        title,
-        boardId: Session.get('currentBoard'),
-        swimlaneId: targetSwimlaneId,
-        afterListId,
-        nextListId,
-        type: 'list',
-      });
+      for (const title of titles) {
+        afterListId = await Meteor.callAsync('createListAfter', {
+          title,
+          boardId: Session.get('currentBoard'),
+          swimlaneId: targetSwimlaneId,
+          afterListId,
+          nextListId,
+          type: 'list',
+        });
+        created += 1;
+      }
       Popup.back();
     } catch (error) {
+      titleInput.value = titles.slice(created).join('\n');
       console.error('Failed to create list after selected list:', error);
+    } finally {
+      tpl.creatingLists = false;
+      titleInput.disabled = false;
+      titleInput.focus();
+      titleInput.dispatchEvent(new Event('input', { bubbles: true }));
     }
   },
   'click .js-list-template': Popup.open('searchElement'),

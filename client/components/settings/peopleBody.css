@@ -1,61 +1,40 @@
 /* Scrollbar styles are now handled by settingBody.css for all admin pages */
-table {
+
+/* These rules have no page in their selector: they are plain `table` rules in a
+   stylesheet that is bundled for the whole app, so they hit EVERY table in WeKan -
+   the People panes they were written for, but also Admin Panel / Version and
+   anything else with a <table> in it.
+
+   What they used to say was `min-width: 1200px !important; width: max-content
+   !important` with nowrap cells, to force a horizontal scrollbar. With
+   `!important` that beat even the shared table page's own layout, which is
+   width:100% + table-layout:fixed with equal, wrapping columns precisely so it
+   CANNOT grow past the panel (docs/Features/General/Table-Page.md): every table page in the
+   Admin Panel - Domains, Organizations, Teams, People, the Problems reports - had
+   its right-hand columns outside the window until you scrolled. The geometry is
+   gone; a table fits its panel and wraps (settingBody.css), and the People panes
+   are shared table pages now anyway. What is left here is the look - borders,
+   striping, padding - and the shared table page brings its own. */
+table:not(.table-page-table) {
   color: #000;
-  min-width: 1200px !important;
-  width: max-content !important;
-  table-layout: auto !important;
 }
 
-/* Force People/Organizations/Teams tables to always trigger horizontal scrolling */
-table td,
-table th {
-  white-space: nowrap;
-  min-width: 120px;
+table:not(.table-page-table) td,
+table:not(.table-page-table) th {
   border: 1px solid #d2d0d0;
-  text-align: left;
+  text-align: start;
   padding: 8px;
 }
-table tr:nth-child(even) {
+table:not(.table-page-table) tr:nth-child(even) {
   background-color: #ddd;
 }
-.ext-box {
-  display: flex;
-  flex-direction: row;
-  height: 34px;
-}
-.ext-box .ext-box-left {
-  display: flex;
-  width: 100%;
-  gap: 10px;
-}
-.ext-box span {
-  vertical-align: center;
-  line-height: 34px;
-}
-.ext-box input,
-.ext-box button {
-  padding: 0;
-}
-.ext-box button {
-  min-width: 90px;
-  background: #01628c;
-  color: #fff;
-  border: none;
-  border-radius: 0.4vw;
-  cursor: pointer;
-  padding: 0 12px;
-}
-
-.ext-box button:hover {
-  background: #005377;
-}
-
-.ext-box button:active {
-  background: #004766;
-}
-.content-wrapper {
-  margin-top: 10px;
-}
+/* `.content-wrapper` is not a People class - the ONLY element with that class in
+   WeKan is the scrolling body of a POPUP (client/components/main/popup.tpl.jade).
+   So this stray, unscoped rule (specificity 0,1,0, and nothing in popup.css sets a
+   margin on that element) added 10px above the content of EVERY popup: the gap over
+   the first row of Board Settings / Board View / Member Settings / Sort Cards /
+   Change Watch / Change Visibility / Swimlane Actions, and over the first field of
+   Rename Board. Removed - it never styled anything on this page. */
 .buttonsContainer {
   display: flex;
 }
@@ -68,7 +47,7 @@ table tr:nth-child(even) {
 .more-settings-user,
 .more-settings-team,
 .more-settings-org {
-  margin-left: 10px;
+  margin-inline-start: 10px;
 }
 .js-orgs,
 .js-orgsNewUser {
@@ -78,48 +57,51 @@ table tr:nth-child(even) {
 .js-teamsNewUser {
   display: none;
 }
+/* The People table's own checkboxes are the Admin Panel's one checkbox look
+   (settingBody.css): visible, square, WeKan's green tick. Only their placement in
+   the cell belongs here - the rule used to re-enable the BROWSER's rendering, which
+   drew a different checkbox from every other one in the panel. */
 .selectUserChkBox,
 .allUserChkBox {
-  position: static !important;
-  visibility: visible !important;
-  left: 0 !important;
-  display: block !important;
+  margin: 0 auto;
 }
 
-/* Make checkbox column fit content */
-table th:first-child,
-table td:first-child {
+/* Make checkbox column fit content. Unscoped like the rules at the top of this
+   file, so the shared table page is excluded here too - its columns are an equal
+   share of the width by design. */
+table:not(.table-page-table) th:first-child,
+table:not(.table-page-table) td:first-child {
   width: auto;
   min-width: auto;
 }
 #divAddOrRemoveTeam {
-  background: #01628c;
+  background: var(--theme-accent, #01628c);
   display: none;
 }
 #addOrRemoveTeam {
-  background: #01628c;
+  background: var(--theme-accent, #01628c);
   color: #fff;
 }
 #addOrRemoveTeam:hover {
-  background: #005377;
+  background: var(--theme-accent, #005377);
 }
 #divAddOrRemoveTeamContainer {
   display: none;
   margin: auto;
   width: 50%;
-  border: 3px solid #01628c;
+  border: 3px solid var(--theme-accent, #01628c);
   padding: 10px;
 }
 #cancelBtn {
-  margin-left: 5% !important;
-  background: #01628c;
+  margin-inline-start: 5% !important;
+  background: var(--theme-accent, #01628c);
   color: #fff;
 }
 #cancelBtn:hover {
-  background: #005377;
+  background: var(--theme-accent, #005377);
 }
 #deleteAction {
-  margin-left: 5% !important;
+  margin-inline-start: 5% !important;
 }
 
 .divLockedUsersFilter {
@@ -137,7 +119,7 @@ table td:first-child {
 .divLockedUsersFilter .people-filter {
   margin-bottom: 0;
   color: #777;
-  line-height: 34px;
+  line-height: calc(34px * var(--wekan-ui-font-scale, 1));
 }
 
 .divLockedUsersFilter .user-filter {
@@ -147,29 +129,12 @@ table td:first-child {
   background-color: white;
 }
 
-.unlock-all-btn {
-  margin-top: 20px;
-  margin-left: 15px;
-  background-color: #01628c;
-  color: #fff;
-  border: none;
-  border-radius: 0.4vw;
-  padding: 0 14px 0 14px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  height: 28px;
-  min-width: 90px;
-}
-
-.unlock-all-btn:hover {
-  background-color: #005377;
-}
-
-.unlock-all-btn .fa {
-  color: #fff;
-}
+/* `.unlock-all-btn` is gone. "Unlock all users" is an action of the shared
+   controls row now (docs/Features/General/Table-Page.md), and this rule was written for the
+   old hand-written page header: a 20px top margin and a 28px height, next to a
+   "Teams" button that takes the shared 34px. In one flex row that put the two
+   buttons at visibly different heights AND on different baselines. The shared row
+   sizes and themes both, so neither carries geometry of its own any more. */
 
 .account-active-status {
   width: auto;
@@ -185,7 +150,7 @@ table td:first-child {
   top: 10%;
   left: 50%;
   transform: translateX(-50%);
-  background-color: #01628c;
+  background-color: var(--theme-accent, #01628c);
   color: white;
   padding: 10px 20px;
   border-radius: 4px;
@@ -206,111 +171,27 @@ table td:first-child {
 }
 
 .text-green {
-  color: #01628c;
+  color: var(--theme-accent, #01628c);
 }
 
 .js-toggle-lock-status {
   cursor: pointer;
 }
 
-.people-pagination {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 12px;
-}
 
-.people-pagination button {
-  min-width: 32px;
-  height: 30px;
-  border: 1px solid #bbb;
-  background: #fff;
-  border-radius: 0.4vw;
-  cursor: pointer;
-}
 
-.people-pagination button.active {
-  background: #01628c;
-  border-color: #01628c;
-  color: #fff;
-}
 
-.people-pagination button.disabled {
-  opacity: 0.5;
-  pointer-events: none;
-}
 
-.people-page-info {
-  min-width: 72px;
-  text-align: center;
-  color: #333;
-}
 
-.org-pagination {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 12px;
-}
 
-.org-pagination button {
-  min-width: 32px;
-  height: 30px;
-  border: 1px solid #bbb;
-  background: #fff;
-  border-radius: 0.4vw;
-  cursor: pointer;
-}
 
-.org-pagination button.active {
-  background: #01628c;
-  border-color: #01628c;
-  color: #fff;
-}
 
-.org-pagination button.disabled {
-  opacity: 0.5;
-  pointer-events: none;
-}
 
-.org-page-info {
-  min-width: 72px;
-  text-align: center;
-  color: #333;
-}
 
-.team-pagination {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 12px;
-}
 
-.team-pagination button {
-  min-width: 32px;
-  height: 30px;
-  border: 1px solid #bbb;
-  background: #fff;
-  border-radius: 0.4vw;
-  cursor: pointer;
-}
 
-.team-pagination button.active {
-  background: #01628c;
-  border-color: #01628c;
-  color: #fff;
-}
 
-.team-pagination button.disabled {
-  opacity: 0.5;
-  pointer-events: none;
-}
 
-.team-page-info {
-  min-width: 72px;
-  text-align: center;
-  color: #333;
-}
 
 /* Avatar styling - removed people-avatar column */
 
@@ -320,7 +201,7 @@ table td:first-child {
   align-items: center;
   cursor: pointer;
   text-decoration: none;
-  margin-right: 8px;
+  margin-inline-end: 8px;
   vertical-align: middle;
 }
 
@@ -344,8 +225,32 @@ table td:first-child {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 12px;
+  font-size: calc(12px * var(--wekan-ui-font-scale, 1));
   font-weight: 500;
+}
+
+/* Compact country counters in People. They are real buttons because each opens
+   the country/city/address report; wrapping keeps several countries inside the
+   Location column instead of widening the whole Admin Panel. */
+.people-login-locations {
+  white-space: normal;
+}
+.people-login-locations .js-open-login-country {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-height: 26px;
+  margin: 1px 3px 1px 0;
+  padding: 2px 6px;
+  border: 1px solid var(--theme-border, #ccc);
+  border-radius: 12px;
+  background: var(--theme-window, #fff);
+  color: inherit;
+  cursor: pointer;
+}
+.people-login-locations .js-open-login-country:hover,
+.people-login-locations .js-open-login-country:focus-visible {
+  background: var(--theme-hover, #eee);
 }
 
 .username .avatar img.avatar-image {
@@ -367,7 +272,7 @@ table td:first-child {
 .roles-settings h4,
 .roles-settings .roles-description {
   position: sticky;
-  left: 0;
+  inset-inline-start: 0;
   /* Cap to ~60 characters, and never wider than the viewport, so the text wraps
      into the visible left area at every width (desktop, mid and mobile) instead
      of running off the horizontally-scrolling main-body. */
@@ -377,4 +282,25 @@ table td:first-child {
 }
 .roles-settings .roles-description {
   margin-bottom: 1rem;
+}
+
+/* Admin Panel > People > Domains renders through the shared table page
+   (docs/Features/General/Table-Page.md), so its controls row, pagination and table are
+   styled there - and its pager is themed by paginationControls.css like every
+   other pager. Nothing pane-specific is needed here any more. */
+
+/* #6465: the "all users" select-all in a table heading. One row, box after the
+   word, with a gap that cannot collapse - the two used to be loose inline nodes
+   in a centred heading cell, and at the column's width the box sat on top of the
+   text. inline-flex keeps the heading's own centring intact. */
+.select-all-user {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.select-all-user input.allUserChkBox {
+  margin: 0;
+  flex: none;
 }

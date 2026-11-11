@@ -16,6 +16,131 @@ const db = require('../helpers/db');
 const BoardPage = require('../pages/BoardPage');
 
 test.describe('Views & layout', () => {
+  test('#6691: partial profiles and impersonation keep shared-list cards scoped', async ({
+    boardPage, board, user, adminUser,
+  }) => {
+    const { loginWithToken, navigateInApp } = require('../helpers/auth');
+    const secondLaneId = db.uid('swim');
+    const now = new Date();
+    db.insertOne('swimlanes', {
+      ...db.findOne('swimlanes', { _id: board.swimlaneId }),
+      _id: secondLaneId, title: 'Other swimlane', sort: 1,
+      createdAt: now, modifiedAt: now,
+    });
+    db.updateOne('lists', { _id: board.listIds[0] }, { $set: { swimlaneId: '' } });
+    db.insertOne('cards', {
+      ...db.findOne('cards', { boardId: board.boardId, title: 'Alpha Card' }),
+      _id: db.uid('card'), title: 'Other lane card', swimlaneId: secondLaneId,
+      sort: 200, createdAt: now, modifiedAt: now,
+    });
+    const assertScoped = async () => {
+      const first = boardPage.locator(`#swimlane-${board.swimlaneId}`);
+      const second = boardPage.locator(`#swimlane-${secondLaneId}`);
+      await expect(first.getByText('Alpha Card', { exact: true })).toBeVisible();
+      await expect(second.getByText('Other lane card', { exact: true })).toBeVisible();
+      await expect(second.getByText('Alpha Card', { exact: true })).toHaveCount(0);
+      await expect(first.getByText('Other lane card', { exact: true })).toHaveCount(0);
+    };
+    await boardPage.evaluate(() => localStorage.removeItem('boardView'));
+    db.updateOne('users', { _id: user.id }, { $unset: { 'profile.boardView': '' } });
+    await boardPage.waitForFunction(() => Meteor.user() && !Meteor.user().profile?.boardView);
+    await assertScoped();
+
+    db.updateOne('users', { _id: user.id }, { $set: { 'profile.boardView': 'board-view-swimlanes' } });
+    await loginWithToken(boardPage, adminUser.id, adminUser.token);
+    await boardPage.evaluate(() => localStorage.setItem('boardView', 'board-view-lists'));
+    await boardPage.evaluate(id => new Promise((resolve, reject) => {
+      Meteor.call('impersonate', id, error => {
+        if (error) return reject(error);
+        Meteor.connection.setUserId(id);
+        resolve();
+      });
+    }), user.id);
+    await boardPage.waitForFunction(id => Meteor.userId() === id &&
+      Meteor.user()?.boardViewPreference === 'board-view-swimlanes', user.id).catch(async error => {
+      const state = await boardPage.evaluate(() => ({
+        userId: Meteor.userId(), profile: Meteor.user()?.profile,
+        boardViewPreference: Meteor.user()?.boardViewPreference,
+        subscriptions: Object.values(Meteor.connection._subscriptions).map(sub => ({ name: sub.name, ready: sub.ready })),
+      }));
+      error.message += `\nImpersonation state: ${JSON.stringify(state)}`;
+      throw error;
+    });
+    await navigateInApp(boardPage, `/b/${board.boardId}/${board.slug}`);
+    await assertScoped();
+    expect(db.findOne('users', { _id: user.id }).profile.boardView).toBe('board-view-swimlanes');
+    db.deleteMany('impersonatedUsers', { adminId: adminUser.id, userId: user.id });
+  });
+
+  test('#6659 and #6660: view changes persist and cards stay in their swimlane', async ({
+    boardPage,
+    board,
+    user,
+  }) => {
+    const bp = new BoardPage(boardPage);
+    const secondSwimlaneId = db.uid('swim');
+    const secondListId = db.uid('list');
+    const secondCardId = db.uid('card');
+    const now = new Date();
+
+    db.insertOne('swimlanes', {
+      _id: secondSwimlaneId,
+      title: 'Second lane',
+      boardId: board.boardId,
+      archived: false,
+      createdAt: now,
+      updatedAt: now,
+      modifiedAt: now,
+      type: 'swimlane',
+      height: -1,
+      sort: 1,
+    });
+    db.insertOne('lists', {
+      ...db.findOne('lists', { _id: board.listIds[0] }),
+      _id: secondListId,
+      title: 'Second lane list',
+      swimlaneId: secondSwimlaneId,
+      sort: 1,
+      createdAt: now,
+      updatedAt: now,
+      modifiedAt: now,
+    });
+    db.insertOne('cards', {
+      ...db.findOne('cards', { boardId: board.boardId, title: 'Alpha Card' }),
+      _id: secondCardId,
+      title: 'Second lane card',
+      swimlaneId: secondSwimlaneId,
+      listId: secondListId,
+      sort: 200,
+      createdAt: now,
+      modifiedAt: now,
+      dateLastActivity: now,
+    });
+    await boardPage.reload({ waitUntil: 'domcontentloaded' });
+
+    await bp.switchToSwimlanesView();
+    const firstLane = boardPage.locator(`#swimlane-${board.swimlaneId}`);
+    const secondLane = boardPage.locator(`#swimlane-${secondSwimlaneId}`);
+    await expect(firstLane.getByText('Alpha Card', { exact: true })).toBeVisible();
+    await expect(firstLane.getByText('Second lane card', { exact: true })).toHaveCount(0);
+    await expect(secondLane.getByText('Second lane card', { exact: true })).toBeVisible();
+    await expect(secondLane.getByText('Alpha Card', { exact: true })).toHaveCount(0);
+
+    await bp.switchToListView();
+    // A view chosen on a board is that board's own since #4906 / #4256
+    // (profile.boardViews), not the shared profile.boardView.
+    await expect.poll(
+      () => db.findOne('users', { _id: user.id })?.profile?.boardViews?.[board.boardId],
+      { timeout: 10_000 },
+    ).toBe('board-view-lists');
+    await boardPage.reload({ waitUntil: 'domcontentloaded' });
+    await expect(boardPage.locator('.list-group.js-lists')).toBeVisible();
+    await expect(boardPage.locator('.js-swimlane')).toHaveCount(0);
+
+    await bp.switchToSwimlanesView();
+    await expect(secondLane.getByText('Second lane card', { exact: true })).toBeVisible();
+  });
+
   test('swimlanes view renders all lists under the correct swimlane', async ({ boardPage, board }) => {
     const bp = new BoardPage(boardPage);
     await bp.switchToSwimlanesView();
@@ -86,13 +211,10 @@ test.describe('Views & layout', () => {
     // Drag list A after list C using keyboard-accessible approach via the DB
     // (We swap sort values directly to avoid flaky drag tests, then verify the UI reflects it)
     const [listA, , listC] = board.listIds;
-    db.mongoEval(`
-      const a = db.lists.findOne({ _id: ${JSON.stringify(listA)} });
-      const c = db.lists.findOne({ _id: ${JSON.stringify(listC)} });
-      db.lists.updateOne({ _id: ${JSON.stringify(listA)} }, { $set: { sort: c.sort + 0.5 } });
-    `);
+    const c = db.findOne('lists', { _id: listC });
+    db.updateOne('lists', { _id: listA }, { $set: { sort: c.sort + 0.5 } });
 
-    await boardPage.reload({ waitUntil: 'networkidle' });
+    await boardPage.reload({ waitUntil: 'domcontentloaded' });
     await bp.switchToListView();
 
     // Firefox can apply the reactive reorder slightly later after reload.
@@ -110,7 +232,7 @@ test.describe('Views & layout', () => {
     expect(newOrder).not.toEqual(initialOrder);
 
     // After another reload it should still be the new order
-    await boardPage.reload({ waitUntil: 'networkidle' });
+    await boardPage.reload({ waitUntil: 'domcontentloaded' });
     await bp.switchToListView();
     const reloadedOrder = await readListOrder();
     expect(reloadedOrder).toEqual(newOrder);
@@ -147,8 +269,11 @@ test.describe('Views & layout', () => {
     }
 
     // At minimum, confirm the list renders cards and scrolling works without error.
-    const finalCount = await listEl.locator('.js-minicard').count();
-    expect(finalCount).toBeGreaterThanOrEqual(initialCount);
+    // The board view can briefly re-render while its subscription settles, so poll
+    // rather than read once (a transient teardown would momentarily show 0 cards).
+    await expect
+      .poll(async () => listEl.locator('.js-minicard').count(), { timeout: 15_000 })
+      .toBeGreaterThanOrEqual(initialCount);
 
     db.cleanup({ boardIds: [b.boardId] });
   });

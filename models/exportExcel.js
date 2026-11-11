@@ -9,7 +9,39 @@ runOnServer(function() {
   // it here we use runOnServer to have it inside a function instead of an
   // if (Meteor.isServer) block
   const { ExporterExcel } = require('./server/ExporterExcel');
+  const { ExporterExcelBoard } = require('./server/ExporterExcelBoard');
+  const { BOARD_EXPORT_FIELD_KEYS, parseExportFields, parseExportScope } =
+    require('/models/lib/exportFields');
+
+  // What formatDateByUserPreference understands, and nothing else.
+  const DATE_FORMATS = ['YYYY-MM-DD', 'DD-MM-YYYY', 'MM-DD-YYYY',
+      'YYYY-MM-DD-date-only', 'DD-MM-YYYY-date-only', 'MM-DD-YYYY-date-only'];
+
+  // The export the request asks for (#1173). `card-details` - every card in the
+  // CARD export's layout - is what the popup ticks by default, and it needs an
+  // in-memory workbook: a card block merges and styles cells and comes back to
+  // earlier rows, which the streaming writer cannot do. Untick it and the old
+  // STREAMING table exporter answers instead, which is the one to use on a board
+  // too large to hold in memory. Both are real exports; the checkbox chooses.
+  const boardExcelExporter = (req, boardId, user) => {
+    const fields = parseExportFields(req.query && req.query.fields, BOARD_EXPORT_FIELD_KEYS);
+    const language = (user && user.profile && user.profile.language)
+      || (req.query && req.query.lang) || 'en';
+    const requested = req.query && req.query.dateFormat;
+    const dateFormat = DATE_FORMATS.includes(requested)
+      ? requested
+      : ((user && user.profile && user.profile.dateFormat) || 'YYYY-MM-DD');
+    const timezone = (req.query && typeof req.query.tz === 'string' && req.query.tz.length <= 64)
+      ? req.query.tz : '';
+    const scope = parseExportScope(req.query);
+
+    if (fields && !fields.includes('card-details')) {
+      return new ExporterExcel(boardId, language, scope);
+    }
+    return new ExporterExcelBoard(boardId, language, fields, dateFormat, timezone, scope);
+  };
   const { WebApp } = require('meteor/webapp');
+  const { safeRoute } = require('/server/apiMiddleware');
   const { Authentication } = require('/server/authentication');
 
   // todo XXX once we have a real API in place, move that route there
@@ -33,7 +65,9 @@ runOnServer(function() {
    * @param {string} boardId the ID of the board we are exporting
    * @param {string} authToken the loginToken
    */
-  WebApp.handlers.get('/api/boards/:boardId/exportExcel', async function (req, res) {
+  WebApp.handlers.get('/api/boards/:boardId/exportExcel', safeRoute(async function (req, res) {
+    // Before anything else: Admin Panel can turn all export off (CrossBoardExportBleed).
+    if (await require('/models/lib/importExportSecurity').refuseDisabledExport(res)) return;
     const boardId = req.params.boardId;
     let user = null;
     let impersonateDone = false;
@@ -42,6 +76,7 @@ runOnServer(function() {
     // First check if board exists and is public to avoid unnecessary authentication
     const board = await ReactiveCache.getBoard(boardId);
     if (!board) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
       res.end('Board not found');
       return;
     }
@@ -49,8 +84,8 @@ runOnServer(function() {
     // If board is public, skip expensive authentication operations
     if (board.isPublic()) {
       // Public boards don't require authentication - skip hash operations
-      const exporterExcel = new ExporterExcel(boardId, 'en');
-      exporterExcel.build(res);
+      const exporterExcel = boardExcelExporter(req, boardId, null);
+      await exporterExcel.build(res);
       return;
     }
 
@@ -62,14 +97,19 @@ runOnServer(function() {
         if (process.env.DEBUG === 'true') {
           console.warn('Suspiciously long auth token received, rejecting to prevent resource abuse');
         }
+        res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
         res.end('Invalid token');
         return;
       }
 
-      const hashToken = Accounts._hashLoginToken(loginToken);
-      user = await ReactiveCache.getUser({
-        'services.resume.loginTokens.hashedToken': hashToken,
-      });
+      user = await require('/server/lib/activeUser').activeUserByToken(loginToken, 'exportExcel', req);
+      if (!user) {
+        // GHSA-3gcg-g6rf-w2rx - see the note in models/export.js: an unknown token
+        // answers `undefined`, and dereferencing it crashed the server.
+        res.writeHead(401, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Invalid token');
+        return;
+      }
       adminId = user._id.toString();
       impersonateDone = await ReactiveCache.getImpersonatedUser({ adminId: adminId });
     } else if (!Meteor.settings.public.sandstorm) {
@@ -86,13 +126,8 @@ runOnServer(function() {
       });
     }
 
-    let userLanguage = 'en';
-    if(user && user.profile){
-      userLanguage = user.profile.language
-    }
-
-    const exporterExcel = new ExporterExcel(boardId, userLanguage);
-    if (exporterExcel.canExport(user) || impersonateDone) {
+    const exporterExcel = boardExcelExporter(req, boardId, user);
+    if ((await exporterExcel.canExport(user))) {
       if (impersonateDone) {
         await ImpersonatedUsers.insertAsync({
           adminId: adminId,
@@ -100,9 +135,27 @@ runOnServer(function() {
           reason: 'exportExcel',
         });
       }
-      exporterExcel.build(res);
+      // AWAITED, and that is #6591's other half. `build(res)` is async: without
+      // the await its rejection went nowhere - no 500, no log line, and a
+      // response that was never written or ended, so the browser waited for an
+      // export that had already failed. "The Board Settings -> Export board ->
+      // export/Excel didn't work", with nothing in the logs to say why.
+      try {
+        await exporterExcel.build(res);
+      } catch (error) {
+        console.error('exportExcel failed for board', boardId, error);
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end(`Excel export failed: ${error && error.message ? error.message : error}`);
+        } else {
+          // Bytes are already on the wire, so the file is truncated whatever we
+          // do; end it rather than leave the request open forever.
+          res.end();
+        }
+      }
     } else {
+      res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
       res.end(TAPi18n.__('user-can-not-export-excel'));
     }
-  });
+  }));
 });

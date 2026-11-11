@@ -3,6 +3,27 @@
 // Loaded by server/main.js after bootstrap (collectionHelpers) completes.
 // ============================================================================
 
+// ****IMPORTANT**** FIRST: a rejected promise must not end the process. SyncedCron
+// installs an `unhandledRejection` handler that calls process.exit(1), so one
+// write losing a race for the SQLite write lock killed the whole server and
+// systemd restarted it into a busier database (#6533). This decides what happens
+// instead, and must be loaded before SyncedCron.
+import '/server/00processErrors';
+
+// ...and guard every startup callback registered below, so a database that is
+// momentarily busy cannot turn a boot into a restart loop either (#6533). It must
+// come before anything that registers a Meteor.startup hook.
+import '/server/00startupResilience';
+
+// ...and retry the writes themselves, so a write that lost the race for SQLite's
+// single writer is retried instead of failing the user's edit (#6533). Loaded here
+// so it wraps the collection prototype OUTSIDE collection2 / collection-hooks.
+import '/server/00retryBusyWrites';
+
+// Yandex Browser is a modern browser: say so, or `modern-browsers` serves it the
+// legacy bundle because it has no minimum for that family name (#6557).
+import '/server/modernBrowsers';
+
 // ****IMPORTANT**** Wait for MongoDB to be ready BEFORE anything else, so the
 // first index creation never crashes the server with "Topology is closed".
 // Registers the first Meteor.startup hook, so it runs before index-creating ones.
@@ -15,8 +36,13 @@ import '/server/initializeDirs';
 // ----------------------------------------------------------------------------
 // 0. API middleware & auth routes (must register before model routes)
 // ----------------------------------------------------------------------------
+import '/server/lib/requestReportContext';
+import '/server/00adminOnlyFieldBoundary';
 import '/server/apiMiddleware';
 import '/server/apiAuthRoutes';
+// LockoutBleed (GHSA-2g94-9x3m-hv37): the DDP `login` half of the timing fix -
+// written then, never imported, so only the REST login was equalized.
+import '/server/loginTimingNormalization';
 
 // ----------------------------------------------------------------------------
 // 1. Shared imports (i18n, utilities, reactive cache)
@@ -35,6 +61,7 @@ import '/imports/lib/secureDOMPurify';
 // 2. Models — shared collections + server-only extensions
 // ----------------------------------------------------------------------------
 import '/imports/startup/shared-models';
+import '/server/adminOnlyFieldWrites';
 import '/models/attachments.server';
 import '/models/avatars.server';
 import '/server/boardBackgrounds';
@@ -48,6 +75,7 @@ import '/imports/reactiveCache';
 // Models — server-only exporters
 import '/models/csvCreator';
 import '/models/export';
+import '/models/exportCharts';
 import '/models/exportExcel';
 import '/models/exportExcelCard';
 import '/models/exportPDF';
@@ -74,14 +102,28 @@ import '/models/lib/userStorageHelpers';
 // Models — server-only sub-modules
 import '/models/server/createWorkbook';
 import '/models/server/ExporterCardPDF';
+import '/models/importZip';
 import '/models/server/ExporterExcelCard';
 import '/models/server/ExporterExcel';
 import '/models/server/metrics';
+import '/server/lib/speedMiddleware';
+import '/server/lib/debugSpeed';
+import '/server/lib/cpuMonitor';
+// Siblings of the CPU monitor: memory and swap, and each filesystem WeKan
+// writes to (docs/Features/Admin-Panel/Problems/RAM-usage.md, Disk-usage.md).
+import '/server/lib/ramMonitor';
+import '/server/lib/diskMonitor';
+import '/server/lib/selfChecks';
 import '/server/models/actions';
 import '/server/models/activities';
 import '/server/models/attachmentStorageSettings';
+import '/server/models/attachments';
 import '/server/models/boards';
 import '/server/models/cards';
+import '/server/models/customFieldLinks';
+import '/server/models/dependencies';
+import '/server/models/attachedCards';
+import '/server/models/eventLog';
 import '/server/models/cardComments';
 import '/server/models/checklistItems';
 import '/server/models/checklists';
@@ -90,12 +132,23 @@ import '/server/models/customFields';
 import '/server/models/integrations';
 import '/server/models/lists';
 import '/server/models/org';
+import '/server/models/rules';
 import '/server/models/settings';
+// The product name for the snap's pages shown while the database is down.
+import '/server/productNameCache';
 import '/server/models/swimlanes';
 import '/server/models/team';
 import '/server/models/translation';
 import '/server/models/users';
 import '/server/models/userPositionHistory';
+// #5850/#4737: server-side method modules (this app uses an explicit server
+// mainModule, so files not imported here are never loaded / their methods are
+// not registered).
+import '/server/ldapGroupSync';
+import '/server/ldapAdminSettingsBridge';
+import '/server/lib/oauthProviders';
+import '/server/sharedTemplateTargets';
+import '/server/propagateOrgTeamMembers';
 
 // ----------------------------------------------------------------------------
 // 4. Config (shared)
@@ -113,13 +166,24 @@ import '/config/search-const';
 import '/server/00checkStartup';
 import '/server/accounts-common';
 import '/server/accounts-lockout-config';
+// SignupBleed: a client's createUser call cannot pass server-only options.
+import '/server/lib/clientAccountCreationGuard';
+// Fold the per-event eventlog rows an older WeKan wrote into problem summaries
+// (server/lib/eventLogSummaryMigration.js). Idempotent and once.
+import '/server/eventLogSummaryStartup';
 import '/server/authentication';
 import '/server/cors';
+import '/server/securityHeaders';
+import '/server/crossSiteRequestGuard';
+// PASSWORD_MIN_LENGTH: an older, shorter password is changed after signing in.
+import '/server/passwordChangeRequired';
+import '/server/requireTwoFactor';
+import '/server/adminAudit';
 import '/server/header-login';
+import '/server/nextcloud';
 import '/server/max-image-pixel';
 import '/server/max-size';
 import '/server/policy';
-import '/server/richer-editor-setting-helper';
 import '/server/saml';
 import '/server/spinner';
 import '/server/statistics';
@@ -128,28 +192,37 @@ import '/server/statistics';
 // 5. Server — attachment handling
 // ----------------------------------------------------------------------------
 import '/server/attachmentApi';
+import '/server/siteLogoUpload';
 import '/server/attachmentMigration';
 import '/server/attachmentMigrationStatus';
 import '/server/attachmentBulkMove';
-import '/server/boardMigrationDetector';
 
 // ----------------------------------------------------------------------------
-// 6. Server — cron & migration
+// 6. Server — cron
 // ----------------------------------------------------------------------------
-import '/server/cronJobStorage';
-import '/server/cronMigrationManager';
+// SyncedCron itself, used by the backup schedule (server/methods/backup.js) and
+// scheduled rules (server/scheduledRules.js). The old cron-driven MIGRATION
+// subsystem that also lived here was removed: it never ran (its
+// initializeCronJobs() was never called and the board-migration detector's
+// startup hook was commented out) and had no UI, while its client module still
+// subscribed and polled on every client. Migrations run from Admin Panel ->
+// Attachments and on board open instead, reported by the shared
+// migrationProgress dashboard.
+import '/server/cron/syncedCron';
 
 // ----------------------------------------------------------------------------
 // 7. Server — webhooks
 // ----------------------------------------------------------------------------
 import '/server/card-opened-webhook';
-import '/server/cron/syncedCron';
+import '/server/cards-loading';
+import '/server/dynamicImportOrigin';
 
 // ----------------------------------------------------------------------------
 // 8. Server — import helpers
 // ----------------------------------------------------------------------------
 import '/server/import-users-for-methods';
 import '/server/trelloApiImport';
+import '/server/trelloApiExport';
 
 // ----------------------------------------------------------------------------
 // 9. Server — lib (utilities, sanitizers, guards)
@@ -158,29 +231,80 @@ import '/server/lib/customHeadRender';
 import '/server/lib/emailLocalization';
 import '/server/lib/importer';
 import '/server/lib/inputSanitizer';
+// Multitenancy option D: the host -> Organization resolver and the per-host runtime
+// config hook (docs/Design/Multitenancy/Multitenancy.md). Inert unless
+// MULTITENANCY=true.
+import '/server/lib/tenantResolver';
 import '/server/lib/ssrfGuard';
+import '/server/lib/ddpSessionSendGuard';
+import '/server/lib/databaseProblems';
+import '/server/lib/databaseHealth';
+// What the FILESYSTEM said, and whether this server stopped cleanly last time
+// (docs/Security/Remediation/WeKan.md §13). Both write to the 'integrity' event
+// stream, shown in Admin Panel / Problems / Filesystem integrity.
+import '/server/lib/fileIntegrityScan';
+import '/server/lib/historyIntegrityScan';
+import '/server/lib/dataHealthScan';
+import '/server/lib/uptimeWatch';
 import '/server/lib/utils';
 
 // ----------------------------------------------------------------------------
 // 10. Server — methods
 // ----------------------------------------------------------------------------
+// #6870: the card's attachment "+" asks this whether uploads are blocked.
+import '/server/methods/attachmentUploadPolicy';
+import '/server/methods/backup';
+// Admin Panel / Attachments / Continuous backup (docs/Backup/Continuous-Backup.md).
+import '/server/continuousBackup';
 import '/server/methods/fixDuplicateLists';
+import '/server/methods/icsImport';
 import '/server/methods/lockedUsers';
 import '/server/methods/lockoutSettings';
+import '/server/methods/migrateTextDatabase';
+import '/server/methods/repairBoardData';
+import '/server/models/changeHistory';
+import '/server/models/changeHistoryHooks';
+import '/server/methods/repairBrokenCards';
+import '/server/methods/restoreListSwimlanes';
+import '/server/methods/dataHealth';
+// Removes the "Templates" container boards made for accounts that never used
+// them (pre-v10.00 signups). Dry run by default; see the method for why.
+import '/server/methods/cleanupTemplateContainers';
+import '/server/methods/systemStatus';
 import '/server/methods/positionHistory';
+import '/server/methods/similarCards';
+import '/server/methods/ruleSuggestions';
+import '/server/methods/boardSummary';
+import '/server/methods/sinceLastVisit';
+import '/server/methods/cardForecast';
+import '/server/methods/openCardAvailability';
+import '/server/methods/whiteboard';
+import '/server/methods/sandstormMigration';
+import '/server/methods/tenant';
+import '/server/startup/repairBoardsOnStartup';
 
 // ----------------------------------------------------------------------------
 // 11. Server — migrations
 // ----------------------------------------------------------------------------
-import '/server/migrations/comprehensiveBoardMigration';
+// #6521: the per-swimlane-lists-era board migrations (comprehensiveBoardMigration,
+// fixMissingListsMigration, restoreLostCards, restoreAllArchived) are removed. They
+// converted today's board-wide SHARED lists (swimlaneId '') back into per-swimlane
+// DUPLICATE columns and created "Lost Cards" / "Restored Items" columns, moving
+// real cards into them (they even treated cards on archived lists as "orphaned" and
+// shared-swimlane cards as "lost"). That is exactly the damage the startup schema
+// step `merge-per-swimlane-lists` now UNDOES, and the board-open self-heal
+// (repairBoardData) fixes genuinely missing swimlaneId / orphaned cards correctly.
+// The migrations had no callers left (their admin migration dashboard was removed),
+// so they were dead, admin-callable footguns.
+import '/server/migrations/correctFileExtensions';
 import '/server/migrations/deleteDuplicateEmptyLists';
 import '/server/migrations/ensureValidSwimlaneIds';
 import '/server/migrations/fixAllFileUrls';
 import '/server/migrations/fixAvatarUrls';
-import '/server/migrations/fixMissingListsMigration';
 import '/server/migrations/migrateAttachments';
-import '/server/migrations/restoreAllArchived';
-import '/server/migrations/restoreLostCards';
+// #6473: startup schema upgrade — checks what old-version data is already
+// migrated and migrates only the rest (all platforms, both databases).
+import '/server/startupSchemaUpgrade';
 
 // ----------------------------------------------------------------------------
 // 12. Server — notifications
@@ -188,7 +312,10 @@ import '/server/migrations/restoreLostCards';
 import '/server/notifications/email';
 import '/server/notifications/notifications';
 import '/server/notifications/outgoing';
+import '/server/notifications/webhookQueue';
 import '/server/notifications/profile';
+// #5148: ntfy, per member.
+import '/server/notifications/ntfy';
 import '/server/notifications/watch';
 
 // ----------------------------------------------------------------------------
@@ -205,12 +332,29 @@ import '/server/publications/avatars';
 import '/server/publications/backgrounds';
 import '/server/publications/boards';
 import '/server/publications/cards';
-import '/server/publications/cronJobs';
-import '/server/publications/cronMigrationStatus';
+import '/server/publications/cardsWindow';
+import '/server/publications/boardTextMatches';
+import '/server/publications/boardMovementMatches';
+import '/server/publications/boardTablePage';
+import '/server/filterPresets';
 import '/server/publications/customUI';
+import '/server/publications/impersonationReport';
+import '/server/publications/recoveryReport';
+import '/server/publications/recoveryMaintenance';
+import '/server/recovery';
 import '/server/publications/inviteToBoardRolesSettings';
+// Custom board roles (#3022): the permission lookup, publication and methods.
+import '/server/customBoardRoles';
+// Optional HTTPS in WeKan's own server (#916).
+import '/server/httpsServer';
+// Boards every signed-in user may edit (#4575).
+import '/server/instanceEditing';
+// Board keys: card numbers shown as KEY-7 (#2449, #2450).
+import '/server/boardKeys';
+// Shared labels (#2761, #4698).
+import '/server/sharedLabels';
+import '/server/listPermissions';
 import '/server/publications/lockoutSettings';
-import '/server/publications/migrationProgress';
 import '/server/publications/notifications';
 import '/server/publications/org';
 import '/server/publications/people';
@@ -222,17 +366,71 @@ import '/server/publications/team';
 import '/server/publications/translation';
 import '/server/publications/unsavedEdits';
 import '/server/publications/userDesktopDragHandles';
-import '/server/publications/userGreyIcons';
+import '/server/publications/userBoardView';
 import '/server/publications/users';
 import '/server/publications/trelloImportJobs';
+import '/server/publications/githubImportJobs';
+import '/server/githubOrgImport';
+// Optional APIs, off until ticked (models/lib/optionalApis.js): Trello, Jira,
+// GitHub and Gitea in front of WeKan's REST API.
+import '/server/compatApi/trello';
+import '/server/compatApi/jira';
+import '/server/compatApi/githubLike';
+// Board Settings / Bots: dispatches, the run report route, runs for admins.
+import '/server/bots';
+// Admin Panel / Settings / Global Webhooks / Internal destinations.
+import '/server/webhookInternalHosts';
+// Admin Panel / Settings / Global Webhooks / Login and registration (#2290).
+import '/server/accountWebhook';
+// #1040: the JS Web Labels page for LibreJS.
+import '/server/jsWebLabels';
+// #1293: Android share target.
+import '/server/shareTarget';
+// #5847: passkey (WebAuthn) login.
+import '/server/passkeys';
+// #1931: an existing card from another board as a subtask.
+import '/server/crossBoardSubtasks';
+// #864: adding a card from the Table view.
+import '/server/tableViewCards';
+// #4791: All Boards facets and the member's board labels.
+import '/server/allBoardsFacets';
+// #2026 / #1377: the all-boards activity feed.
+import '/server/activityFeed';
+// #2026 / #1377: browser push notifications.
+import '/server/webPush';
+// #2809: linked whole lists.
+import '/server/linkedLists';
+// #802: All Boards organization and team tabs.
+import '/server/groupMembers';
+// #4198: ActivityPub for public boards.
+import '/server/activityPub';
+// #687: CalDAV sync of card due dates.
+import '/server/caldavSync';
+import '/server/sharedDescription';
+// #2460: SQRL sign-in.
+import '/server/sqrl';
+import '/server/windowsSso';
+import '/server/apiImport';
+import '/server/chatView';
 
 // ----------------------------------------------------------------------------
 // 14. Server — routes (REST API, file serving)
 // ----------------------------------------------------------------------------
 import '/server/routes/attachmentApi';
 import '/server/routes/avatarServer';
+import '/server/routes/cardOgTags';
 import '/server/routes/customHeadAssets';
 import '/server/routes/importTrelloZip';
+import '/server/routes/exportAllBoards';
+// Reply-by-email (#2414). Never imported before ReplyBleed was fixed, so the
+// endpoint the docs describe did not exist.
+import '/server/routes/inboundEmail';
+import '/server/emailToCard';
+import '/server/emailView';
+import '/server/versionControlView';
+import '/server/emailBounces';
+import '/server/lib/imapInbound';
+import '/server/sandstormEmail';
 import '/server/routes/legacyAttachments';
 import '/server/routes/universalFileServer';
 
@@ -241,6 +439,26 @@ import '/server/routes/universalFileServer';
 // ----------------------------------------------------------------------------
 import '/server/rulesHelper';
 import '/server/triggersDef';
+import '/server/scheduledRules';
+import '/server/checklistResetSchedule';
+// Whole-card recurrence: the job the card's Recurrence setting waits for.
+import '/server/cardRecurrenceSchedule';
+import '/server/autoArchiveCards';
+import '/server/disableInactiveUsers';
+import '/server/attachmentRetention';
+import '/server/listSync';
+import '/server/methods/listSync';
+import '/server/methods/listSyncStuck';
+import '/server/importRuns';
+import '/server/methods/instanceFeatures';
+import '/server/methods/emailRecovery';
+import '/server/methods/importReport';
+import '/server/methods/csvImportMapping';
+import '/server/methods/activityNotificationRecovery';
+import '/server/methods/wipLimitGroups';
+import '/server/methods/boardDueReminders';
+import '/server/methods/notificationDelivery';
+import '/server/rulesButton';
 
 // ----------------------------------------------------------------------------
 // 16. Server — collection permissions (allow/deny rules)
@@ -255,6 +473,7 @@ import '/server/permissions/boards';
 import '/server/permissions/cardCommentReactions';
 import '/server/permissions/cardComments';
 import '/server/permissions/cards';
+import '/server/permissions/cardTextNotes';
 import '/server/permissions/checklistItems';
 import '/server/permissions/checklists';
 import '/server/permissions/customFields';
@@ -276,6 +495,44 @@ import '/server/permissions/userPositionHistory';
 import '/server/permissions/users';
 
 // ----------------------------------------------------------------------------
+// External-avatar localization + imported-user reconciliation
+// ----------------------------------------------------------------------------
+// Register the Accounts.onLogin avatar-localization trigger and the imported-user
+// reconciliation Meteor methods. In mainModule mode a file that is not imported here is
+// never loaded, so its hooks/methods would silently never register.
+import '/server/avatarLocalizationOnLogin';
+// Where each account logs in from, and who logs in from each address - the
+// office groupings in Admin Panel (server/lib/loginTally.js).
+import '/server/loginTallyOnLogin';
+import '/server/methods/loginOffices';
+// Presence for Admin Panel > People (#3678, #3734): last-active timestamp set on
+// login and refreshed by an open client session's heartbeat.
+import '/server/lastActiveOnLogin';
+// Automatic logout: LOGOUT_WITH_TIMER and the LOGOUT_* settings.
+import '/server/logoutTimer';
+import '/server/idleLogout';
+// #824: DEFAULT_AVATAR_URL for users without an avatar of their own.
+import '/server/defaultAvatar';
+import '/server/methods/lastActiveHeartbeat';
+import '/server/importedUserReconciliation';
+
+// ----------------------------------------------------------------------------
 // 17. Sandstorm integration
 // ----------------------------------------------------------------------------
 import '/sandstorm';
+import '/server/sandstorm';
+import '/server/sandstormEgress';
+
+import '/server/methods/fileStatusAudit';
+import '/server/methods/instrumentationReport';
+
+import '/server/moveBoardObjects';
+
+import '/server/scrum';
+import '/server/publications/scrum';
+import '/server/methods/syncRuleEmailRecovery';
+
+import '/server/lib/storedHistoryChain';
+// Card text linking to an OS handler with a code-execution history (ms-msdt:,
+// search-ms:, telnet: ...) is shown in Admin Panel -> Problems.
+import '/server/lib/handlerLinkCanary';

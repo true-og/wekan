@@ -1,0 +1,166 @@
+'use strict';
+
+// Member Settings / Font (#4759, docs/Theme/Theme.md). A curated whitelist of common
+// cross-platform UI fonts. The picker offers only those DETECTED as actually
+// installed in the user's browser (client/lib/fontDetector.js); the server validates
+// the saved value against this same whitelist, so an arbitrary string can never reach
+// a CSS font-family. The font name is plain text — never rendered as HTML/markdown —
+// and every entry matches SAFE_FONT_RE (letters/digits/spaces/hyphens only), so it is
+// safe to interpolate into a quoted `font-family` value.
+//
+// Pure + CommonJS: unit-testable and importable on both client and server.
+import { ensureContrast } from './contrastColor.js';
+
+const UI_FONTS = [
+  // Windows / cross-platform
+  'Arial',
+  'Arial Black',
+  'Helvetica',
+  'Verdana',
+  'Tahoma',
+  'Trebuchet MS',
+  'Segoe UI',
+  'Georgia',
+  'Times New Roman',
+  'Palatino',
+  'Garamond',
+  'Bookman',
+  'Courier New',
+  'Consolas',
+  'Comic Sans MS',
+  'Impact',
+  'Lucida Sans',
+  'Lucida Console',
+  // macOS
+  'Monaco',
+  'Menlo',
+  // Linux common
+  'DejaVu Sans',
+  'Liberation Sans',
+  'Ubuntu',
+  'Cantarell',
+  'Noto Sans',
+  // Popular web fonts that are often installed locally
+  'Roboto',
+  'Open Sans',
+  'Lato',
+  'Inter',
+];
+
+// A font name is safe to use in CSS if it starts with a letter/digit and contains
+// only letters, digits, spaces and hyphens (max 49 chars). No quotes, semicolons,
+// braces, url(), angle brackets, etc. — nothing that could break out of a quoted
+// font-family value or inject markup.
+const SAFE_FONT_RE = /^[A-Za-z0-9][A-Za-z0-9 -]{0,48}$/;
+
+function isSafeFontName(name) {
+  return typeof name === 'string' && SAFE_FONT_RE.test(name);
+}
+
+// Is `name` one of the curated fonts? (Also implies it is safe.)
+function isKnownFont(name) {
+  return UI_FONTS.indexOf(name) !== -1;
+}
+
+// The CSS `font-family` value for a chosen font, quoted + with a generic fallback.
+// Returns '' for an unknown/empty font so callers apply nothing.
+function fontFamilyValue(name) {
+  if (!isKnownFont(name)) return '';
+  return `"${name}", sans-serif`;
+}
+
+// Member Settings / Font / Size (#4759): named preset sizes only — the user picks
+// from a dropdown, never types a number. `default` = the stock size (no override /
+// unset). Values are percentages applied to the UI font-size, so they scale relative
+// to whatever the base is.
+const UI_FONT_SIZES = [
+  { key: 'default', percent: 100 },
+  { key: 'smaller', percent: 80 },
+  { key: 'small', percent: 90 },
+  { key: 'large', percent: 115 },
+  { key: 'larger', percent: 130 },
+  { key: 'largest', percent: 150 },
+];
+
+const UI_FONT_SIZE_KEYS = UI_FONT_SIZES.map(s => s.key);
+
+// Is `key` a known preset? (Includes 'default'.)
+function isKnownFontSize(key) {
+  return UI_FONT_SIZE_KEYS.indexOf(key) !== -1;
+}
+
+// The CSS font-size value for a preset, or '' for 'default'/unknown (apply nothing).
+function fontSizeValue(key) {
+  const s = UI_FONT_SIZES.find(x => x.key === key);
+  if (!s || s.key === 'default') return '';
+  return `${s.percent}%`;
+}
+
+// The same preset as a plain NUMBER, for `--wekan-ui-font-scale`.
+//
+// The percentage above only reaches text whose size is written in a relative
+// unit - `rem` is measured against the root, `em` against its parent - and
+// WeKan writes most of its sizes in px, which no root percentage can move. That
+// is why the setting reached the minicards and the page headings and left the
+// header bar, the left menu, the lists and every popup exactly as they were.
+// Every px font-size and line-height in the stylesheets is written
+// `calc(Npx * var(--wekan-ui-font-scale, 1))` instead, so this number moves
+// them all; unset, the fallback 1 renders precisely what it rendered before.
+function fontScaleValue(key) {
+  const s = UI_FONT_SIZES.find(x => x.key === key);
+  if (!s || s.key === 'default') return '';
+  return String(s.percent / 100);
+}
+
+// Member Settings / Font / Color (#4759): the text color and text background color
+// are free choices from a color wheel, so they are validated as #rrggbb hex (not a
+// whitelist). Only a strict hex passes, so there is no CSS-injection surface.
+const HEX6_RE = /^#[0-9a-fA-F]{6}$/;
+
+function isHexColor6(value) {
+  return typeof value === 'string' && HEX6_RE.test(value);
+}
+
+// The color if it is a valid hex, else '' (apply nothing / default).
+function colorValue(value) {
+  return isHexColor6(value) ? value : '';
+}
+
+// The text color a member picks is drawn on the surface of the theme in use, and it
+// has to be legible there (WCAG 1.4.3, 4.5:1): the same hue, lightened or darkened
+// by the smallest step that is. The surfaces are the page and panel greys of the
+// light themes, and the dark surfaces of the four themes with a dark board (their
+// popups differ; one color cannot read on a light and a dark surface at once, so
+// the board's is the one that counts).
+const DARK_SURFACE_THEMES = ['cleandark', 'moderndark', 'dark', 'exodark'];
+const LIGHT_SURFACES = ['#cccccc', '#dedede', '#e4e4e4', '#f7f7f7', '#ffffff'];
+const DARK_SURFACES = ['#222222', '#23232b', '#2b2b2b', '#2e2e39', '#454545', '#545454'];
+
+function surfacesFor(themeName) {
+  return DARK_SURFACE_THEMES.includes(themeName) ? DARK_SURFACES : LIGHT_SURFACES;
+}
+
+// The color to apply for a member's chosen text color: '' when none or not a hex,
+// else the chosen color made readable on the theme's surfaces.
+function readableUiTextColor(value, themeName) {
+  const color = colorValue(value);
+  return color ? ensureContrast(color, surfacesFor(themeName), 4.5) : '';
+}
+
+export {
+  UI_FONTS,
+  SAFE_FONT_RE,
+  isSafeFontName,
+  isKnownFont,
+  fontFamilyValue,
+  UI_FONT_SIZES,
+  UI_FONT_SIZE_KEYS,
+  isKnownFontSize,
+  fontSizeValue,
+  fontScaleValue,
+  isHexColor6,
+  colorValue,
+  readableUiTextColor,
+  surfacesFor,
+  DARK_SURFACE_THEMES,
+};

@@ -1,7 +1,5 @@
 'use strict';
 
-const BASE_URL = process.env.WEKAN_BASE_URL || 'http://localhost:3000';
-
 /**
  * Page Object for the Admin panel — People management at /people.
  *
@@ -9,8 +7,8 @@ const BASE_URL = process.env.WEKAN_BASE_URL || 'http://localhost:3000';
  *  - client/components/settings/peopleBody.jade  (people template, peopleGeneral, peopleRow)
  *  - config/router.js  (route: /people)
  *
- * The /people page defaults to the Organizations view.
- * Call navigateToPeople() to switch to the People (users) view.
+ * The /people page opens on Login; call navigateToPeople() to switch to the
+ * People (users) pane.
  */
 class AdminPage {
   constructor(page) {
@@ -18,29 +16,41 @@ class AdminPage {
   }
 
   /**
-   * Navigate to /people and switch to the "People" tab (not the default Org tab).
-   * peopleBody.jade: side-menu has a.js-people-menu(data-id="people-setting")
-   * After clicking, peopleSetting.get becomes true and +peopleGeneral renders.
+   * Navigate to /people and switch to the "People" pane (the page opens on Login).
+   *
+   * Every Admin Panel page renders the ONE shared left menu now
+   * (docs/Features/All-Boards/Left-Menu.md): `a.js-left-menu-item(data-id="...")`, where
+   * data-id is the menu entry's id and is what the page's click handler reads. So
+   * the entry is addressed by data-id, not by a per-page class — the old
+   * `.js-people-menu` was exactly such a class, and it went away with the
+   * conversion.
    */
   async navigateToPeople() {
-    // Route: /people (not /admin/people)
-    await this.page.goto(`${BASE_URL}/people`, { waitUntil: 'networkidle' });
-    // Wait for the side menu to render (the page uses the people template).
-    await this.page.locator('.js-people-menu').waitFor({ timeout: 15_000 });
-    // Click the "People" tab to switch from the default Orgs view.
-    await this.page.locator('.js-people-menu').click();
+    // Follow the same in-app controls as an administrator. This preserves the
+    // authenticated DDP connection and also verifies the Admin Panel tabs.
+    await this.page.locator('.js-open-header-member-menu').click();
+    await this.page.locator('.js-pop-over .js-go-setting').click();
+    const peopleTab = this.page.locator('.admin-panel-tabs a.people');
+    await peopleTab.waitFor({ timeout: 15_000 });
+    await peopleTab.click();
+    const peopleEntry = this.page.locator(
+      '.js-left-menu-item[data-id="people-setting"]',
+    );
+    await peopleEntry.waitFor({ timeout: 15_000 });
+    await peopleEntry.click();
     // Wait for people rows — peopleGeneral has an empty <tr> before each user row,
     // so wait for td.username which appears only in actual data rows.
     await this.page.locator('table tbody td.username').first().waitFor({ timeout: 15_000 });
   }
 
   async navigateToSettings() {
-    // WeKan admin settings are at /setting (check router if needed)
-    await this.page.goto(`${BASE_URL}/setting`, { waitUntil: 'networkidle' });
+    await this.page.locator('.js-open-header-member-menu').click();
+    await this.page.locator('.js-pop-over .js-go-setting').click();
   }
 
   async navigateToInfo() {
-    await this.page.goto(`${BASE_URL}/admin-reports`, { waitUntil: 'networkidle' });
+    await this.navigateToSettings();
+    await this.page.locator('.admin-panel-tabs a.problems').click();
   }
 
   // --- People list ---
@@ -106,7 +116,7 @@ class AdminPage {
     // editUserPopup has required fields (fullname). If the user was seeded
     // without a fullname the browser's HTML5 validation blocks submission.
     // Ensure the field is non-empty before saving.
-    const fullnameInput = this.page.locator('.js-pop-over input.js-profile-fullname');
+    const fullnameInput = this.page.locator('.js-pop-over .js-profile-fullname');
     const currentFullname = await fullnameInput.inputValue().catch(() => '');
     if (!currentFullname.trim()) {
       await fullnameInput.fill(username);
@@ -119,14 +129,19 @@ class AdminPage {
   }
 
   // --- Pagination ---
+  //
+  // People is a shared table page now (docs/Features/General/Table.md), so its pager is
+  // the shared one: the same `.js-table-page-prev` / `.js-table-page-next` every
+  // table page in the Admin Panel uses. The old per-pane `.js-people-*-page`
+  // buttons went away with that pane's own markup.
 
   async nextPage() {
-    await this.page.locator('button.js-people-next-page:not(.disabled)').click();
+    await this.page.locator('button.js-table-page-next:not(.disabled)').click();
     await this.page.waitForTimeout(500);
   }
 
   async prevPage() {
-    await this.page.locator('button.js-people-prev-page:not(.disabled)').click();
+    await this.page.locator('button.js-table-page-prev:not(.disabled)').click();
     await this.page.waitForTimeout(500);
   }
 

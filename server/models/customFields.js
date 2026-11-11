@@ -28,7 +28,12 @@ async function customFieldDeletion(userId, doc) {
 }
 
 async function customFieldEdit(userId, doc) {
-  const customFieldValue = (await ReactiveCache.getActivity({ customFieldId: doc._id })).value;
+  // #5390: deleting a custom field from a board ($pull boardIds) calls this; an
+  // activity may not exist (e.g. the field never had a value set), so guard the
+  // lookup instead of dereferencing `.value` on undefined, which threw and
+  // aborted the whole delete.
+  const activity = await ReactiveCache.getActivity({ customFieldId: doc._id });
+  const customFieldValue = activity ? activity.value : undefined;
   await Activities.insertAsync({
     userId,
     activityType: 'setCustomField',
@@ -113,13 +118,16 @@ WebApp.handlers.get('/api/boards/:boardId/custom-fields/:customFieldId', async f
   const paramBoardId = req.params.boardId;
   const paramCustomFieldId = req.params.customFieldId;
   await Authentication.checkBoardAccess(req.userId, paramBoardId);
-  sendJsonResult(res, {
-    code: 200,
-    data: await ReactiveCache.getCustomField({
-      _id: paramCustomFieldId,
-      boardIds: { $in: [paramBoardId] },
-    }),
+  const customField = await ReactiveCache.getCustomField({
+    _id: paramCustomFieldId,
+    boardIds: { $in: [paramBoardId] },
   });
+  // 404, not a 200 with an empty body (#6862).
+  if (!customField) {
+    sendJsonResult(res, { code: 404, data: { error: 'Custom field not found' } });
+    return;
+  }
+  sendJsonResult(res, { code: 200, data: customField });
 });
 
 WebApp.handlers.post('/api/boards/:boardId/custom-fields', async function(req, res) {
@@ -141,7 +149,21 @@ WebApp.handlers.post('/api/boards/:boardId/custom-fields', async function(req, r
     _id: id,
     boardIds: { $in: [paramBoardId] },
   });
-  await customFieldCreation(req.body.authorId, customField);
+  // GHSA-6jr3-42jf-vhm5: the createCustomField activity records the session
+  // identity, not an `authorId` the caller chose for itself. A body that still
+  // names somebody else is the attempt, and is recorded for Admin Panel /
+  // Problems the same way the card paths record it.
+  try {
+    const claimed = req.body && req.body.authorId;
+    if (claimed && String(claimed) !== String(req.userId)) {
+      require('/server/lib/securityLog').record({
+        key: 'spoofing.author', action: 'ignored', source: 'POST custom-fields',
+        userId: req.userId,
+        detail: `ignored authorId "${claimed}" from the body; recorded the session instead`,
+      });
+    }
+  } catch (e) { /* logging must never break the guard */ }
+  await customFieldCreation(req.userId, customField);
 
   sendJsonResult(res, {
     code: 200,

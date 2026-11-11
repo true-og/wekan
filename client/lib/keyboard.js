@@ -1,4 +1,5 @@
 import { Meteor } from 'meteor/meteor';
+import { Session } from 'meteor/session';
 import { Template } from 'meteor/templating';
 import { ReactiveCache } from '/imports/reactiveCache';
 import { FlowRouter } from 'meteor/ostrio:flow-router-extra';
@@ -6,6 +7,9 @@ import Cards from '/models/cards';
 import { Filter } from '/client/lib/filter';
 import { MultiSelection } from '/client/lib/multiSelection';
 import { Utils } from '/client/lib/utils';
+import { newHistoryRequestId, runKeystroke } from '/client/lib/historyKeyRequest';
+import { historyRequestStorage, refreshPendingHistoryRequest } from '/client/lib/historyKeyRecovery';
+import { findDueDateControl } from '/client/lib/dueDateHotkey';
 
 // Late-bind Sidebar to avoid circular dependency (sidebar.js needs its template first)
 let _Sidebar;
@@ -34,8 +38,12 @@ hotkeys.filter = (event) => {
   if (window.getSelection().type === "Range")
     return false;
 
-  // Decide what the current element is
-  const currentElement = event.target || document.activeElement;
+  // Synthetic non-Latin keyboard events are dispatched on document, which has
+  // no element APIs. Keep filtering against the focused control in that case.
+  const currentElement = event.target instanceof Element
+    ? event.target
+    : document.activeElement;
+  if (!currentElement) return false;
 
   // If the current element is editable, we don't want to trigger an event
   if (currentElement.isContentEditable)
@@ -45,30 +53,37 @@ hotkeys.filter = (event) => {
   if (currentElement instanceof HTMLInputElement || currentElement instanceof HTMLSelectElement || currentElement instanceof HTMLTextAreaElement)
     return false;
 
+  // A focused control keeps the keys it uses itself, and only those: Enter
+  // activates any of them, Space a button, summary or checkbox (not a link),
+  // and End, Home and the arrows move between tabs (A01). Every other key is
+  // still a shortcut. Refusing ALL keys left shortcuts dead after a click on
+  // a minicard - the minicard is a link, and clicking its date badge or its
+  // menu leaves that link focused - and after any popup closed, because
+  // closing returns focus to the button that opened it (#6755).
+  const keysOwnedBy = {
+    'button, a[href], summary, [role="button"], [role="tab"], [role="checkbox"]': [13],
+    'button, summary, [role="button"], [role="checkbox"]': [32],
+    '[role="tab"]': [35, 36, 37, 38, 39, 40],
+  };
+  if (Object.keys(keysOwnedBy).some(controls =>
+    keysOwnedBy[controls].includes(event.keyCode) && currentElement.closest(controls)))
+    return false;
+
   // We can trigger events!
   return true;
 };
 
 // Handle non-Latin keyboards
-window.addEventListener('keydown', (e) => {
-  // Only handle event if coming from body
-  if (e.target !== document.body) return;
-
-  // Only handle event if it's in another language
-  if (String.fromCharCode(e.which).toLowerCase() === e.key) return;
-
-  // Trigger the corresponding action by dispatching a new event with the ASCII key
-  const key = String.fromCharCode(e.which).toLowerCase();
-  // Create a synthetic event for hotkeys to handle
-  const syntheticEvent = new KeyboardEvent('keydown', {
-    key: key,
-    keyCode: e.which,
-    which: e.which,
-    bubbles: true,
-    cancelable: true,
-  });
-  document.dispatchEvent(syntheticEvent);
-});
+//
+// Nothing to do here, on purpose (#6840). This used to re-dispatch a key typed on
+// another script (a Farsi or Cyrillic letter) as its Latin key, for the old
+// Mousetrap, which read the typed character. hotkeys-js does not: it resolves a
+// key from `event.code` ('KeyD') and `keyCode`, whatever character the layout
+// types, so it already runs the shortcut for the physical d key on any layout.
+// The copy then ran every shortcut a SECOND time - the due date editor opened
+// and the repeat clicked the same control, closing it again, so `d` "opens the
+// popup and closes it at a glance" on a Farsi keyboard (and Shift+D did the same
+// on a Latin one, #6750). tests/keyboardNonLatinOnce.test.cjs.
 
 function getHoveredCardId() {
   const card = $('.js-minicard:hover').get(0);
@@ -164,6 +179,7 @@ hotkeys(shiftNums, (event, handler) => {
   }
   const currentBoardId = Session.get('currentBoard');
   const board = ReactiveCache.getBoard(currentBoardId);
+  if (!board) return;
   const labels = board.labels;
   if (MultiSelection.isActive()) {
     const cardIds = MultiSelection.getSelectedCardIds();
@@ -187,6 +203,7 @@ hotkeys(nums, (event, handler) => {
     return;
   }
   const board = ReactiveCache.getBoard(currentBoardId);
+  if (!board) return;
   const labels = board.labels;
   if (MultiSelection.isActive() && ReactiveCache.getCurrentUser().isBoardMember()) {
     const cardIds = MultiSelection.getSelectedCardIds();
@@ -307,6 +324,39 @@ hotkeys('-', archiveCard);
 // https://github.com/wekan/wekan/pull/5589#issuecomment-2516776519
 hotkeys('\xf7', archiveCard);
 
+// #6478: Undo / Redo the caller's last position change (card / list / swimlane
+// move) with Ctrl+Z / Ctrl+Y (also Cmd+Z / Cmd+Shift+Z on macOS). The hotkeys
+// filter above disables shortcuts inside inputs/textareas/contentEditable, so
+// native text undo/redo keeps working while typing. Only enabled for members who
+// can modify the board.
+// Each keystroke carries a request ID kept in sessionStorage until the server
+// answers, so a reply lost to a disconnect or reload is retried rather than
+// repeated (client/lib/historyKeyRequest.js).
+export function undoRedoLast(direction) {
+  const boardId = Session.get('currentBoard');
+  if (!boardId || !Utils.canModifyBoard()) {
+    return Promise.resolve();
+  }
+  const storage = historyRequestStorage();
+  // Whatever happens, the recovery notice shows what is still unanswered
+  // (client/lib/historyKeyRecovery.js).
+  return runKeystroke({
+    storage,
+    call: (method, ...args) => Meteor.callAsync(method, ...args),
+    boardId,
+    direction,
+    newId: newHistoryRequestId(),
+  }).catch(() => {}).then(() => refreshPendingHistoryRequest(storage));
+}
+hotkeys('ctrl+z, command+z', event => {
+  event.preventDefault();
+  undoRedoLast('undo');
+});
+hotkeys('ctrl+y, ctrl+shift+z, command+shift+z', event => {
+  event.preventDefault();
+  undoRedoLast('redo');
+});
+
 hotkeys('n', (event) => {
   event.preventDefault();
   const cardId = getSelectedCardId();
@@ -326,6 +376,65 @@ hotkeys('n', (event) => {
     // Find the button and click it
     $(`#js-list-${card.listId} .list-body .minicards .open-minicard-composer`).click();
   }
+});
+
+// #6750: `d` (and Shift+D, so a capital D works too) opens the Due date
+// editor of the OPENED card - the same popup as clicking the due date `+` or
+// badge in the card details, by clicking that very control. Like every
+// shortcut here it runs only through hotkeys.filter above: nothing when the
+// user turned keyboard shortcuts off, nothing while typing in an input,
+// textarea or contentEditable. It needs Utils.canModifyCard for the card; the
+// card details render the control only for a user who may edit the due date,
+// so without one nothing happens.
+function clickDueDateControl(cardId) {
+  const card = ReactiveCache.getCard(cardId);
+  if (!card) return false;
+  const control = findDueDateControl(document, {
+    cardId,
+    canModifyCard: Utils.canModifyCard(card),
+    dataOf: element => Blaze.getData(element),
+  });
+  if (!control) return false;
+  control.click();
+  return true;
+}
+// #6840: the card's details render a moment AFTER the route names it - a few
+// hundred milliseconds on a slow server. Pressing `d` right after opening a
+// card found no control yet and did nothing, while the previous card's details
+// were still on screen. So the click waits until THIS card's control is there,
+// both for an opened card and for one `d` opens itself (#6755), and clicks it
+// once; it gives up quietly after 3 seconds (no due dates on this board).
+function clickDueDateControlWhenRendered(cardId) {
+  const started = Date.now();
+  const tryClick = () => {
+    if (Utils.getCurrentCardId() !== cardId) return;
+    if (clickDueDateControl(cardId)) return;
+    if (Date.now() - started < 3000) setTimeout(tryClick, 50);
+  };
+  tryClick();
+}
+export function openDueDateEditorOfOpenedCard() {
+  if (Meteor.userId() === null) return false;
+  const cardId = Utils.getCurrentCardId();
+  if (cardId) {
+    const card = ReactiveCache.getCard(cardId);
+    if (!card || !Utils.canModifyCard(card)) return false;
+    clickDueDateControlWhenRendered(cardId);
+    return true;
+  }
+  // #6755: with no card opened, `d` on a hovered or selected minicard - the
+  // card every other card shortcut here acts on - opens that card and then
+  // its Due date editor, rather than doing nothing until the card is opened.
+  const minicardId = Session.get('selectedCard') || getHoveredCardId();
+  const minicard = minicardId && ReactiveCache.getCard(minicardId);
+  if (!minicard || !Utils.canModifyCard(minicard)) return false;
+  Utils.goCardId(minicardId);
+  setTimeout(() => clickDueDateControlWhenRendered(minicardId), 0);
+  return true;
+}
+hotkeys('d, shift+d', (event) => {
+  event.preventDefault();
+  openDueDateEditorOfOpenedCard();
 });
 
 Template.keyboardShortcuts.helpers({
@@ -377,6 +486,10 @@ Template.keyboardShortcuts.helpers({
     {
       keys: ['m'],
       action: 'shortcut-assign-self',
+    },
+    {
+      keys: ['d'],
+      action: 'shortcut-edit-due-date',
     },
     {
       keys: ['c', '\xf7', '-'],

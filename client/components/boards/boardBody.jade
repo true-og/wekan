@@ -12,6 +12,8 @@ template(name="board")
       //-- XXX We need a better error message in case the board has been archived
       +message(label="board-not-found")
       //-- | {{goHome}}
+  else if boardLoadError
+    +message(label="board-load-failed")
   else
     +spinner
 
@@ -21,16 +23,21 @@ template(name="boardBody")
   else
     // Debug information (remove in production)
     if debugBoardState
-      .debug-info(style="position: fixed; top: 0; left: 0; background: rgba(0,0,0,0.8); color: white; padding: 10px; z-index: 9999; font-size: 12px;")
+      .debug-info(style="position: fixed; top: 0; inset-inline-start: 0; background: rgba(0,0,0,0.8); color: white; padding: 10px; z-index: 9999; font-size: 12px;")
         | {{_ 'board'}}: {{currentBoard.title}} | {{_ 'view'}}: {{boardView}} | {{_ 'has-swimlanes'}}: {{hasSwimlanes}} | {{_ 'swimlanes'}}: {{currentBoard.swimlanes.length}}
-    .board-wrapper(class=currentBoard.colorClass class="{{#if isMiniScreen}}mobile-view{{/if}}")
-      .board-canvas.js-swimlanes(
-        class="{{#if hasSwimlanes}}dragscroll{{/if}}"
+    .board-wrapper(class="{{themeColorClass}}" class="{{#if isMiniScreen}}mobile-view{{/if}}")
+      //- #1566: the board's own announcement.
+      +boardAnnouncement
+      .board-canvas.js-swimlanes.dragscroll(
         class="{{#if Sidebar.isOpen}}is-sibling-sidebar-open{{/if}}"
         class="{{#if MultiSelection.isActive}}is-multiselection-active{{/if}}"
         class="{{#if draggingActive}}is-dragging-active{{/if}}"
         class="{{#unless isVerticalScrollbars}}no-scrollbars{{/unless}}"
-        class="{{#if isMiniScreen}}mobile-view{{/if}}")
+        class="{{#if isMiniScreen}}mobile-view{{/if}}"
+        class="{{#if currentBoard.hasSharedListHeaders}}shared-list-headers{{/if}}")
+        //- #6732: drawn when THIS user shows My or Board Dependencies.
+        if showAnyDependencies
+          +dependencyOverlay
         if showOverlay
           .board-overlay
         if currentBoard.isTemplatesBoard
@@ -47,8 +54,74 @@ template(name="boardBody")
           +listsGroup(currentBoard)
         else if isViewCalendar
           +calendarView
+        else if isViewCalendarMode
+          +calendarModeView
+        else if isViewMultiboardCalendar
+          +multiboardCalendarView
         else if isViewGantt
           +ganttView
+        else if isViewGanttFrappe
+          +frappeGanttView
+        else if isViewGanttDhtmlx
+          +dhtmlxGanttView
+        else if isViewTable
+          +tableView
+        else if isViewStats
+          +statsView
+        else if isViewTime
+          +timeView
+        else if isViewTimeline
+          +timelineView
+        else if isViewGroupByAssignee
+          +groupByAssigneeView
+        else if isViewRoadmap
+          +roadmapView
+        else if isViewDashboard
+          +dashboardView
+        else if isViewBigboard
+          +bigboardView
+        else if isViewBurndown
+          +burndownView
+        else if isViewBurnup
+          +burnupView
+        else if isViewCumulativeFlow
+          +cumulativeFlowView
+        else if isViewControlChart
+          +controlChartView
+        else if isViewCycleTime
+          +cycleTimeView
+        else if isViewFlowEfficiency
+          +flowEfficiencyView
+        else if isViewLeadTime
+          +leadTimeView
+        else if isViewThroughputHistogram
+          +throughputHistogramView
+        else if isViewWipRun
+          +wipRunView
+        else if isViewScrum
+          +scrumView
+        else if isViewAgingWip
+          +agingWipView
+        else if isViewBlockerAnalysis
+          +blockerAnalysisView
+        else if isViewMonteCarlo
+          +monteCarloView
+        else if isViewProcessBehavior
+          +processBehaviorView
+        else if isViewSizeCycleTime
+          +sizeCycleTimeView
+        else if isViewPulse
+          +pulseView
+        else if isViewMap
+          +mapView
+        else if isViewEmail
+          +emailView
+        else if isViewChat
+          +chatView
+        else if isViewVersionControl
+          +versionControlView
+        else if isViewColumnSets
+          +columnSetsView
         else
           // Default view - show swimlanes if they exist, otherwise show lists
           if hasSwimlanes

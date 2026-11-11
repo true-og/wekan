@@ -1,6 +1,25 @@
+import { formatDateForDisplay } from '/client/lib/dateDisplay';
 import { Meteor } from 'meteor/meteor';
+import { Session } from 'meteor/session';
+import { Tracker } from 'meteor/tracker';
+import { FlowRouter } from 'meteor/ostrio:flow-router-extra';
+// The per-pane URLs of the Admin Panel. docs/Features/Admin-Panel/Admin-Panel-URLs.md
+import { adminPath } from '/models/lib/adminUrls';
+import { leftMenuData, paneTitle } from '/models/lib/leftMenu';
+const {
+  SANDSTORM_HIDDEN_ATTACHMENTS_PANES,
+  isSandstormSettings,
+  sandstormAllowsPane,
+  withoutSandstormPanes,
+} = require('/models/lib/sandstormSlim');
 import AttachmentBulkMoveStatus from '/models/attachmentBulkMoveStatus';
 import { TAPi18n } from '/imports/i18n';
+import { migrationProgressManager } from '/client/components/settings/migrationProgress';
+import { ReactiveCache } from '/imports/reactiveCache';
+// Multitenancy option D: the per-tenant Global Admin rules, shared with the server
+// (docs/Design/Multitenancy/Multitenancy.md).
+import * as tenantAdmin from '/models/lib/tenantAdmin';
+const { AUTH_CONFIG_SECTIONS } = require('/models/lib/authConfigCatalog');
 
 // DOM field ids per cloud provider, used to read the admin form on save/test.
 const CLOUD_FIELD_IDS = {
@@ -13,6 +32,8 @@ const CLOUD_FIELD_IDS = {
     accessKeyId: '#s3-access-key',
     secretAccessKey: '#s3-secret-key',
     forcePathStyle: '#s3-force-path-style',
+    serverSideEncryption: '#s3-sse',
+    sseKmsKeyId: '#s3-sse-kms-key-id',
   },
   azure: {
     enabled: '#azure-enabled',
@@ -30,9 +51,18 @@ const CLOUD_FIELD_IDS = {
     keyFilename: '#gcs-key-filename',
     credentials: '#gcs-credentials',
   },
+  // #687: WebDAV - Nextcloud Files, ownCloud, any WebDAV server.
+  webdav: {
+    enabled: '#webdav-enabled',
+    read: '#webdav-read',
+    endpoint: '#webdav-endpoint',
+    username: '#webdav-username',
+    password: '#webdav-password',
+    bucket: '#webdav-folder',
+  },
 };
 
-const CLOUD_PROVIDERS = ['s3', 'azure', 'gcs'];
+const CLOUD_PROVIDERS = ['s3', 'azure', 'gcs', 'webdav'];
 
 function gatherCloudConfig(tpl, provider) {
   const ids = CLOUD_FIELD_IDS[provider] || {};
@@ -40,8 +70,14 @@ function gatherCloudConfig(tpl, provider) {
   Object.keys(ids).forEach(field => {
     const el = tpl.$(ids[field]);
     if (!el || !el.length) return;
-    if (el.attr('type') === 'checkbox') {
-      cfg[field] = el.prop('checked');
+    // WeKan's checkbox is a `.materialCheckBox` div carrying `is-checked`, not a
+    // native input: the Admin Panel's native ones rendered as a grey rotated
+    // rectangle instead of the green tick, because styling a native checkbox into
+    // a tick depends on the browser honouring `appearance: none` on it, and one
+    // pane's `checked="{{value}}"` was a STRING - `checked="false"` is checked in
+    // HTML, so those boxes could not be unchecked at all (#6465).
+    if (el.hasClass('materialCheckBox')) {
+      cfg[field] = el.hasClass('is-checked');
     } else {
       // Trim so stray whitespace/newlines from copy-paste (e.g. an account name
       // or endpoint) do not produce an invalid URL in the storage adapter.
@@ -82,6 +118,7 @@ const DEFAULT_LIMIT_SETTINGS = {
   attachmentsDownloadMaxBytes: 0,
   apiUploadMaxBytes: 0,
   apiDownloadMaxBytes: 0,
+  avatarsUploadBlocked: false,
 };
 
 function toNonNegativeInteger(value, fallback = 0) {
@@ -114,6 +151,7 @@ function normalizeLimitSettings(settingsDoc) {
       ? toNonNegativeInteger(fromDoc.apiDownloadMaxBytes, DEFAULT_LIMIT_SETTINGS.apiDownloadMaxBytes)
       : DEFAULT_LIMIT_SETTINGS.apiDownloadMaxBytes,
     attachmentsUploadBlocked: fromDoc.attachmentsUploadBlocked === true,
+    avatarsUploadBlocked: fromDoc.avatarsUploadBlocked === true,
     attachmentsDownloadBlocked: fromDoc.attachmentsDownloadBlocked === true,
     apiUploadBlocked: fromDoc.apiUploadBlocked === true,
     apiDownloadBlocked: fromDoc.apiDownloadBlocked === true,
@@ -190,7 +228,8 @@ function updateStorageConfigField(tpl, storageName, field, value, checkboxEl) {
   Meteor.call('updateAttachmentStorageSettings', nextSettings, (error) => {
     if (error) {
       alert(`${TAPi18n.__('attachment-transfer-limits-save-failed')}: ${error.reason || error.message}`);
-      if (checkboxEl) checkboxEl.checked = !value;
+      // Put the box back: the setting was not saved, so it must not look saved.
+      if (checkboxEl && checkboxEl.toggleClass) checkboxEl.toggleClass('is-checked');
       return;
     }
     refreshAttachmentStorageSettings(tpl);
@@ -229,9 +268,31 @@ function refreshAttachmentStorageSettings(tpl) {
 }
 
 Template.attachments.onCreated(function () {
-  this.activeSection = new ReactiveVar('move');
+  // Backup is the FIRST entry of the menu and the pane that opens with the page -
+  // the same rule Admin Panel / Settings follows for Version. It is what an admin
+  // comes to this page for most often, and the one action here that has to be
+  // reachable in a hurry.
+  this.activeSection = new ReactiveVar('backup');
+  // The pane the URL asks for. The route resolved it, so it is always a real
+  // pane id; a bare /attachments opens Backup.
+  this.autorun(() => {
+    const paneId = Session.get('attachmentsOpenPane');
+    // A pane the Sandstorm menu leaves out does not open by URL either
+    // (models/lib/sandstormSlim.js).
+    if (paneId && sandstormAllowsPane(paneId, SANDSTORM_HIDDEN_ATTACHMENTS_PANES,
+      isSandstormSettings(Meteor.settings))) this.activeSection.set(paneId);
+  });
   this.storageSettingsSubscription = Meteor.subscribe('attachmentStorageSettings');
   this.attachmentStorageSettings = new ReactiveVar(null);
+  // #6473: the real storage paths only exist on the SERVER (WRITABLE_PATH is a
+  // server environment variable — process.env in the browser never has it, so
+  // computing the path client-side always showed the misleading "/data").
+  this.storagePaths = new ReactiveVar(null);
+  Meteor.call('getAttachmentStoragePaths', (err, paths) => {
+    if (!err && paths) {
+      this.storagePaths.set(paths);
+    }
+  });
   this.attachmentLimitUnits = new ReactiveVar({
     attachmentsUploadMaxBytes: 'mb',
     attachmentsDownloadMaxBytes: 'mb',
@@ -265,6 +326,71 @@ Template.attachments.onCreated(function () {
   this.cloudTestResults = new ReactiveVar({});
   this.cloudTestErrors = new ReactiveVar({});
   this.loading = new ReactiveVar(false);
+  this.migrateStatus = new ReactiveVar(null);
+  this.migratePoll = null;
+  this.backupStatus = new ReactiveVar(null);
+  this.backupList = new ReactiveVar(null);
+  this.backupSchedule = new ReactiveVar(null);
+  this.selectedBackup = new ReactiveVar('');
+  this.backupPoll = null;
+  // Admin Panel / Attachments / Continuous backup: loaded when the pane opens,
+  // its status polled while it stays open.
+  this.cbConfig = new ReactiveVar(null);
+  this.cbStatus = new ReactiveVar(null);
+  this.cbPoints = new ReactiveVar(null);
+  this.cbMessage = new ReactiveVar(null);
+  this.cbEngine = new ReactiveVar('auto');
+  this.autorun(() => {
+    if (this.activeSection.get() !== 'continuous-backup') { Meteor.clearInterval(this.cbPoll); this.cbPoll = null; return; }
+    Tracker.nonreactive(() => loadContinuousBackup(this));
+  });
+  // Multitenancy option D (D.8): the scopes this admin may back up. The server
+  // answers with the whole instance's Organizations for a site admin and with only
+  // their own for a per-tenant Global Admin - and refuses any other scope when the
+  // backup is actually started, so this list is a convenience, not the rule.
+  this.backupScopes = new ReactiveVar([]);
+  this.backupScope = new ReactiveVar('');
+  Meteor.call('myAdminOrgs', (err, orgs) => {
+    if (err || !Array.isArray(orgs)) return;
+    this.backupScopes.set(orgs);
+    // A per-tenant admin has no "whole instance" option, so the first Organization
+    // they administer is what the pane starts on.
+    if (!tenantAdmin.isSiteAdmin(ReactiveCache.getCurrentUser()) && orgs.length) {
+      this.backupScope.set(orgs[0]._id);
+    }
+  });
+  // The schedule is instance-wide, so only the site admin has one to read.
+  // Which day the weekly schedule runs on. It is state rather than a DOM value now
+  // that it is a row of buttons; seeded from the saved schedule when it arrives,
+  // unless the admin has already picked one.
+  this.backupDayOfWeek = new ReactiveVar('Sunday');
+  this.backupDayOfMonth = new ReactiveVar(1);
+  this.backupDayTouched = false;
+  Meteor.call('getBackupSchedule', (err, s) => {
+    if (!err && s) {
+      this.backupSchedule.set(s);
+      if (this.backupDayTouched) return;
+      if (s.dayOfWeek) this.backupDayOfWeek.set(s.dayOfWeek);
+      if (s.dayOfMonth) this.backupDayOfMonth.set(Number(s.dayOfMonth));
+    }
+  });
+  // Backup is the pane the page opens on, so ask once whether one is running -
+  // otherwise landing here during a backup showed an idle-looking pane until you
+  // pressed something. pollBackupStatus only keeps polling while it IS running.
+  pollBackupStatus(this);
+
+  // Sandstorm pane state - commented out with the pane (see attachmentsMenu).
+  // No section can open it any more, so nothing here would ever run.
+  // this.sandstormStatus = new ReactiveVar(null);
+  // this.sandstormDeleteResult = new ReactiveVar(null);
+  // this.sandstormDeleteError = new ReactiveVar('');
+  // this.autorun(() => {
+  //   if (this.activeSection.get() === 'sandstorm') {
+  //     Meteor.call('sandstormMigrationStatus', (err, res) => {
+  //       if (!err && res) this.sandstormStatus.set(res);
+  //     });
+  //   }
+  // });
 
   this.autorun(() => {
     const ready = this.storageSettingsSubscription.ready();
@@ -277,9 +403,256 @@ Template.attachments.onCreated(function () {
   });
 });
 
+Template.attachments.onDestroyed(function () {
+  Meteor.clearInterval(this.cbPoll);
+  if (this.migratePoll) {
+    Meteor.clearTimeout(this.migratePoll);
+    this.migratePoll = null;
+  }
+  if (this.backupPoll) {
+    Meteor.clearTimeout(this.backupPoll);
+    this.backupPoll = null;
+  }
+});
+
+// Text-data database migration (MongoDB <-> FerretDB v1 SQLite) helpers.
+
+// Mirror the polled DB-migration status into the shared blue, Product-name-branded
+// migration-progress dashboard, so the same overlay shows for an Admin Panel
+// database migration as for a board-open repair. The migration has two phases the
+// server reports: `repairing` (board data-repairs on the live DB) then `migrating`
+// (copying collections); map them to the two dashboard steps.
+function driveMigrationDashboard(tpl, status) {
+  if (!status) return;
+  const done = status.phase === 'completed' || status.success === true;
+  const failed = status.phase === 'error' || status.success === false;
+  if (done) {
+    if (tpl._migrationDashboard) { migrationProgressManager.completeMigration(); tpl._migrationDashboard = false; }
+    return;
+  }
+  if (failed) {
+    if (tpl._migrationDashboard) {
+      migrationProgressManager.failMigration({ message: status.error || 'Database migration failed' });
+      tpl._migrationDashboard = false;
+    }
+    return;
+  }
+  if (!tpl._migrationDashboard) {
+    migrationProgressManager.startMigration();
+    tpl._migrationDashboard = true;
+  }
+  if (status.phase === 'repairing') {
+    const bt = status.boardsTotal || 0;
+    const bd = status.boardsDone || 0;
+    const stepPct = bt ? Math.round((bd / bt) * 100) : 0;
+    migrationProgressManager.updateProgress({
+      overallProgress: Math.round(stepPct * 0.4), // repair is the first ~40%
+      currentStep: 1, totalSteps: 2,
+      stepName: 'repair_board_data', stepProgress: stepPct,
+      stepStatus: `${bd}/${bt} boards`,
+      stepDetails: status.repaired || undefined,
+    });
+  } else {
+    const ct = status.collectionsTotal || 0;
+    const cd = status.collectionsDone || 0;
+    const stepPct = ct ? Math.round((cd / ct) * 100) : 0;
+    migrationProgressManager.updateProgress({
+      overallProgress: 40 + Math.round(stepPct * 0.6), // copy is the last ~60%
+      currentStep: 2, totalSteps: 2,
+      stepName: 'copy_collections', stepProgress: stepPct,
+      stepStatus: status.collection || status.phase || 'migrating',
+      stepDetails: { collection: status.collection, done: status.collDone, total: status.collTotal },
+    });
+  }
+}
+
+function pollMigrateStatus(tpl) {
+  Meteor.call('migrateTextDatabaseStatus', (err, status) => {
+    if (err || !status) return;
+    tpl.migrateStatus.set(status);
+    driveMigrationDashboard(tpl, status);
+    if (status.running) {
+      tpl.migratePoll = Meteor.setTimeout(() => pollMigrateStatus(tpl), 2000);
+    }
+  });
+}
+
+function startDbMigration(tpl, direction) {
+  const which = direction === 'toFerretDB' ? 'FerretDB v1 (SQLite)' : 'MongoDB';
+  // eslint-disable-next-line no-alert
+  if (!window.confirm(TAPi18n.__('database-migration-confirm', { db: which }))) {
+    return;
+  }
+  tpl.migrateStatus.set({ running: true, phase: 'starting', direction });
+  migrationProgressManager.startMigration();
+  tpl._migrationDashboard = true;
+  Meteor.call('migrateTextDatabase', direction, error => {
+    if (error) {
+      tpl.migrateStatus.set({ phase: 'error', error: error.reason || error.message, success: false });
+      migrationProgressManager.failMigration({ message: error.reason || error.message });
+      tpl._migrationDashboard = false;
+    } else {
+      pollMigrateStatus(tpl);
+    }
+  });
+}
+
+function loadContinuousBackup(tpl) {
+  Meteor.call('continuousBackup.getSettings', (error, config) => {
+    if (error) { tpl.cbMessage.set({ error: error.reason || error.message }); return; }
+    tpl.cbConfig.set(config);
+    tpl.cbEngine.set(config.settings.engine);
+  });
+  const poll = () => Meteor.call('continuousBackup.status', (error, status) => { if (!error) tpl.cbStatus.set(status); });
+  poll();
+  Meteor.clearInterval(tpl.cbPoll);
+  tpl.cbPoll = Meteor.setInterval(poll, 5000);
+}
+// The form, as the settings the server validates again.
+function continuousBackupForm(tpl) {
+  const checked = name => tpl.$(`.js-cb-${name}`).hasClass('is-checked');
+  const number = name => Number(tpl.$(`.js-cb-${name}`).val());
+  return {
+    enabled: checked('enabled'), target: String(tpl.$('.js-cb-target').val() || '').trim(),
+    database: checked('database'), attachments: checked('attachments'), avatars: checked('avatars'), logs: checked('logs'),
+    engine: tpl.$('.js-cb-engine').val() || 'auto',
+    sqliteIntervalSeconds: number('sqliteIntervalSeconds'), fileScanSeconds: number('fileScanSeconds'),
+    baseEveryHours: number('baseEveryHours'), keepDays: number('keepDays'),
+    litestreamBinary: String(tpl.$('.js-cb-litestreamBinary').val() || '').trim(),
+    litestreamReplicaUrl: String(tpl.$('.js-cb-litestreamReplicaUrl').val() || '').trim(),
+    encrypt: checked('encrypt'), encryptionKeyFile: String(tpl.$('.js-cb-encryptionKeyFile').val() || '').trim(),
+    upload: tpl.$('.js-cb-upload').val() || 'none', uploadPrefix: String(tpl.$('.js-cb-uploadPrefix').val() || '').trim(),
+  };
+}
+// A datetime-local value as milliseconds, in the browser's own time zone.
+const localMillis = value => (value ? new Date(value).getTime() : NaN);
+const localInputValue = millis => {
+  const date = new Date(millis - new Date(millis).getTimezoneOffset() * 60000);
+  return date.toISOString().slice(0, 16);
+};
+
+function pollBackupStatus(tpl) {
+  Meteor.call('backupStatus', (err, status) => {
+    if (err || !status) return;
+    tpl.backupStatus.set(status);
+    if (status.running) {
+      tpl._watchedBackupRun = true;
+      tpl.backupPoll = Meteor.setTimeout(() => pollBackupStatus(tpl), 2000);
+    } else if (tpl._watchedBackupRun) {
+      // A run this pane was watching just ended: the history (backupRunsStatus.js)
+      // shows its recorded result.
+      tpl._watchedBackupRun = false;
+      Session.set('backupHistoryChanged', Date.now());
+    }
+  });
+}
+
+// Admin Panel / Attachments / Backup, weekly schedule: the day is picked from seven
+// buttons. `day` is what is STORED and what the cron text is built from - synced-cron
+// parses an English schedule sentence - and `labelKey` is what the admin reads, in
+// their own language. Sunday first, the way the schedule text has always defaulted.
+const BACKUP_DAYS = [
+  { day: 'Sunday', labelKey: 'sunday' },
+  { day: 'Monday', labelKey: 'monday' },
+  { day: 'Tuesday', labelKey: 'tuesday' },
+  { day: 'Wednesday', labelKey: 'wednesday' },
+  { day: 'Thursday', labelKey: 'thursday' },
+  { day: 'Friday', labelKey: 'friday' },
+  { day: 'Saturday', labelKey: 'saturday' },
+];
+
+// The dates a monthly backup may run on. 1-28 only: a schedule on the 29th, 30th or
+// 31st would skip February, or a whole quarter of the year.
+const BACKUP_MONTH_DAYS = Array.from({ length: 28 }, (_, i) => i + 1);
+
+// The Attachments side menu, as data (docs/Features/All-Boards/Left-Menu.md).
+// emoji:true reproduces the empty span.emoji-icon this page always rendered.
+function attachmentsMenu(user) {
+  let items = [
+    // Backup first: it is what an admin comes to this page for most often, and it
+    // is the one action here that has to be reachable in a hurry.
+    { id: 'backup', icon: 'fa-archive', labelKey: 'backup', emoji: true },
+    // Beside Backup: archives at intervals there, every change as it happens
+    // here (docs/Backup/Continuous-Backup.md). Site administrators only - the
+    // tenant filter below keeps Backup alone for an Organization administrator.
+    { id: 'continuous-backup', icon: 'fa-refresh', labelKey: 'continuous-backup', emoji: true },
+    { id: 'move', icon: 'fa-arrow-right', labelKey: 'attachment-move', emoji: true },
+    { id: 'default-save-storage', icon: 'fa-save', labelKey: 'default-save-storage', emoji: true },
+    { id: 'limits', icon: 'fa-sliders', labelKey: 'attachment-limits', emoji: true },
+    // Delete old card attachments, purge deleted ones (#6789). Overrides the
+    // ATTACHMENTS_RETENTION_* environment variables, field by field.
+    { id: 'retention', icon: 'fa-calendar-times-o', labelKey: 'attachment-retention', emoji: true },
+    { id: 'gridfs', icon: 'fa-database', labelKey: 'mongodb-gridfs-storage', emoji: true },
+    { id: 'filesystem', icon: 'fa-folder-open', labelKey: 'filesystem-storage', emoji: true },
+    { id: 's3', icon: 'fa-cloud', labelKey: 's3-minio-storage', emoji: true },
+    { id: 'azure', icon: 'fa-cloud', labelKey: 'azure-blob-storage', emoji: true },
+    { id: 'gcs', icon: 'fa-cloud', labelKey: 'gcs-storage', emoji: true },
+    { id: 'webdav', icon: 'fa-cloud', labelKey: 'webdav-storage', emoji: true },
+    { id: 'database-migration', icon: 'fa-exchange', labelKey: 'database-migration', emoji: true },
+    // Sandstorm - COMMENTED OUT ON PURPOSE, with its pane in attachments.jade and
+    // its helpers, state and handler below. It only had content inside a grain: the
+    // MongoDB 3 -> FerretDB migration report and a button that DELETED the raw
+    // MongoDB 3 files. Compacting the MongoDB database frees that space as well, so
+    // deleting raw database files is not something this page needs to offer.
+    // { id: 'sandstorm', icon: 'fa-hdd-o', label: 'Sandstorm', emoji: true },
+  ];
+  // Sandstorm: a grain has one database, FerretDB on SQLite, and nothing to
+  // migrate it to (models/lib/sandstormSlim.js,
+  // docs/Platforms/FOSS/Container/Sandstorm/Smaller-wekan-spk.md).
+  items = withoutSandstormPanes(items, SANDSTORM_HIDDEN_ATTACHMENTS_PANES,
+    isSandstormSettings(Meteor.settings));
+  // Multitenancy option D (docs/Design/Multitenancy/Multitenancy.md, D.7/D.8): a
+  // per-tenant Global Admin gets Backup and nothing else - the storages, their
+  // statistics and the database migration are about the instance, not about one
+  // tenant. Same shared rule module the server asks again.
+  if (user !== undefined && !tenantAdmin.isSiteAdmin(user)) {
+    return tenantAdmin.tenantAdminAttachmentsMenu(items, user);
+  }
+  return items;
+}
+
 Template.attachments.helpers({
+  backupSelected(field) {
+    const schedule = Template.instance().backupSchedule.get();
+    return !schedule || schedule[field] !== false;
+  },
+  backupStorageSelected(storage) {
+    return (Template.instance().backupSchedule.get()?.storage || 'filesystem') === storage;
+  },
+
+  menuItems() {
+    return leftMenuData(attachmentsMenu(ReactiveCache.getCurrentUser()),
+      Template.instance().activeSection.get(), 'js-attachments-menu');
+  },
+  // The heading above the pane: the open menu entry's own label
+  // (docs/Features/All-Boards/Left-Menu.md).
+  paneTitleData() {
+    return paneTitle(attachmentsMenu(ReactiveCache.getCurrentUser()),
+      Template.instance().activeSection.get());
+  },
   loading() {
     return Template.instance().loading;
+  },
+  backupOptionsData() {
+    return {
+      section: 'backup',
+      fields: AUTH_CONFIG_SECTIONS.backup.fields,
+      loadMethod: 'getAuthConfigSources',
+      saveMethod: 'saveAuthConfigSettings',
+    };
+  },
+  isRetentionActive() {
+    return Template.instance().activeSection.get() === 'retention';
+  },
+  // The shared env-override form (authProviderSettings), on the catalog's
+  // attachmentRetention section.
+  retentionSettingsData() {
+    return {
+      section: 'attachmentRetention',
+      fields: AUTH_CONFIG_SECTIONS.attachmentRetention.fields,
+      loadMethod: 'getAuthConfigSources',
+      saveMethod: 'saveAuthConfigSettings',
+    };
   },
   isLimitsActive() {
     return Template.instance().activeSection.get() === 'limits';
@@ -296,6 +669,167 @@ Template.attachments.helpers({
   isGcsActive() {
     return Template.instance().activeSection.get() === 'gcs';
   },
+  isWebdavActive() {
+    return Template.instance().activeSection.get() === 'webdav';
+  },
+  isDatabaseMigrationActive() {
+    return Template.instance().activeSection.get() === 'database-migration';
+  },
+  migrateStatus() {
+    return Template.instance().migrateStatus.get();
+  },
+  migrateRunning() {
+    const s = Template.instance().migrateStatus.get();
+    return !!(s && s.running);
+  },
+  migrateSuccess() {
+    const s = Template.instance().migrateStatus.get();
+    return !!(s && s.success === true);
+  },
+  isBackupActive() {
+    return Template.instance().activeSection.get() === 'backup';
+  },
+  isContinuousBackupActive() {
+    return Template.instance().activeSection.get() === 'continuous-backup';
+  },
+  cbSettings() {
+    return Template.instance().cbConfig.get()?.settings;
+  },
+  cbChecked(field) {
+    return !!Template.instance().cbConfig.get()?.settings?.[field];
+  },
+  cbEngineSelected(engine) {
+    return Template.instance().cbEngine.get() === engine;
+  },
+  cbUploadSelected(upload) {
+    return (Template.instance().cbConfig.get()?.settings?.upload || 'none') === upload;
+  },
+  cbLitestream() {
+    return Template.instance().cbEngine.get() === 'litestream';
+  },
+  // Which engine would run with the saved choice, or why none can.
+  cbChoice() {
+    return Template.instance().cbConfig.get()?.choice;
+  },
+  cbReasons() {
+    const reasons = Template.instance().cbConfig.get()?.choice?.reasons || {};
+    return Object.entries(reasons).filter(([, reason]) => reason).map(([engine, reason]) => ({ engine, reason }));
+  },
+  cbStatus() {
+    return Template.instance().cbStatus.get();
+  },
+  cbLastChange() {
+    const engines = Template.instance().cbStatus.get()?.engines || {};
+    const times = Object.values(engines).map(engine => engine.lastChangeAt).filter(Boolean);
+    return times.length ? new Date(Math.max(...times)).toLocaleString() : '-';
+  },
+  cbPoints() {
+    return (Template.instance().cbPoints.get() || []).map(point => ({ ...point,
+      fromText: new Date(point.from).toLocaleString(), untilText: new Date(point.until).toLocaleString(),
+      untilInput: localInputValue(point.until) }));
+  },
+  cbMessage() {
+    return Template.instance().cbMessage.get();
+  },
+  // Sandstorm pane helpers - commented out with the pane (see attachmentsMenu).
+  // isSandstormActive() {
+  //   return Template.instance().activeSection.get() === 'sandstorm';
+  // },
+  // sandstormStatus() {
+  //   return Template.instance().sandstormStatus.get();
+  // },
+  // rawMongoSize() {
+  //   const s = Template.instance().sandstormStatus.get();
+  //   return s ? filesize(s.rawMongoBytes || 0) : '';
+  // },
+  // ferretSize() {
+  //   const s = Template.instance().sandstormStatus.get();
+  //   return s ? filesize(s.ferretBytes || 0) : '';
+  // },
+  // attachmentsSize() {
+  //   const s = Template.instance().sandstormStatus.get();
+  //   return s ? filesize(s.attachmentsBytes || 0) : '';
+  // },
+  // avatarsSize() {
+  //   const s = Template.instance().sandstormStatus.get();
+  //   return s ? filesize(s.avatarsBytes || 0) : '';
+  // },
+  // sandstormDeleteDisabled() {
+  //   const s = Template.instance().sandstormStatus.get();
+  //   return !(s && s.migrationSuccess && s.rawMongoExists);
+  // },
+  // sandstormDeleteResult() {
+  //   return Template.instance().sandstormDeleteResult.get();
+  // },
+  // sandstormDeleteFreed() {
+  //   const r = Template.instance().sandstormDeleteResult.get();
+  //   return r ? filesize(r.freedBytes || 0) : '';
+  // },
+  // sandstormDeleteError() {
+  //   return Template.instance().sandstormDeleteError.get();
+  // },
+  backupStatus() {
+    return Template.instance().backupStatus.get();
+  },
+  backupRunning() {
+    const s = Template.instance().backupStatus.get();
+    return !!(s && s.running);
+  },
+  backupSuccess() {
+    const s = Template.instance().backupStatus.get();
+    return !!(s && s.success === true && s.phase === 'completed');
+  },
+  backupList() {
+    return Template.instance().backupList.get();
+  },
+  // Multitenancy option D (D.8).
+  isSiteAdmin() {
+    return tenantAdmin.isSiteAdmin(ReactiveCache.getCurrentUser());
+  },
+  backupScopes() {
+    return Template.instance().backupScopes.get();
+  },
+  // The scope row is only worth drawing when there is a choice to make: a site
+  // admin with no Organizations at all still backs up the whole instance.
+  showBackupScope() {
+    const tpl = Template.instance();
+    return (tpl.backupScopes.get() || []).length > 0;
+  },
+  // The name to show for an archive's scope in the restore list. An instance
+  // archive contains every tenant, which has to be visible before restoring it.
+  backupScopeName(orgId) {
+    if (!orgId) return TAPi18n.__('backup-scope-instance');
+    const org = (Template.instance().backupScopes.get() || []).find(o => o._id === orgId);
+    return org ? org.orgDisplayName : orgId;
+  },
+  scheduleOff() { const s = Template.instance().backupSchedule.get(); return !s || !s.frequency || s.frequency === 'off'; },
+  scheduleDaily() { const s = Template.instance().backupSchedule.get(); return !!(s && s.frequency === 'daily'); },
+  scheduleWeekly() { const s = Template.instance().backupSchedule.get(); return !!(s && s.frequency === 'weekly'); },
+  scheduleMonthly() { const s = Template.instance().backupSchedule.get(); return !!(s && s.frequency === 'monthly'); },
+  scheduleTime() { const s = Template.instance().backupSchedule.get(); return (s && s.time) || '04:00'; },
+  scheduleDow() { const s = Template.instance().backupSchedule.get(); return (s && s.dayOfWeek) || 'Sunday'; },
+  // The seven days as buttons: the English name is the VALUE (the cron schedule is
+  // written in English - models/lib/backupPaths.js scheduleText), the i18n key is
+  // the label, and the stored day is the one shown as selected.
+  backupDays() {
+    const tpl = Template.instance();
+    const chosen = tpl.backupDayOfWeek.get();
+    return BACKUP_DAYS.map(({ day, labelKey }) => ({
+      day,
+      labelKey,
+      selected: day === chosen,
+    }));
+  },
+  // …and the dates of the month, the same way. Numbers need no translation.
+  backupMonthDays() {
+    const chosen = Template.instance().backupDayOfMonth.get();
+    return BACKUP_MONTH_DAYS.map(day => ({ day, selected: day === chosen }));
+  },
+  scheduleDom() { const s = Template.instance().backupSchedule.get(); return (s && s.dayOfMonth) || 1; },
+  avatarsUploadBlocked() {
+    const settings = Template.instance().attachmentStorageSettings.get();
+    return settings?.limitSettings?.avatarsUploadBlocked === true;
+  },
   defaultStorageOptions() {
     const settings = Template.instance().attachmentStorageSettings.get();
     const selected = settings?.defaultStorage || 'fs';
@@ -308,6 +842,7 @@ Template.attachments.helpers({
     if (sc.s3?.enabled) options.push({ value: 's3', labelKey: 'move-storage-s3' });
     if (sc.azure?.enabled) options.push({ value: 'azure', labelKey: 'move-storage-azure' });
     if (sc.gcs?.enabled) options.push({ value: 'gcs', labelKey: 'move-storage-gcs' });
+    if (sc.webdav?.enabled) options.push({ value: 'webdav', labelKey: 'move-storage-webdav' });
     return options.map(option => ({
       ...option,
       selected: option.value === selected,
@@ -325,18 +860,27 @@ Template.attachments.helpers({
     CLOUD_PROVIDERS.forEach(p => { out[p] = cloudConfigFromSettings(tpl, p).read !== false; });
     return out;
   },
+  // The S3 server-side encryption option that is stored (models/lib/s3Encryption.js).
+  s3SseSelected(mode) {
+    const stored = cloudConfigFromSettings(Template.instance(), 's3').serverSideEncryption || '';
+    return stored === mode ? 'selected' : null;
+  },
   cloudValue() {
     const tpl = Template.instance();
     const s3 = cloudConfigFromSettings(tpl, 's3');
     const azure = cloudConfigFromSettings(tpl, 'azure');
     const gcs = cloudConfigFromSettings(tpl, 'gcs');
+    const webdav = cloudConfigFromSettings(tpl, 'webdav');
     return {
+      webdav: { endpoint: webdav.endpoint || '', username: webdav.username || '', bucket: webdav.bucket || 'wekan' },
       s3: {
         endpoint: s3.endpoint || '',
         region: s3.region || '',
         bucket: s3.bucket || '',
         accessKeyId: s3.accessKeyId || '',
         forcePathStyle: s3.forcePathStyle !== false,
+        serverSideEncryption: s3.serverSideEncryption || '',
+        sseKmsKeyId: s3.sseKmsKeyId || '',
       },
       azure: {
         accountName: azure.accountName || '',
@@ -361,6 +905,7 @@ Template.attachments.helpers({
       s3: { secretAccessKey: ph(s3, 'secretAccessKey') },
       azure: { accountKey: ph(azure, 'accountKey'), connectionString: ph(azure, 'connectionString') },
       gcs: { credentials: ph(gcs, 'credentials') },
+      webdav: { password: ph(cloudConfigFromSettings(tpl, 'webdav'), 'password') },
     };
   },
   cloudTestResult() {
@@ -378,16 +923,20 @@ Template.attachments.helpers({
   isS3Active() {
     return Template.instance().activeSection.get() === 's3';
   },
+  // #6473: these paths come from the getAttachmentStoragePaths server method —
+  // WRITABLE_PATH is a server-side environment variable, so reading
+  // process.env here in the browser always produced the misleading "/data".
   filesystemPath() {
-    return process.env.WRITABLE_PATH || '/data';
+    const paths = Template.instance().storagePaths.get();
+    return paths ? paths.writablePath : '';
   },
   attachmentsPath() {
-    const writablePath = process.env.WRITABLE_PATH || '/data';
-    return `${writablePath}/attachments`;
+    const paths = Template.instance().storagePaths.get();
+    return paths ? paths.attachments : '';
   },
   avatarsPath() {
-    const writablePath = process.env.WRITABLE_PATH || '/data';
-    return `${writablePath}/avatars`;
+    const paths = Template.instance().storagePaths.get();
+    return paths ? paths.avatars : '';
   },
   filesystemEnabled() {
     const tpl = Template.instance();
@@ -554,6 +1103,160 @@ Template.attachments.events({
     }
 
     tpl.activeSection.set(targetID);
+    // ...and into the address bar, so the pane can be linked and bookmarked.
+    // docs/Features/Admin-Panel/Admin-Panel-URLs.md
+    const path = adminPath('attachments', targetID);
+    if (path && FlowRouter.current().path !== path) FlowRouter.go(path);
+  },
+  // Deleting the raw MongoDB 3 files of a grain - commented out with the pane
+  // (see attachmentsMenu). Compacting the database frees the space instead, and
+  // nothing renders the button any more.
+  // 'click .js-sandstorm-delete-raw-mongodb'(event, tpl) {
+  //   event.preventDefault();
+  //   if (!window.confirm(TAPi18n.__('sandstorm-delete-raw-mongodb-confirm'))) {
+  //     return;
+  //   }
+  //   tpl.sandstormDeleteError.set('');
+  //   Meteor.call('sandstormDeleteRawMongo', (error, result) => {
+  //     if (error) {
+  //       tpl.sandstormDeleteError.set(error.reason || error.message);
+  //       return;
+  //     }
+  //     tpl.sandstormDeleteResult.set(result);
+  //     Meteor.call('sandstormMigrationStatus', (err, res) => {
+  //       if (!err && res) tpl.sandstormStatus.set(res);
+  //     });
+  //   });
+  // },
+  'click .js-migrate-to-ferretdb'(event, tpl) {
+    event.preventDefault();
+    startDbMigration(tpl, 'toFerretDB');
+  },
+  'click .js-migrate-to-mongodb'(event, tpl) {
+    event.preventDefault();
+    startDbMigration(tpl, 'toMongoDB');
+  },
+  'click .js-run-backup'(event, tpl) {
+    event.preventDefault();
+    const opts = {
+      attachments: tpl.$('.js-backup-attachments').hasClass('is-checked'),
+      avatars: tpl.$('.js-backup-avatars').hasClass('is-checked'),
+      data: tpl.$('.js-backup-data').hasClass('is-checked'),
+    };
+    const storage = tpl.$('.js-backup-storage').val() || 'filesystem';
+    // Multitenancy option D (D.8): '' is the whole instance; an org id backs up
+    // that Organization only. The server refuses a scope this admin may not have
+    // rather than narrowing it silently.
+    const scopeInput = tpl.$('.js-backup-scope');
+    const orgId = scopeInput.length ? (scopeInput.val() || null) : tpl.backupScope.get() || null;
+    tpl.backupStatus.set({ running: true, phase: 'starting' });
+    Meteor.call('runBackup', opts, storage, orgId || null, error => {
+      if (error) tpl.backupStatus.set({ phase: 'error', error: error.reason || error.message, success: false });
+      else pollBackupStatus(tpl);
+    });
+  },
+  'click .js-backup-dow-btn'(event, tpl) {
+    event.preventDefault();
+    const day = $(event.currentTarget).data('day');
+    if (!day) return;
+    tpl.backupDayTouched = true;
+    tpl.backupDayOfWeek.set(String(day));
+  },
+  'click .js-backup-dom-btn'(event, tpl) {
+    event.preventDefault();
+    const day = Number($(event.currentTarget).data('day'));
+    if (!BACKUP_MONTH_DAYS.includes(day)) return;
+    tpl.backupDayTouched = true;
+    tpl.backupDayOfMonth.set(day);
+  },
+  'click .js-save-backup-schedule'(event, tpl) {
+    event.preventDefault();
+    const schedule = {
+      enabled: (tpl.$('.js-backup-frequency').val() || 'off') !== 'off',
+      frequency: tpl.$('.js-backup-frequency').val() || 'off',
+      time: tpl.$('.js-backup-time').val() || '04:00',
+      dayOfWeek: tpl.backupDayOfWeek.get() || 'Sunday',
+      dayOfMonth: tpl.backupDayOfMonth.get() || 1,
+      attachments: tpl.$('.js-backup-attachments').hasClass('is-checked'),
+      avatars: tpl.$('.js-backup-avatars').hasClass('is-checked'),
+      data: tpl.$('.js-backup-data').hasClass('is-checked'),
+      storage: tpl.$('.js-backup-storage').val() || 'filesystem',
+    };
+    Meteor.call('saveBackupSchedule', schedule, (error, saved) => {
+      if (error) tpl.backupStatus.set({ phase: 'error', error: error.reason || error.message, success: false });
+      else if (saved) tpl.backupSchedule.set(saved);
+    });
+  },
+  'change .js-cb-engine'(event, tpl) {
+    tpl.cbEngine.set(event.currentTarget.value);
+  },
+  'click .js-cb-save'(event, tpl) {
+    event.preventDefault();
+    tpl.cbMessage.set(null);
+    Meteor.call('continuousBackup.saveSettings', continuousBackupForm(tpl), (error, status) => {
+      if (error) { tpl.cbMessage.set({ error: error.reason || error.message }); return; }
+      tpl.cbStatus.set(status);
+      tpl.cbMessage.set({ success: TAPi18n.__('continuous-backup-saved') });
+      loadContinuousBackup(tpl);
+    });
+  },
+  'click .js-cb-points'(event, tpl) {
+    event.preventDefault();
+    Meteor.call('continuousBackup.restorePoints', (error, points) => {
+      if (error) tpl.cbMessage.set({ error: error.reason || error.message });
+      else tpl.cbPoints.set(points || []);
+    });
+  },
+  'click .js-cb-fetch'(event, tpl) {
+    event.preventDefault();
+    tpl.cbMessage.set(null);
+    Meteor.call('continuousBackup.fetchFromCloud', (error, result) => {
+      if (error) tpl.cbMessage.set({ error: error.reason || error.message });
+      else tpl.cbMessage.set({ success: `${TAPi18n.__('continuous-backup-fetched')}: ${result.fetched}` });
+    });
+  },
+  'change .js-cb-point'(event, tpl) {
+    const until = $(event.currentTarget).data('until');
+    if (until) tpl.$('.js-cb-until').val(until);
+  },
+  'click .js-cb-restore'(event, tpl) {
+    event.preventDefault();
+    const generation = tpl.$('.js-cb-point:checked').val();
+    if (!generation) { window.alert(TAPi18n.__('backup-restore-select-first')); return; }
+    const until = localMillis(tpl.$('.js-cb-until').val());
+    const what = tpl.$('.js-cb-what').val();
+    const mode = tpl.$('.js-cb-mode').val();
+    const point = (tpl.cbPoints.get() || []).find(p => p.name === generation);
+    if (!Number.isFinite(until) || !window.confirm(TAPi18n.__('continuous-backup-restore-confirm'))) return;
+    const request = { generation, until, what, ...(what === 'sqlite' ? { database: (point?.sqlite || [])[0] || 'wekan',
+      applyOnRestart: tpl.$('.js-cb-apply').hasClass('is-checked') } : { mode }) };
+    tpl.cbMessage.set(null);
+    Meteor.call('continuousBackup.restore', request, (error, result) => {
+      if (error) tpl.cbMessage.set({ error: error.reason || error.message });
+      else tpl.cbMessage.set({ success: `${TAPi18n.__('continuous-backup-restore-done')}: ${JSON.stringify(result)}` });
+    });
+  },
+  'click .js-list-backups'(event, tpl) {
+    event.preventDefault();
+    Meteor.call('listBackups', (error, list) => {
+      if (error) tpl.backupStatus.set({ phase: 'error', error: error.reason || error.message, success: false });
+      else tpl.backupList.set(list || []);
+    });
+  },
+  'change .js-backup-select'(event, tpl) {
+    tpl.selectedBackup.set($(event.currentTarget).val());
+  },
+  'click .js-restore-backup'(event, tpl) {
+    event.preventDefault();
+    const zipPath = tpl.selectedBackup.get();
+    if (!zipPath) { window.alert(TAPi18n.__('backup-restore-select-first')); return; }
+    const mode = tpl.$('.js-restore-mode').val() || 'add-missing';
+    if (!window.confirm(TAPi18n.__('backup-restore-confirm'))) return;
+    tpl.backupStatus.set({ running: true, phase: 'restore' });
+    Meteor.call('restoreBackup', zipPath, mode, error => {
+      if (error) tpl.backupStatus.set({ phase: 'error', error: error.reason || error.message, success: false });
+      else pollBackupStatus(tpl);
+    });
   },
   'change select.js-attachment-limit-unit'(event, tpl) {
     const fieldName = event.currentTarget.dataset.field;
@@ -631,6 +1334,10 @@ Template.attachments.events({
       nextLimitSettings[field.fieldName] = bytesValue;
     }
 
+    // Avatar uploads are a simple on/off block (no size mode). Default off so
+    // avatars stay enabled unless an admin explicitly blocks them.
+    nextLimitSettings.avatarsUploadBlocked = tpl.$('.js-avatars-upload-blocked').hasClass('is-checked');
+
     const nextSettings = {
       ...currentSettings,
       uploadSettings: {
@@ -653,11 +1360,25 @@ Template.attachments.events({
       refreshAttachmentStorageSettings(tpl);
     });
   },
-  'change input.js-toggle-filesystem-read'(event, tpl) {
-    updateStorageConfigField(tpl, 'filesystem', 'read', event.currentTarget.checked, event.currentTarget);
+  // The plain checkboxes: toggle the box the user clicked. Everything that reads
+  // one (Save, Backup now) asks for `is-checked`, so nothing else has to know.
+  'click a.js-toggle-checkbox'(event) {
+    event.preventDefault();
+    $(event.currentTarget).find('.materialCheckBox').toggleClass('is-checked');
   },
-  'change input.js-toggle-gridfs-read'(event, tpl) {
-    updateStorageConfigField(tpl, 'gridfs', 'read', event.currentTarget.checked, event.currentTarget);
+  // These two save the moment they are toggled, so they toggle first and then
+  // write - and the write puts the box back if the server refuses it.
+  'click a.js-toggle-filesystem-read'(event, tpl) {
+    event.preventDefault();
+    const box = tpl.$('#filesystem-read');
+    box.toggleClass('is-checked');
+    updateStorageConfigField(tpl, 'filesystem', 'read', box.hasClass('is-checked'), box);
+  },
+  'click a.js-toggle-gridfs-read'(event, tpl) {
+    event.preventDefault();
+    const box = tpl.$('#gridfs-read');
+    box.toggleClass('is-checked');
+    updateStorageConfigField(tpl, 'gridfs', 'read', box.hasClass('is-checked'), box);
   },
   'click button.js-save-default-storage'(event, tpl) {
     event.preventDefault();
@@ -823,8 +1544,8 @@ function formatDateTime(value) {
   const date = value instanceof Date ? value : new Date(value);
   if (isNaN(date.getTime())) return '';
   const p = n => String(n).padStart(2, '0');
-  return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())} ` +
-    `${p(date.getHours())}:${p(date.getMinutes())}:${p(date.getSeconds())}`;
+  return formatDateForDisplay(date, true, () => `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())} ` +
+    `${p(date.getHours())}:${p(date.getMinutes())}:${p(date.getSeconds())}`);
 }
 
 Template.moveAttachments.helpers({
@@ -850,8 +1571,16 @@ Template.moveAttachments.helpers({
     const lm = getLastMove();
     if (!lm) return '';
     const cancelled = lm.cancelled ? ` (${TAPi18n.__('move-progress-cancel')})` : '';
+    // #6596: how many of the total actually moved. A record whose binary is not
+    // in the bucket has nothing to move and is SKIPPED, which is not the same
+    // as a failure and must not be silent either - a run that says only "done"
+    // while a dozen attachments stayed behind is how that bug went unnoticed.
+    const counts = [];
+    if (lm.skipped) counts.push(`${lm.skipped} skipped`);
+    if (lm.failed) counts.push(`${lm.failed} failed`);
+    const detail = counts.length ? ` - ${counts.join(', ')}` : '';
     return `${storageLabel(lm.source)} → ${storageLabel(lm.dest)} ` +
-      `(${scopeLabel(lm.scope)}) ${formatDateTime(lm.at)}${cancelled}`;
+      `(${scopeLabel(lm.scope)}) ${formatDateTime(lm.at)}${cancelled}${detail}`;
   },
   repairLoading() {
     return Template.instance().repairLoading.get();

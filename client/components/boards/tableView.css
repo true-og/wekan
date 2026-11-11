@@ -1,0 +1,244 @@
+/* Board Table view: search + pagination controls, styled to match the
+   Admin Panel / People page (see client/components/settings/peopleBody.css).
+   The table itself reuses the My Cards table styling (.my-cards-board-table). */
+
+/* #6685: every control in this row shares ONE explicit height (34px) with
+   box-sizing: border-box, so none of them can grow past it and leave
+   align-items: center (below) with nothing to actually center - a button's
+   own font/line-height/padding otherwise sets its MINIMUM content height,
+   which a flex child never shrinks below no matter what its container
+   measures (the Search button's bold label was doing exactly that, pushing
+   it visibly lower/taller than the search input beside it). */
+.table-view-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin: 9px 0;
+}
+
+.table-view-search-box {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  height: 34px;
+}
+
+.table-view-search-box input {
+  box-sizing: border-box;
+  height: 34px;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  padding: 0 8px;
+}
+
+.table-view-search-box button {
+  box-sizing: border-box;
+  height: 34px;
+  line-height: 1;
+  min-width: 90px;
+  margin-inline-start: 6px;
+  background: #01628c;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  padding: 0 12px;
+}
+
+.table-view-search-box button:hover {
+  background: #005377;
+}
+
+.table-view-pagination {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.table-view-pagination button {
+  box-sizing: border-box;
+  min-width: 32px;
+  height: 34px;
+  line-height: 1;
+  border: none;
+  background: #01628c;
+  color: #fff;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.table-view-pagination button:hover {
+  background: #005377;
+}
+
+.table-view-pagination button.disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.table-view-page-info {
+  min-width: 72px;
+  text-align: center;
+  color: #333;
+}
+
+/* The table, not the board, scrolls sideways when its columns are wider than
+   the window. At 800px and below the table scrolls itself (display: block);
+   just above that - an iPad or an unfolded phone held upright, 834-928px - it
+   did not, the board canvas around it is overflow-x: hidden, and Members, Labels
+   and the date columns were cut off with no way to reach them.
+   tests/playwright/specs/viewport-matrix.e2e.js checks every column is reachable. */
+.table-view-wrapper {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.table-view-controls .js-table-view-toggle-card-title-wrap,
+.table-view-controls .js-table-view-toggle-swimlane-groups {
+  box-sizing: border-box;
+  width: 34px;
+  height: 34px;
+  /* The global `button` rule (forms.css) pads every button 35px on each side
+     and paints its text white. On these white toggles that made the icon
+     white on white - two empty squares - and the padding stretched the 34px
+     box to 72px. tests/playwright/specs/viewport-matrix.e2e.js checks both. */
+  padding: 0;
+  color: #333;
+  line-height: 1;
+  border: 1px solid #bbb;
+  background: #fff;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.table-view-controls .js-table-view-toggle-card-title-wrap.active,
+.table-view-controls .js-table-view-toggle-swimlane-groups.active {
+  background: #01628c;
+  color: #fff;
+}
+
+.my-cards-board-table tr.table-view-swimlane-group {
+  border-bottom: 0;
+  background: rgba(0, 0, 0, 0.08);
+}
+
+.my-cards-board-table tr.table-view-swimlane-group th {
+  padding: 8px 10px;
+  text-align: start;
+  font-size: 1.05rem;
+}
+
+/* Consume the width the board view actually has. Column percentages are
+   preferences, not caps: optional date/member columns may still claim the room
+   their content needs. */
+.my-cards-board-table.table-view-table {
+  width: 100%;
+  max-width: none;
+  table-layout: auto;
+}
+
+.table-view-table th .js-table-view-sort {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-weight: bold;
+  padding: 6px;
+  white-space: nowrap;
+}
+
+.table-view-table th .js-table-view-sort .fa {
+  margin-inline-start: 5px;
+}
+
+/* Leftmost "Edit" cell: an Edit link (pencil icon + text) styled like the one
+   on the Admin Panel / People page, opening the card when clicked. */
+.my-cards-board-table td.table-view-cell-edit {
+  white-space: nowrap;
+}
+
+.my-cards-board-table td.table-view-cell-edit .edit-card {
+  cursor: pointer;
+}
+
+.my-cards-board-table td.table-view-cell-edit .edit-card i.fa {
+  margin-inline-end: 4px;
+}
+
+/* List and swimlane text may wrap, but no longer impose a fixed 250px ceiling
+   on a wide browser. */
+.my-cards-board-table td.table-view-cell-wrap {
+  white-space: normal;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+.my-cards-board-table td.table-view-cell-card-title {
+  width: 40%;
+}
+
+.my-cards-board-table td.table-view-cell-card-title .my-cards-card-title-table {
+  max-width: none;
+  min-width: 0;
+}
+
+.my-cards-board-table.table-view-ellipsis-card-titles
+  td.table-view-cell-card-title {
+  max-width: 0;
+}
+
+.my-cards-board-table.table-view-ellipsis-card-titles
+  td.table-view-cell-card-title .viewer,
+.my-cards-board-table.table-view-ellipsis-card-titles
+  td.table-view-cell-card-title .viewer p {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The +viewer template wraps its markdown in a block-level .viewer div. Inside
+   a table cell it should not add extra vertical margins, and inside a label it
+   must stay inline so the label keeps its pill shape. */
+.my-cards-board-table .viewer {
+  margin: 0;
+}
+
+.my-cards-board-table .viewer p {
+  margin: 0;
+}
+
+.my-cards-board-table .card-label .viewer,
+.my-cards-board-table .card-label .viewer p {
+  display: inline;
+}
+
+/* Word-wrap the Labels cell so each label pill wraps onto the next line instead
+   of stretching the column or overflowing across the date columns. */
+.my-cards-board-table td.table-view-cell-labels {
+  max-width: 250px;
+}
+
+.my-cards-board-table td.table-view-cell-labels .div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.my-cards-board-table td.table-view-cell-labels .card-label {
+  white-space: normal;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+/* Keep each date in a single column; the clickable badge already styles itself
+   like the card detail / Gantt date badges. */
+.my-cards-board-table td.table-view-cell-date {
+  white-space: nowrap;
+}
+
+.my-cards-board-table td.table-view-cell-date .card-date {
+  cursor: pointer;
+}

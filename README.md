@@ -4,18 +4,163 @@
 
 https://wekan.fi/install/
 
+## Screenshot
+
+![Screenshot of WeKan Swimlanes view](https://wekan.fi/wekan-board-views.png)
+
+## About WeKan ®
+
+WeKan ® is a FLOSS collaborative kanban board application with MIT license.
+
+Whether you’re maintaining a personal todo list, planning your holidays with some friends,
+or working in a team on your next revolutionary idea, Kanban boards are an unbeatable tool
+to keep your things organized. They give you a visual overview of the current state of your project,
+and make you productive by allowing you to focus on the few items that matter the most.
+
+Since WeKan ® is a free software, you don’t have to trust us with your data and can
+install Wekan on your own computer or server. In fact we encourage you to do
+that by providing one-click installation on various platforms.
+
+- WeKan ® is used in [most countries of the world](https://snapcraft.io/wekan).
+- WeKan ® largest user has 30k users using WeKan ® in their company.
+- WeKan ® has been [translated](https://app.transifex.com/wekan/) into 234 locale catalogs;
+  234 have non-English text for over 90% of source keys. This measures text coverage,
+  not translation quality; language review and remaining translations are ongoing.
+- [Databases](https://github.com/wekan/wekan/blob/main/docs/Databases/Supported.md):
+  - FerretDB v1 with SQLite, the default on every platform - bundle, Docker,
+    Snap and Kubernetes - so no database server is needed.
+  - FerretDB v1 with PostgreSQL works; with MySQL, MariaDB or SAP HANA it is
+    experimental.
+  - MongoDB 6, 7, 8 and 9. MongoDB refuses to start on Linux kernels 6.19 to
+    7.0.13, which FerretDB is not affected by.
+  - All of them - SAP HANA only when asked - answer the same 110-query
+    conformance catalogue the same way, checked by EVERYTHING in build.sh and
+    build.bat.
+- [Features](https://github.com/wekan/wekan/tree/main/docs/Features):
+  - Real-time user interface
+  - All Boards page, Drag drop reorder with one or Multi-Selection:
+    - Board icons at Remaining, (Sub)Workspaces, Archive
+    - Shared Templates: Boards, Lists, Cards
+    - Add Board / Import ([all import and export formats](docs/Features/Board-Sidebar/Board-Settings/Import-Export/External-Tools.md)):
+      - WeKan JSON/.zip, CSV/TSV, Excel, Markdown, Obsidian Kanban, Leo, OPML, Org mode, todo.txt
+      - Trello, Jira, Asana, Zenkit, Focalboard, Todoist, Microsoft Planner, MeisterTask, Linear, TickTick, ClickUp, Nullboard, Kanri, Pivotal Tracker, Redmine, Tasks.org, monday.com,
+        Super Productivity, Taiga, Vikunja, Wrike (Excel and workflow), Quire, Teamwork.com, Businessmap, Notion, Plane
+      - Kanboard, Nextcloud Deck, OpenProject, Taskwarrior
+      - GitHub, GitLab, Gitea, Forgejo
+      - Import many boards at once: several export files, or a .zip of them, each its own board;
+        One board per project splits an export of a whole app into a board per project
+  - Change Color: Board theme and background image, Swimlane, List, Card
+    - Overrides: 1 Admin Panel, 2 Board Settings, 3 Member Settings
+  - Drag drop reorder with one or Multi-Selection:
+    - Board icons to Workspaces at All Boards page
+    - Swimlane, List, Minicard
+ - Board
+   - Top header: Mobile/Desktop view, Show/Hide Drag Handles, Starred Boards Bookmarks, Sort Boards, Filter, Search, Notifications, Member Settings
+   - Member Settings:
+     - Show My Dependencies, Show Board Dependencies, Import/Export JSON/SVG
+       - Dependencies are for SAFe PI Plannings, drawing colored lines between cards, like Kendis or Scaled Agile Framework. Import Export as JSON and SVG.
+     - My Cards, Due Cards, My Attachments, Search All Boards, Date Settings,
+       Change color - override theme, Nofications Settings (Tray, Email, etc),
+       Font change and Font size change, Change Avatar,
+       Change Language (250+ languages)
+     - Change Settings: Show desktop drag handles, Submit editors with Enter,
+       Open many cards at once, Play a sound when a checklist item is completed,
+       Show cards count if list contains more than ... cards,
+       Show rescue dialoque before closing for unsaved card descriptions
+   - Board Views:
+    - Swimlanes, Lists
+      - Minicard: At list there is card, that has not been not opened yet
+      - Card: Opened card popup of minicard
+        - Attachments viewer for PDF and Office documents
+      - Drag drop reorder one or Multi-Selection: Swimlanes, Lists, Minicards, Checklists, Checklist Items
+      - Collapse/Uncollapse: Menus, Swimlanes, Lists, Cards
+    - Table, Calendar, Multi Board Calendar, Time, Timeline
+    - Statistics, Group by Assignee
+    - Gantt, Frappe Gantt, DHTMLX Gantt
+    - Scrum: Product Backlog, Sprints, Sprint Report, Velocity, Roadmap, Dashboard, Bigboard
+    - Burndown, Burnup, Cumulative Flow, Control, Cycle Time, Flow Efficiency,
+      Lead Time, Throughtput Histogram, WIP Run, Pulse, Aging WIP,
+      Blocker Analysis, Monte Carlo Forecasts, Process Behavior (XmR),
+      Work Item Size vs Cycle Time, Map
+   - Right Sidebar / Board Settings:
+    - Rules: like IFTTT like Trello Butler
+      - Lists view for Rules
+      - Workflow view: like Jira Workflows
+      - Blocks: like Scratch or Jira AutoBlocks, shows same IFTTT Rules
+      - Import / Export IFTTT Rules; import n8n, Node-RED and Trello Butler; import / export Wrike workflows
+     - Export board :
+       - Select what to include: Card details, Board, Activities, Labels, People (Creator, Owner, Members, Assignees), Board Info (Board, List, Swimlane), Dates (Created, Received, Start, Due, End), Description, Custom Fields, Checklists, Subtasks, Comments, Attachments, Votin, Plannin Poker, Stickers, Location (link to map based on coordinates), Dependencies, Sort, Scrum Settings
+      - Export to ([all formats](docs/Features/Board-Sidebar/Board-Settings/Import-Export/External-Tools.md)): PDF, Excel, HTML, Calendar feed (iCal), Dependencies JSON/SVG,
+       CSV , ; TSV, JSON with/without attachmeents, .zip (Attachments),
+       Kanboard, Markdown, Leo, OPML, Org mode, todo.txt, Taskwarrior, Focalboard, Todoist,
+       Microsoft Planner, MeisterTask, Obsidian Kanban, Linear, TickTick, ClickUp, Nullboard, Kanri, Pivotal Tracker, Redmine, Tasks.org, monday.com,
+       Super Productivity, Taiga, Vikunja, Wrike (Excel and workflow), Quire, Teamwork.com, Businessmap, Notion,
+       Trello, Jira, NextCloud Deck, OpenProject, GitHub, GitLab,
+       Gitea, Forgejo, Asana, Zenkit
+     - Export all boards at once (All Boards sidebar, or Multi-Selection): Excel as one workbook
+       with a sheet per board, every other format as a .zip with a file per board
+    - Scrum Settings
+    - Change color theme, Change Background Image, Date settings
+    - Settings:
+      - Board View: Show/Hide and drag drop reorder what is shown atat Public Board and Private Board
+      - Swimlane: Scrum settings, Lock resize swimlane height, WIP Limit Groups
+      - Board View: Show/Hide and drag drop reorder what is shown at Minicard and Card
+  - Admin Panel
+    - Settings
+      - Version
+      - Visibility: What is shown/hidden, Whitelabeling
+      - Announcement
+      - Accessibility
+      - Translation: Add custom translation strings
+      - PWA
+      - Global Webhooks
+  - People
+    - Email, Notifications, Domains, Organizations, Teams, People
+    - Locked Users, Roles, Shared Templates
+    - Login, SAML, LDAP, OAuth2 login providers, Passwordless login
+  - Attachments
+    - Scheduled Backups, Continuous realtime backups, Move Attachments, Default Save Storage, Limits
+    - Storage: MongoDB GridFS, Filesystem, S3/MinIO, Azure Blob, Google Cloud
+    - Database migration
+  - Problems
+    - Summary
+    - Security
+    - Delete: Optional enable permanent delete.
+      - History Undo/Redo available at Board, List, Card, etc menus at Swimlanes and List views
+    - Notifications
+    - Reports
+      - Security: shows any attempted attacks based on names from https://wekan.fi/hall-of-fame/ like built-in SIEM with country flag and city based of location of IP address based on location headers like CloudFlare etc
+      - Impersonation
+      - Performance, Speed, Tests, CPU usage, Instrumentation, Broken Cards, Files, Rules, Boards, Recovery, Offices, API, Database problems, Filesystem integrity
+- [Platforms](https://wekan.fi/install/):
+  - Windows/Mac/Linux bundle .zip
+  - Linux [Snap](https://snapcraft.io/wekan): Automatic updates
+  - Linux AppImage
+  - Docker, Kubernetes
+  - [SaaS](https://wekan.fi/saas/): Free with App or Paid with Admin Panel
+    - [Commercial Support](https://wekan.fi/commercial-support/)
+
 ## Docker Containers
 
-- [GitHub](https://github.com/wekan/wekan/pkgs/container/wekan)
-- [Quay](https://quay.io/repository/wekan/wekan)
+- [GitHub](https://ghcr.io/wekan/wekan)
+```
+image: ghcr.io/wekan/wekan:latest
+```
 - [Docker Hub](https://hub.docker.com/r/wekanteam/wekan)
+```
+image: wekanteam/wekan:latest
+```
+- [RedHat Quay.io](https://quay.io/wekan/wekan)
+```
+image: quay.io/wekan/wekan:latest
+```
 
 docker-compose.yml at https://github.com/wekan/wekan/blob/main/docker-compose.yml
 
 ## Standards
 
-- [WeKan and Standard for Public Code](https://wekan.fi/standard-for-public-code/) assessment was made at 2023-11.
-  Currently Wekan meets 8 out of 16 criteria out of the box.
+- [WeKan and Standard for Public Code](https://wekan.fi/standard-for-public-code/) assessment was made at 2023-11. At 2026 WeKan becameß full FLOSS with [FerretDB v1 Fork](https://github.com/wekan/FerretDB), also see 2026 talk WeKan 10 years at https://wekan.fi/docs for more details.
+  Currently Wekan meets 9 out of 16 criteria out of the box.
   Some others could be met with small changes.
 
 ## Code stats
@@ -39,38 +184,12 @@ It's better than at chat where details get lost when chat scrolls up.
 
 [IRC](https://github.com/wekan/wekan/blob/main/docs/FAQ/IRC-FAQ.md)
 
-## Docker: Latest tag has newest release
-
-You can use latest tag to get newest release tag.
-See bottom of https://github.com/wekan/wekan/issues/3874
-
 ## FAQ
 
 **NOTE**:
 
 - Please read the [FAQ](https://github.com/wekan/wekan/blob/main/docs/FAQ/FAQ.md) first
 - Please don't feed the [trolls](https://github.com/wekan/wekan/blob/main/docs/FAQ/FAQ.md#why-am-i-called-a-troll) and [spammers](https://github.com/wekan/wekan/blob/main/docs/FAQ/FAQ.md#why-am-i-called-a-spammer) that are mentioned in the FAQ :)
-
-## About WeKan ®
-
-WeKan ® is a completely [Open Source][open_source] and [Free software][free_software]
-collaborative kanban board application with MIT license.
-
-Whether you’re maintaining a personal todo list, planning your holidays with some friends,
-or working in a team on your next revolutionary idea, Kanban boards are an unbeatable tool
-to keep your things organized. They give you a visual overview of the current state of your project,
-and make you productive by allowing you to focus on the few items that matter the most.
-
-Since WeKan ® is a free software, you don’t have to trust us with your data and can
-install Wekan on your own computer or server. In fact we encourage you to do
-that by providing one-click installation on various platforms.
-
-- WeKan ® is used in [most countries of the world](https://snapcraft.io/wekan).
-- WeKan ® largest user has 30k users using WeKan ® in their company.
-- WeKan ® has been [translated](https://app.transifex.com/wekan/) to about 105 languages.
-- [Features][features]: WeKan ® has real-time user interface.
-- [Platforms](https://wekan.fi/install/): WeKan ® supports many platforms.
-  WeKan ® is critical part of new platforms Wekan is currently being integrated to.
 
 ## Requirements
 
@@ -89,9 +208,9 @@ that by providing one-click installation on various platforms.
 
 ## Roadmap and Demo
 
-[Roadmap][roadmap_wekan] - Public read-only board at WeKan ® demo.
+[Roadmap](https://boards.wekan.team/b/D2SzJKZDS4Z48yeQH/wekan-r-open-source-kanban-board-with-mit-license) - Public read-only board at WeKan ® demo.
 
-[Developer Documentation][dev_docs]
+[Developer Documentation](https://github.com/wekan/wekan/blob/main/docs/DeveloperDocs/Developer-Documentation.md)
 
 - There are many companies and individuals contributing code to WeKan ®, to add features and bugfixes
   [many times a day](https://github.com/wekan/wekan/blob/main/CHANGELOG.md).
@@ -103,10 +222,10 @@ By working directly with WeKan ® you get the benefit of active maintenance and 
 
 ## Getting Started with Development
 
-The default branch uses Meteor 3.5-beta.7 with Node.js 24.x.
+The main branch uses Meteor 3.x with Node.js 26.x.
 See [CHANGELOG.md](https://github.com/wekan/wekan/blob/main/CHANGELOG.md) for the latest runtime updates.
 
-To contribute, [create a fork](https://github.com/wekan/wekan/blob/main/docs/DeveloperDocs/Build-and-Create-Pull-Request.md#2-create-fork-of-httpsgithubcomwekanwekan-at-github-web-page) and run `./rebuild-wekan.sh` (or `./rebuild-wekan.bat` on Windows) as detailed [here](https://github.com/wekan/wekan/blob/main/docs/DeveloperDocs/Build-and-Create-Pull-Request.md#3-select-option-1-to-install-dependencies-and-then-enter). Once you're ready, please test your code and [submit a pull request (PR)](https://github.com/wekan/wekan/blob/main/docs/DeveloperDocs/Build-and-Create-Pull-Request.md#7-test).
+To contribute, [create a fork](https://github.com/wekan/wekan/blob/main/docs/DeveloperDocs/Build-and-Create-Pull-Request.md#2-create-fork-of-httpsgithubcomwekanwekan-at-github-web-page) and run `./build.sh` (or `./build.bat` on Windows) as detailed [here](https://github.com/wekan/wekan/blob/main/docs/DeveloperDocs/Build-and-Create-Pull-Request.md#3-install-dependencies-build-wekan-and-run-the-dev-server). Once you're ready, please test your code and [submit a pull request (PR)](https://github.com/wekan/wekan/blob/main/docs/DeveloperDocs/Build-and-Create-Pull-Request.md#7-test).
 
 Please refer to the [developer documentation](https://github.com/wekan/wekan/blob/main/docs/DeveloperDocs/Developer-Documentation.md) for more information.
 
@@ -117,32 +236,22 @@ Please refer to the [developer documentation](https://github.com/wekan/wekan/blo
 Before building WeKan from source, ensure you have:
 
 - **Git** - for cloning the repository
-- **Node.js 24.x** - WeKan requires Node.js 24.x
+- **Node.js 26.x** - WeKan requires Node.js 26.x
 - **Meteor** - the JavaScript framework WeKan is built with
-
-### Installing Node.js 24.x
-
-```bash
-# Using nvm (recommended)
-curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash
-source ~/.zshrc  # or ~/.bashrc
-nvm install 24
-nvm use 24
-```
-
-### Installing Meteor
-
-```bash
-curl https://install.meteor.com/ | sh
-```
 
 ### Building WeKan
 
-The `rebuild-wekan.sh` script guides you through a three-stage process:
+The `build.sh` script shows a two-level menu. The top level groups options into categories:
 
-1. **Install dependencies (Option 1)** - Downloads all required Meteor packages and npm modules
-2. **Build WeKan (Option 2)** - Compiles the application
-3. **Run WeKan (Option 3)** - Starts the development server at http://localhost:4000
+```
+1) Setup   2) Dev server   3) Tests   4) Docker   5) Tools   6) Quit
+```
+
+You pick a category number, then the item number inside it (each submenu also has a `Back` entry). Building from source is a three-stage process:
+
+1. **Setup -> Install dependencies** - Downloads all required Meteor packages and npm modules
+2. **Setup -> Build WeKan** - Compiles the application
+3. **Dev server -> localhost:3000** - Starts the development server at http://localhost:3000
 
 ```bash
 # Clone your fork
@@ -150,45 +259,28 @@ git clone git@github.com:YOUR_USERNAME/wekan.git
 cd wekan
 
 # Make the script executable
-chmod +x rebuild-wekan.sh
+chmod +x build.sh
 
-# Step 1: Install dependencies
-./rebuild-wekan.sh
-# Press 1 and Enter
+# Step 1: Install dependencies (Setup -> Install dependencies)
+./build.sh
+# Press 1 (Setup) and Enter, then 1 (Install dependencies) and Enter
 
-# Step 2: Build WeKan (after dependencies complete)
-./rebuild-wekan.sh
-# Press 2 and Enter
+# Step 2: Build WeKan (Setup -> Build WeKan, after dependencies complete)
+./build.sh
+# Press 1 (Setup) and Enter, then 2 (Build WeKan) and Enter
 
-# Step 3: Run WeKan in development mode
-./rebuild-wekan.sh
-# Press 3 and Enter
+# Step 3: Run WeKan in development mode (Dev server -> localhost:3000)
+./build.sh
+# Press 2 (Dev server) and Enter, then 1 (localhost:3000) and Enter
 ```
- 
+
+If a dev server is already running on that port, the **Dev server** options stop it automatically and start a fresh server on the same port.
 
 ### WSL Users
 
-WSL users can use Snap Candidate. See [install docs](https://wekan.fi/install/).
-
-The development server will start at http://localhost:4000. Any changes you make to the source code will automatically trigger a rebuild and refresh your browser.
-
-## Screenshot
-
-[More screenshots at Features page](https://github.com/wekan/wekan/tree/main/docs/Features)
-
-[![Screenshot of WeKan ®][screenshot_wekan]][roadmap_wekan]
+WSL users can use Snap. See [install docs](https://wekan.fi/install/).
 
 ## License
 
-WeKan ® is released under the very permissive [MIT license](LICENSE), and made
+WeKan ® is released under the very permissive [MIT license](https://github.com/wekan/wekan/blob/main/LICENSE), and made
 with [Meteor](https://www.meteor.com).
-
-[dev_docs]: https://github.com/wekan/wekan/blob/main/docs/DeveloperDocs/Developer-Documentation.md
-[screenshot_wekan]: https://wekan.fi/wekan-dark-mode.png
-[features]: https://github.com/wekan/wekan/wiki/Features
-[roadmap_wekan]: https://boards.wekan.team/b/D2SzJKZDS4Z48yeQH/wekan-open-source-kanban-board-with-mit-license
-[wekan_issues]: https://github.com/wekan/wekan/issues
-[docker_image]: https://hub.docker.com/r/wekanteam/wekan/
-[translate_wekan]: https://app.transifex.com/wekan/wekan/
-[open_source]: https://en.wikipedia.org/wiki/Open-source_software
-[free_software]: https://en.wikipedia.org/wiki/Free_software

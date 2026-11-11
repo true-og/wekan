@@ -1,4 +1,10 @@
-const isLogEnabled = (process.env.LDAP_LOG_ENABLED === 'true');
+// Read on every call, so Admin Panel / People / LDAP can switch it without a
+// restart (server/lib/authConfig.js installs globalThis.__wekanAuthEnv).
+function isLogEnabled() {
+    const resolve = globalThis.__wekanAuthEnv;
+    const value = typeof resolve === 'function' ? resolve('LDAP_LOG_ENABLED') : process.env.LDAP_LOG_ENABLED;
+    return value === 'true';
+}
 
 function isSensitiveKey(key) {
     return /pass(word)?|digest|secret|token|api[-_]?key|authorization|cookie|session/i.test(String(key));
@@ -22,6 +28,15 @@ function sanitizeForLogging(value) {
 
     if (value && typeof value === 'object') {
         const sanitized = {};
+        // Error.name/message are non-enumerable. Object.keys alone turned
+        // bind, connection and certificate failures into an unhelpful {}.
+        if (value instanceof Error) {
+            ['name', 'message', 'code', 'reason'].forEach((key) => {
+                if (value[key] !== undefined) {
+                    sanitized[key] = sanitizeForLogging(value[key]);
+                }
+            });
+        }
         Object.keys(value).forEach((key) => {
             if (isSensitiveKey(key)) {
                 sanitized[key] = '[REDACTED]';
@@ -36,7 +51,7 @@ function sanitizeForLogging(value) {
 }
 
 function log (level, ...args) {
-    if (isLogEnabled) {
+    if (isLogEnabled()) {
         const safeMessage = args
             .map((arg) => {
                 const sanitized = sanitizeForLogging(arg);

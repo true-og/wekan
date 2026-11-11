@@ -52,7 +52,7 @@ test.describe('Admin – user management', () => {
     await expect(page.locator('.js-pop-over input.js-profile-username')).toBeVisible({ timeout: 5_000 });
 
     // Change the fullname (display name) — this IS persisted via editUser Meteor call
-    const fullnameInput = page.locator('.js-pop-over input.js-profile-fullname');
+    const fullnameInput = page.locator('.js-pop-over .js-profile-fullname');
     await fullnameInput.fill('Renamed Display Name');
 
     // Save — editUserPopup submits via input[type=submit]
@@ -70,8 +70,7 @@ test.describe('Admin – user management', () => {
 
     // User should now show as inactive in the DB
     await page.waitForTimeout(600);
-    const userDoc = db.mongoEval(`JSON.stringify(db.users.findOne({ _id: ${JSON.stringify(user.id)} }, { fields: { isActive: 1, loginDisabled: 1 } }))`);
-    const parsed = JSON.parse(userDoc);
+    const parsed = db.findOne('users', { _id: user.id }, { isActive: 1, loginDisabled: 1 });
     // WeKan marks inactive via loginDisabled or profile field - check the toggle reflected
     expect(parsed).toBeTruthy(); // User still exists
   });
@@ -108,10 +107,16 @@ test.describe('Admin – user management', () => {
     );
     expect(createError).toBe(null);
 
-    const createdUserRaw = db.mongoEval(
-      `JSON.stringify(db.users.findOne({ username: ${JSON.stringify(createdUsername)} }, { fields: { _id: 1 } }))`,
-    );
-    const createdUser = JSON.parse(createdUserRaw || 'null');
+    // setCreateUser's callback fires when the method returns, but the insert is
+    // not always visible to this separate direct-Mongo connection on the very
+    // next read - especially under the full parallel "Run ALL tests" load. Poll
+    // for the new user instead of reading exactly once.
+    let createdUser = null;
+    for (let i = 0; i < 30; i++) {
+      createdUser = db.findOne('users', { username: createdUsername }, { _id: 1 });
+      if (createdUser && createdUser._id) break;
+      await page.waitForTimeout(500);
+    }
     expect(createdUser?._id).toBeTruthy();
 
     const ap = new AdminPage(page);
@@ -128,7 +133,8 @@ test.describe('Admin – user management', () => {
 
   test('non-admin user cannot access /people (admin-only)', async ({ page, user }) => {
     await loginWithToken(page, user.id, user.token);
-    await page.goto(`${BASE_URL}/people`, { waitUntil: 'networkidle' });
+    await page.goto(`${BASE_URL}/people`, { waitUntil: 'domcontentloaded' });
+    await waitForMeteor(page);
 
     // Non-admin sees "error-notAuthorized" message (peopleBody.jade: unless currentUser.isAdmin).
     // No td.username (people data rows) should be rendered.
@@ -138,18 +144,101 @@ test.describe('Admin – user management', () => {
   });
 
   test('login page sign-in link is visible and accessible', async ({ page }) => {
-    await page.goto(`${BASE_URL}/sign-in`, { waitUntil: 'networkidle' });
+    await page.goto(`${BASE_URL}/sign-in`, { waitUntil: 'domcontentloaded' });
     // The sign-in form or button must be present
-    const form = page.locator('form, [type="submit"], button.primary').first();
+    const form = page.locator('#at-field-username_and_email').locator('xpath=ancestor::form');
     await expect(form).toBeVisible({ timeout: 10_000 });
   });
 
   test('login page renders correctly on a fresh load', async ({ page }) => {
-    await page.goto(`${BASE_URL}/sign-in`, { waitUntil: 'networkidle' });
-    const usernameInput = page.locator('[name="username"], input[type="text"]').first();
-    const passwordInput = page.locator('[name="password"], input[type="password"]').first();
+    await page.goto(`${BASE_URL}/sign-in`, { waitUntil: 'domcontentloaded' });
+    const usernameInput = page.locator('#at-field-username_and_email');
+    const passwordInput = page.locator('#at-field-password');
 
     await expect(usernameInput).toBeVisible({ timeout: 10_000 });
     await expect(passwordInput).toBeVisible({ timeout: 10_000 });
+  });
+
+  test('sign-in tabs directly between fields and Enter in password submits', async ({ page }) => {
+    await page.goto(`${BASE_URL}/sign-in`, { waitUntil: 'domcontentloaded' });
+    const usernameInput = page.locator('#at-field-username_and_email');
+    const passwordInput = page.locator('#at-field-password');
+
+    await waitForMeteor(page);
+    // press() does not wait for visibility; enter the rendered form first.
+    await usernameInput.click();
+    await usernameInput.press('Tab');
+    await expect(passwordInput).toBeFocused();
+    await expect(page.locator('.password-toggle-btn')).not.toBeFocused();
+
+    await usernameInput.fill(`missing_${Date.now()}`);
+    await passwordInput.fill('InvalidKeyboardTest@55!');
+    await passwordInput.press('Enter');
+    const errorMessage = page.locator('.at-error, #login-error-message')
+      .filter({ hasText: /.+/ }).first();
+    await expect(errorMessage).toBeVisible({ timeout: 15_000 });
+  });
+
+  test('sign-up tabs through fields and visibility buttons, and Enter in the bottom field submits', async ({ page }) => {
+    const suffix = db.uniqueSuffix();
+    const username = `keyboard_${suffix}`;
+    await page.goto(`${BASE_URL}/sign-up`, { waitUntil: 'domcontentloaded' });
+
+    const fields = [
+      page.locator('#at-field-username'),
+      page.locator('#at-field-email'),
+      page.locator('#at-field-password'),
+      page.locator('#at-field-password_again'),
+    ];
+    for (const field of fields) {
+      await expect(field).toBeVisible({ timeout: 10_000 });
+    }
+
+    let createdUser;
+    try {
+      await fields[0].fill(username);
+      await fields[1].fill(`${username}@wekan-test.invalid`);
+      await fields[2].fill('KeyboardTest@55!');
+      await fields[3].fill('KeyboardTest@55!');
+      await page.evaluate(() => {
+        window._authSubmitCount = 0;
+        document.querySelector('#at-field-username').form.addEventListener('submit', () => {
+          window._authSubmitCount += 1;
+        });
+      });
+
+      // A05 deliberately restored keyboard access to reveal/hide controls.
+      // Both native buttons must activate without submitting a valid form.
+      const toggles = page.locator('.password-toggle-btn');
+      await expect(toggles).toHaveCount(2);
+      await fields[0].focus();
+      for (const control of [fields[1], fields[2], toggles.nth(0), fields[3], toggles.nth(1)]) {
+        await page.keyboard.press('Tab');
+        await expect(control).toBeFocused();
+        const toggleIndex = await control.evaluate(el =>
+          el.classList.contains('password-toggle-btn')
+            ? [...document.querySelectorAll('.password-toggle-btn')].indexOf(el)
+            : -1,
+        );
+        if (toggleIndex !== -1) {
+          await page.keyboard.press('Space');
+          await expect(fields[toggleIndex + 2]).toHaveAttribute('type', 'text');
+          await expect(control).toBeFocused();
+          await page.keyboard.press('Enter');
+          await expect(fields[toggleIndex + 2]).toHaveAttribute('type', 'password');
+          await expect(control).toBeFocused();
+          expect(await page.evaluate(() => window._authSubmitCount)).toBe(0);
+        }
+      }
+
+      await fields[3].press('Enter');
+      await expect.poll(() => {
+        createdUser = db.findOne('users', { username }, { _id: 1 });
+        return createdUser?._id;
+      }, { timeout: 15_000 }).toBeTruthy();
+    } finally {
+      createdUser = db.findOne('users', { username }, { _id: 1 });
+      if (createdUser?._id) db.cleanup({ userIds: [createdUser._id] });
+    }
   });
 });

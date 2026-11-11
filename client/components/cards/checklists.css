@@ -1,5 +1,5 @@
 .js-add-checklist {
-  color: #8c8c8c;
+  color: var(--wekan-quiet-text, #595959);
 }
 textarea.js-add-checklist-item,
 textarea.js-edit-checklist-item {
@@ -11,10 +11,10 @@ textarea.js-edit-checklist-item {
 .delete-text,
 .js-delete-checklist-item,
 .js-convert-checklist-item-to-card {
-  color: #8c8c8c;
+  color: var(--wekan-quiet-text, #595959);
   text-decoration: underline;
   word-wrap: break-word;
-  float: right;
+  float: inline-end;
   padding-top: 6px;
 }
 .delete-text:hover,
@@ -32,7 +32,7 @@ textarea.js-edit-checklist-item {
   align-items: center;
 }
 .checklist-progress-bar-container .checklist-progress-text {
-  margin-right: 10px;
+  margin-inline-end: 10px;
 }
 .checklist-progress-bar-container .checklist-progress-bar {
   width: 80%;
@@ -43,41 +43,42 @@ textarea.js-edit-checklist-item {
 .checklist-progress-bar-container .checklist-progress-bar .checklist-progress {
   color: #fff;
   background-color: #666;
-  padding: 0.01em 16px;
+  padding: 0;
+  box-sizing: border-box;
   border-radius: 16px;
   height: 100%;
 }
 .checklist-title {
-  padding: 10px;
+  padding: calc(10px * min(1, var(--wekan-ui-font-scale, 1)));
 }
 .checklist-title .checkbox {
-  float: left;
+  float: inline-start;
   width: 30px;
   height: 30px;
-  font-size: 18px;
-  line-height: 30px;
+  font-size: calc(18px * var(--wekan-ui-font-scale, 1));
+  line-height: calc(30px * var(--wekan-ui-font-scale, 1));
 }
 .checklist-title .title {
-  font-size: 18px;
-  line-height: 25px;
+  font-size: calc(18px * var(--wekan-ui-font-scale, 1));
+  line-height: calc(25px * var(--wekan-ui-font-scale, 1));
 }
 .checklist-title .checklist-stat {
   margin: 0 0.5em;
-  float: right;
+  float: inline-end;
   padding-top: 6px;
 }
 .checklist-title .checklist-stat.is-finished {
   color: #3cb500;
 }
 .checklist-title span.fa.checklist-handle {
-  padding-right: 20px;
+  padding-inline-end: 20px;
   padding-top: 3px;
-  float: left;
+  float: inline-start;
 }
 #card-details-overlay {
   top: 0;
   bottom: -600px;
-  right: 0;
+  inset-inline-end: 0;
 }
 .checklist {
   background: #f7f7f7;
@@ -93,7 +94,7 @@ textarea.js-edit-checklist-item {
 }
 .checklist-item {
   margin: 0 0 0 0.1em;
-  line-height: 18px;
+  line-height: calc(18px * var(--wekan-ui-font-scale, 1));
   font-size: 1.1em;
   margin-top: 3px;
   display: flex;
@@ -123,7 +124,7 @@ textarea.js-edit-checklist-item {
   background-color: #ebebeb;
 }
 .checklist-item .check-box-container {
-  padding-right: 10px;
+  padding-inline-end: 10px;
 }
 .checklist-item .check-box {
   margin: 0.1em 0 0 0;
@@ -134,21 +135,43 @@ textarea.js-edit-checklist-item {
 }
 .checklist-item .item-title {
   flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .checklist-item .item-title.is-checked {
-  color: #8c8c8c;
+  color: var(--wekan-quiet-text, #595959);
   font-style: italic;
   text-decoration: line-through;
 }
 .checklist-item .item-title .viewer p {
   margin-bottom: 2px;
   display: block;
-  word-wrap: break-word;
+  overflow-wrap: anywhere;
   max-width: 420px;
 }
 .checklist-item span.fa.checklistitem-handle {
   padding-top: 2px;
-  padding-right: 10px;
+  padding-inline-end: 10px;
+}
+/* #4755: the due-date badge/add-icon on a single checklist item. Checklist
+   items are dense UI, so the badge (reusing .card-date's own colours/icon -
+   see cardDate.css) is shrunk down rather than given its own new styling. */
+.checklist-item .checklist-item-due-date {
+  align-self: center;
+  margin-inline-start: 6px;
+  font-size: 0.82em;
+  padding: 0 4px;
+  line-height: 1.6em;
+  white-space: nowrap;
+}
+.checklist-item .checklist-item-due-date-add {
+  align-self: center;
+  margin-inline-start: 6px;
+  color: var(--wekan-quiet-text, #595959);
+  text-decoration: none;
+}
+.checklist-item .checklist-item-due-date-add:hover {
+  color: #2573a7;
 }
 .js-delete-checklist-item,
 .js-convert-checklist-item-to-card {
@@ -171,9 +194,9 @@ textarea.js-edit-checklist-item {
 }
 .add-checklist-top {
   /* more space to checklists title */
-  padding-left: 20px;
+  padding-inline-start: 20px;
   /* + is easier clickable */
-  padding-right: 20px;
+  padding-inline-end: 20px;
 }
 .add-checklist-top.js-open-inlined-form:hover {
   background: #dbdbdb;
@@ -185,9 +208,56 @@ textarea.js-edit-checklist-item {
   width: 100%;
 }
 .checklist-details-menu {
-  float: right;
+  float: inline-end;
   padding: 6px 10px 6px 10px;
 }
 .edit-controls label.toggle-label {
-  margin-left: 2px;
+  margin-inline-start: 2px;
+}
+
+/* #1591: the fold caret on a checklist title. Sized and coloured like the
+   actions menu beside it so the two read as one row of controls, and given a
+   real hit area - it is a single glyph, and a caret you have to aim at is worse
+   than no caret. */
+.checklist-title .checklist-collapse {
+  /* Logical, so the caret sits on the reading-start side under dir=rtl too
+     (tests/rtl.test.js enforces this across component CSS). */
+  float: inline-start;
+  margin-block-start: 2px;
+  margin-inline-end: 4px;
+  padding: 2px 4px;
+  color: #808080;
+  font-size: calc(14px * var(--wekan-ui-font-scale, 1));
+  line-height: calc(14px * var(--wekan-ui-font-scale, 1));
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.checklist-title .checklist-collapse:hover,
+.checklist-title .checklist-collapse:focus-visible {
+  color: #2573a7;
+}
+
+.checklist-title .checklist-due-date-add {
+  float: inline-end;
+  width: auto;
+  min-width: 28px;
+  padding: 4px 6px;
+  margin: 0 4px;
+  background: transparent;
+  color: inherit;
+  border: 0;
+}
+
+/* #6796: the controls under the checklists on one line, not one per line. */
+.checklists-bottom-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5em;
+}
+.checklists-bottom-actions .add-checklist.js-open-inlined-form {
+  display: inline-block;
+  width: auto;
+  padding-inline: 0.5em;
 }

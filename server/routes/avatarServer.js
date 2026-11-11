@@ -5,10 +5,42 @@
 
 import { Meteor } from 'meteor/meteor';
 import { WebApp } from 'meteor/webapp';
+import { getUserIdFromRequest, parseQuery } from '/server/lib/requestUser';
 import { ReactiveCache } from '/imports/reactiveCache';
 import Avatars from '/models/avatars';
 import { fileStoreStrategyFactory } from '/models/avatars.server';
 import { getOldAttachmentData, getOldAttachmentStream } from '/models/lib/attachmentBackwardCompatibility';
+const { fileResponsePolicy } = require('/models/lib/fileResponseSafety');
+// An SVG avatar is streamed, sanitized, as an image (server/lib/svgResponse.js).
+const svgResponse = require('/server/lib/svgResponse');
+
+function sendSvgAvatar(res, stream, fileObj) {
+  return svgResponse.sendInlineSvg(res, stream, {
+    fileName: fileObj.name,
+    onSanitized: text => {
+      try {
+        const { classifyExploitKinds } = require('/imports/lib/fileNameDisplay');
+        require('/server/lib/filenameSanitizeLog').logContentSanitized({
+          fileObj, source: 'fileView', kinds: classifyExploitKinds(text),
+        });
+      } catch (e) { /* logging must never break serving */ }
+    },
+  }).catch(() => { if (!res.headersSent) { res.writeHead(500); res.end(); } });
+}
+
+// CacheBleed (GHSA-w3qg-pf27-g68r): an avatar is served after an access check.
+const { setPrivateFileCacheHeaders } = require('/models/lib/fileCacheHeaders');
+
+function setAvatarResponseHeaders(res, type) {
+  const policy = fileResponsePolicy(type || 'image/jpeg');
+  res.setHeader('Content-Type', policy.contentType);
+  for (const [name, value] of Object.entries(policy.headers)) {
+    res.setHeader(name, value);
+  }
+  if (policy.forceDownload) {
+    res.setHeader('Content-Disposition', 'attachment');
+  }
+}
 
 // Serve a legacy CollectionFS avatar (cfs.avatars.filerecord + cfs_gridfs.avatars
 // bucket) in place, without migrating it. Returns true when it handled the
@@ -22,14 +54,18 @@ async function serveLegacyAvatar(fileId, req, res) {
   if (!stream) {
     return false;
   }
-  res.setHeader('Content-Type', legacy.type || 'image/jpeg');
+  setAvatarResponseHeaders(res, legacy.type);
   if (legacy.size) res.setHeader('Content-Length', legacy.size);
-  res.setHeader('Cache-Control', 'public, max-age=31536000');
+  setPrivateFileCacheHeaders(res);
   res.setHeader('ETag', `"${legacy._id}"`);
   const ifNoneMatch = req.headers['if-none-match'];
   if (ifNoneMatch && ifNoneMatch === `"${legacy._id}"`) {
     res.writeHead(304);
     res.end();
+    return true;
+  }
+  if (svgResponse.isSvg(legacy.type, legacy.name)) {
+    sendSvgAvatar(res, stream, legacy);
     return true;
   }
   res.writeHead(200);
@@ -42,6 +78,43 @@ async function serveLegacyAvatar(fileId, req, res) {
     }
   });
   return true;
+}
+
+// Advisory: "serveLegacyAvatar Serves Legacy CollectionFS Avatars Without Any
+// Authentication" - both call sites below streamed a legacy avatar to any
+// anonymous caller who knew (or guessed) its old cfs.avatars.filerecord _id,
+// entirely ahead of - or, on /cfs/files/avatars, with no equivalent at all
+// to - the getUserIdFromRequest/avatarIsOnAPublicBoard check current avatars
+// already get. Legacy records carry no owner/board link we can safely check
+// (unlike current avatars, whose avatarIsOnAPublicBoard exemption needs
+// avatar.userId), so this requires an authenticated caller with no
+// anonymous/public-board bypass - a deliberately narrower rule than current
+// avatars, not the same one, because it is the only one that can be applied
+// without trusting an unverifiable claim about who a legacy file belonged to.
+async function isLegacyAvatarAuthorized(req) {
+  const userId = await getUserIdFromRequest(req);
+  return !!userId;
+}
+
+// May a caller who is NOT signed in see this avatar?
+//
+// Only on a public board, and only for somebody who is on it. The client appends
+// ?boardId= to every avatar URL it renders for exactly this case - see the
+// avatarUrl helper in client/components/users/userAvatar.js, whose own comment
+// says "so public viewers can access avatars on public boards" - and this route
+// ignored the parameter, so a public board showed the missing-picture icon to
+// every visitor who was not logged in.
+//
+// The board has to be named AND public AND actually have the avatar's owner on
+// it. Without that last part, naming any public board would unlock any avatar on
+// the instance, which is not what a public board publishes.
+async function avatarIsOnAPublicBoard(req, avatar) {
+  const boardId = parseQuery(req).boardId;
+  if (!boardId || !avatar || !avatar.userId) {
+    return false;
+  }
+  const board = await ReactiveCache.getBoard(boardId);
+  return !!(board && board.isPublic() && board.hasMember(avatar.userId));
 }
 
 // Handle avatar file downloads
@@ -71,7 +144,27 @@ WebApp.handlers.use('/cdn/storage/avatars/:fileName', async (req, res, next) => 
     // Get avatar file from database
     const avatar = await ReactiveCache.getAvatar(fileId);
     if (!avatar) {
-      // Fall back to a legacy CollectionFS avatar (read in place).
+      // Fall back to a legacy CollectionFS avatar (read in place) - only for
+      // an authenticated caller (isLegacyAvatarAuthorized above), so an
+      // anonymous request never learns whether the id exists at all.
+      if (!(await isLegacyAvatarAuthorized(req))) {
+        // An attempt: no current WeKan avatar exists for this id, so an
+        // anonymous request here is either probing for a legacy id or
+        // guessing one - what an attempt against Advisory "serveLegacyAvatar
+        // Serves Legacy CollectionFS Avatars Without Any Authentication"
+        // looks like now that the check exists.
+        try {
+          require('/server/lib/securityLog').record({
+            key: 'authz.legacy-avatar',
+            action: 'blocked',
+            source: '/cdn/storage/avatars/:fileName',
+            detail: 'refused an unauthenticated legacy-avatar fallback request',
+          });
+        } catch (e) { /* logging must never break the guard */ }
+        res.writeHead(401);
+        res.end('Authentication required');
+        return;
+      }
       if (await serveLegacyAvatar(fileId, req, res)) {
         return;
       }
@@ -81,9 +174,20 @@ WebApp.handlers.use('/cdn/storage/avatars/:fileName', async (req, res, next) => 
     }
 
     // Check if user has permission to view this avatar
-    // For avatars, we allow viewing by any logged-in user
-    const userId = Meteor.userId();
-    if (!userId) {
+    // For avatars, we allow viewing by any logged-in user.
+    //
+    // Resolved FROM THE REQUEST. This was `Meteor.userId()`, which reads the
+    // current DDP invocation's environment - it exists in a method or a
+    // publication and not in a WebApp handler, where it THROWS
+    // ("Meteor.userId can only be invoked in method calls or publications").
+    // The catch at the bottom of this handler turned that into a 500, so no
+    // avatar served through this route ever reached anybody, and it looked like
+    // a broken image rather than broken authentication. That is what a 6.x
+    // upgrade shows as lost profile pictures: `/cfs/files/avatars/<id>` is
+    // redirected here, and here is where it died - the migrated file itself was
+    // fine.
+    const userId = await getUserIdFromRequest(req);
+    if (!userId && !(await avatarIsOnAPublicBoard(req, avatar))) {
       res.writeHead(401);
       res.end('Authentication required');
       return;
@@ -100,9 +204,9 @@ WebApp.handlers.use('/cdn/storage/avatars/:fileName', async (req, res, next) => 
     }
 
     // Set appropriate headers
-    res.setHeader('Content-Type', avatar.type || 'image/jpeg');
+    setAvatarResponseHeaders(res, avatar.type);
     res.setHeader('Content-Length', avatar.size || 0);
-    res.setHeader('Cache-Control', 'public, max-age=31536000'); // Cache for 1 year
+    setPrivateFileCacheHeaders(res);
     res.setHeader('ETag', `"${avatar._id}"`);
 
     // Handle conditional requests
@@ -113,7 +217,11 @@ WebApp.handlers.use('/cdn/storage/avatars/:fileName', async (req, res, next) => 
       return;
     }
 
-    // Stream the file
+    // Stream the file - an SVG sanitized, as an image.
+    if (svgResponse.isSvg(avatar.type, avatar.name)) {
+      sendSvgAvatar(res, readStream, avatar);
+      return;
+    }
     res.writeHead(200);
     readStream.pipe(res);
 
@@ -149,12 +257,25 @@ WebApp.handlers.use('/cfs/files/avatars/:fileName', async (req, res, next) => {
     // '<id>-original-<name>' form too.
     const fileId = fileName.split('-original-')[0] || fileName;
 
-    if (await serveLegacyAvatar(fileId, req, res)) {
-      return;
+    // Only an authenticated caller may read the legacy store directly; an
+    // anonymous one falls through to the redirect below, which is itself
+    // authorized (current avatars get the getUserIdFromRequest/
+    // avatarIsOnAPublicBoard check on /cdn/storage/avatars) - so a public
+    // board's already-migrated avatars still work for anonymous viewers,
+    // and only the un-migrated legacy path requires a login.
+    if (await isLegacyAvatarAuthorized(req)) {
+      if (await serveLegacyAvatar(fileId, req, res)) {
+        return;
+      }
     }
 
-    // Not a legacy avatar — redirect to the new avatar URL format.
-    const newUrl = `/cdn/storage/avatars/${fileName}`;
+    // Not a legacy avatar — redirect to the new avatar URL format, KEEPING the
+    // query string. A redirect that drops it drops ?boardId=, which is how a
+    // visitor who is not signed in is allowed to see an avatar on a public board
+    // at all - and this is the redirect every migrated 6.x avatar URL goes
+    // through, so losing it there would 401 exactly the installs this fixes.
+    const query = (req.url || '').split('?')[1];
+    const newUrl = `/cdn/storage/avatars/${fileName}${query ? `?${query}` : ''}`;
     res.writeHead(301, { 'Location': newUrl });
     res.end();
 

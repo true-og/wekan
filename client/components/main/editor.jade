@@ -1,11 +1,13 @@
 template(name="editor")
   a.fa.fa-brands.fa-markdown(title="{{_ 'convert-to-markdown'}}")
-  a.fa.fa-copy(title="{{_ 'copy-text-to-clipboard'}}")
-  span.copied-tooltip {{_ 'copied'}}
+  unless hideCopy
+    a.fa.fa-copy(title="{{_ 'copy-text-to-clipboard'}}")
+    span.copied-tooltip {{_ 'copied'}}
   textarea.editor(
     dir="auto"
     class="{{class}}"
     id=id
+    aria-label=labelText
     autofocus=autofocus
     placeholder="{{_ 'comment-placeholder'}}")
     +Template.contentBlock
@@ -15,3 +17,11 @@ template(name="viewer")
     +mentions
       +markdown
         {{> UI.contentBlock }}
+
+//- A title, a name or a label in a line of other text: the same viewer -
+  Markdown, emoji, mentions, and the Admin Panel's settings for links and
+  code - laid out inline at the text's own size (editor.css).
+template(name="inlineViewer")
+  span.inline-viewer
+    +viewer
+      +Template.contentBlock

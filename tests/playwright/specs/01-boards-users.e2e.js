@@ -32,7 +32,7 @@ test.describe('Boards – user membership', () => {
 
     // Log in as user2 and navigate to boards list
     await loginWithToken(page, user2.id, user2.token);
-    await page.goto(BASE_URL, { waitUntil: 'networkidle' });
+    await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
 
     // WeKan business rule: boards that have not been dragged into a workspace always
     // appear under the "Remaining" section of the All Boards page. The page loads with
@@ -50,7 +50,10 @@ test.describe('Boards – user membership', () => {
 
     // Attempt direct navigation to the board URL — user2 is not a member.
     // WeKan should redirect away or show an error; the board canvas must not render.
-    await page.goto(`${BASE_URL}/b/${board.boardId}/${board.slug}`, { waitUntil: 'networkidle' });
+    // SockJS polling can keep the dev server busy indefinitely. Wait for the
+    // rendered denial, so absence of a canvas cannot pass before routing settles.
+    await page.goto(`${BASE_URL}/b/${board.boardId}/${board.slug}`, { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('.big-message h1')).toHaveText('Board not found');
     // Note: no .catch() — if .board-canvas IS visible this test must fail.
     await expect(page.locator('.board-canvas')).not.toBeVisible({ timeout: 5_000 });
   });
@@ -75,6 +78,39 @@ test.describe('Boards – user membership', () => {
     } else {
       // If search yields no results (user2 might not be visible), verify the input accepted input at minimum
       expect(await searchInput.inputValue()).toBe(user2.username);
+    }
+  });
+
+  test('#2405 owner can add a grain user to a second board', async ({ page, user, user2 }) => {
+    const first = db.seedBoard({ ownerId: user.id });
+    const second = db.seedBoard({ ownerId: user.id });
+    try {
+      await loginWithToken(page, user.id, user.token);
+      await openBoard(page, second.boardId, second.slug);
+
+      const bp = new BoardPage(page);
+      await bp.openBoardMembers();
+      const popup = page.locator('.js-pop-over');
+      await popup.locator('.js-search-member-input').pressSequentially(user2.username);
+      const candidate = popup.locator('.js-select-member').filter({ hasText: user2.username });
+      await expect(candidate).toBeVisible({ timeout: 10_000 });
+      await candidate.click();
+
+      await expect.poll(() => {
+        const stored = db.getBoard(second.boardId);
+        return stored?.members?.some(member =>
+          member.userId === user2.id && member.isActive,
+        );
+      }, { timeout: 10_000 }).toBe(true);
+
+      const untouched = db.getBoard(first.boardId);
+      expect(untouched.members.some(member => member.userId === user2.id)).toBe(false);
+
+      await loginWithToken(page, user2.id, user2.token);
+      await openBoard(page, second.boardId, second.slug);
+      await expect(page.locator('.board-canvas')).toBeVisible({ timeout: 15_000 });
+    } finally {
+      db.cleanup({ boardIds: [first.boardId, second.boardId] });
     }
   });
 
@@ -103,27 +139,82 @@ test.describe('Boards – user membership', () => {
   test('board admin can remove a member from the board', async ({ boardPage, board, user2 }) => {
     db.addBoardMember({ boardId: board.boardId, userId: user2.id });
 
-    await boardPage.reload({ waitUntil: 'networkidle' });
+    await boardPage.reload({ waitUntil: 'domcontentloaded' });
     const bp = new BoardPage(boardPage);
     await bp.openSidebar();
 
-    const memberEl = boardPage.locator('.membersWidget .member, .sidebar .member').filter({ hasText: user2.username }).first();
-    if (await memberEl.count() > 0) {
-      await memberEl.click();
-      await boardPage.locator('.js-pop-over').waitFor();
-      const removeBtn = boardPage.locator('.js-pop-over .js-remove-member, .js-pop-over .js-leave-member');
-      if (await removeBtn.count() > 0) {
-        await removeBtn.click();
-        // Confirm dialog if present
-        const confirmBtn = boardPage.locator('.js-pop-over button.negate, .js-confirm-remove');
-        if (await confirmBtn.count() > 0) await confirmBtn.click();
-        await boardPage.waitForTimeout(600);
+    // SockJS may keep a request open indefinitely. Wait for the actual member
+    // controls instead of network silence, and require removal to happen.
+    const memberEl = boardPage.locator(`.board-sidebar a.js-member[title*="${user2.username}"]`);
+    await expect(memberEl).toBeVisible();
+    await memberEl.click();
+    const removeBtn = boardPage.locator('.js-pop-over a.js-remove-member');
+    await expect(removeBtn).toBeVisible();
+    await removeBtn.click();
+    const confirmBtn = boardPage.locator('.js-pop-over button.js-confirm');
+    await expect(confirmBtn).toBeVisible();
+    await confirmBtn.click();
+    await expect.poll(() => {
+      const member = db.getBoard(board.boardId)?.members?.find(m => m.userId === user2.id);
+      return member?.isActive;
+    }).toBe(false);
+  });
 
+  // #6479: the existing "can remove a member" test above only checks the DB, which is
+  // why the bug shipped — removeMember correctly set isActive:false, but the sidebar
+  // still rendered the removed member's avatar, so removal looked like it did nothing.
+  // This test asserts the UI: the avatar must disappear from the sidebar member list.
+  test('#6479: removing a member hides them from the sidebar member list, not just the DB', async ({ boardPage, board, user2 }) => {
+    db.addBoardMember({ boardId: board.boardId, userId: user2.id });
+    await boardPage.reload({ waitUntil: 'domcontentloaded' });
+    const bp = new BoardPage(boardPage);
+    await bp.openSidebar();
+
+    // The member's avatar (userAvatar renders a.js-member with the username in title).
+    const memberAvatar = boardPage.locator(`.board-sidebar a.js-member[title*="${user2.username}"]`);
+    await expect(memberAvatar).toBeVisible({ timeout: 10_000 });
+
+    // Open the member menu and click "Remove from board".
+    await memberAvatar.click();
+    const removeLink = boardPage.locator('.js-pop-over a.js-remove-member');
+    await expect(removeLink).toBeVisible({ timeout: 10_000 });
+    await removeLink.click();
+
+    // Confirm (removeMemberPopup: button.js-confirm.negate.full).
+    const confirm = boardPage.locator('.js-pop-over button.js-confirm');
+    await expect(confirm).toBeVisible({ timeout: 10_000 });
+    await confirm.click();
+
+    // The fix: the avatar disappears from the sidebar (removal is visible, not just DB).
+    await expect(memberAvatar).toHaveCount(0, { timeout: 10_000 });
+
+    // And the member entry is deactivated (kept with isActive:false per #5122).
+    await expect
+      .poll(() => {
         const boardDoc = db.getBoard(board.boardId);
-        const member = boardDoc?.members?.find(m => m.userId === user2.id && m.isActive);
-        expect(member).toBeFalsy();
-      }
-    }
+        const m = boardDoc?.members?.find(x => x.userId === user2.id);
+        return !!(m && m.isActive === false);
+      }, { timeout: 10_000 })
+      .toBe(true);
+  });
+
+  // NEGATIVE (#6479): a plain (non-admin) board member must not be offered a way to
+  // remove other members — the "Remove from board" link is admin-only.
+  test('#6479 NEGATIVE: a non-admin member is not offered a remove option', async ({ page, board, user, user2 }) => {
+    db.addBoardMember({ boardId: board.boardId, userId: user2.id, isAdmin: false });
+    await loginWithToken(page, user2.id, user2.token);
+    await page.goto(`${BASE_URL}/b/${board.boardId}/${board.slug}`, { waitUntil: 'domcontentloaded' });
+    const bp = new BoardPage(page);
+    await bp.openSidebar();
+
+    // Open the board OWNER's member menu as the non-admin user2.
+    const ownerAvatar = page.locator(`.board-sidebar a.js-member[title*="${user.username}"]`).first();
+    await expect(ownerAvatar).toBeVisible({ timeout: 10_000 });
+    await ownerAvatar.click();
+    await page.locator('.js-pop-over').waitFor({ timeout: 10_000 });
+
+    // No "Remove from board" for a non-admin.
+    await expect(page.locator('.js-pop-over a.js-remove-member')).toHaveCount(0);
   });
 
   test('board renders all three seeded lists without freezing', async ({ boardPage, board }) => {

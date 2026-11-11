@@ -1,0 +1,49 @@
+{
+  "title": "Audit Zenkit adapter",
+  "stages": [
+    {
+      "name": "Audit list"
+    }
+  ],
+  "items": [
+    {
+      "title": "Audit task – Å 中文",
+      "description": "First line: café, comma, and \"quotes\".\nSecond line: 日本語.",
+      "stage_name": "Audit list",
+      "due": "2026-09-30",
+      "tags": [
+        "Audit label"
+      ],
+      "id": "z1",
+      "assignees": [
+        "zen-a",
+        "zen-b"
+      ],
+      "fields": {
+        "Audit estimate": 3,
+        "Audit owner team": "Blue"
+      },
+      "comments": [
+        {
+          "text": "Audit comment",
+          "author": "zen-user",
+          "date": "2026-09-30T12:34:56Z"
+        }
+      ],
+      "checklists": [
+        {
+          "name": "Audit checklist",
+          "items": [
+            {
+              "text": "Audit item",
+              "checked": true
+            }
+          ]
+        }
+      ],
+      "vendorOnly": {
+        "x": 1
+      }
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+template(name="roadmapView")
+  .gantt-view.roadmap-view
+    h2 {{_ 'board-view-roadmap'}}
+    if hasCustomFields
+      .roadmap-field-picker
+        label.roadmap-field-picker-label(for="roadmapFieldSelect") {{_ 'roadmap-group-by'}}
+        select#roadmapFieldSelect.js-roadmap-field-select
+          each customFieldOptions
+            option(value="{{_id}}" selected="{{isSelected _id}}") {{name}}
+      if hasGroups
+        each groups
+          .roadmap-row
+            .roadmap-row-heading
+              +viewer
+                = label
+              |  ({{cards.length}})
+            .js-roadmap-gantt-container.roadmap-gantt-container(data-group-key="{{key}}")
+      else
+        p.roadmap-empty {{_ 'roadmap-no-cards'}}
+    else
+      p.roadmap-empty {{_ 'roadmap-empty-no-custom-fields'}}

@@ -1,12 +1,46 @@
 import { Meteor } from 'meteor/meteor';
 import { check, Match } from 'meteor/check';
 import { ReactiveCache } from '/imports/reactiveCache';
+import { getFeatureFlags } from '/models/lib/featureFlags';
+import Boards from '/models/boards';
+const { boardVisibilitySelectors } = require('/models/lib/boardVisibilitySelectors');
+const { readableWithoutMembership } = require('/models/lib/boardPermission');
+
+// True when this user may see this board: public, a member, or an ACTIVE
+// organisation / team / email-domain share. Built from the same selectors the
+// board publication uses, so the two cannot drift apart.
+async function canSeeBoard(userId, board) {
+  if (!board) return false;
+  // #3249: public for anybody, 'instance' for a signed-in user.
+  if (readableWithoutMembership(board.permission, !!userId)) return true;
+  if (!userId) return false;
+  if (typeof board.hasMember === 'function' && board.hasMember(userId)) return true;
+
+  const user = await ReactiveCache.getUser(userId);
+  if (!user) return false;
+  const listOf = value => (typeof value === 'string' && value.length ? value.split(',') : []);
+  const orgIds = typeof user.orgIdsUserBelongs === 'function' ? listOf(user.orgIdsUserBelongs()) : [];
+  const teamIds = typeof user.teamIdsUserBelongs === 'function' ? listOf(user.teamIdsUserBelongs()) : [];
+  const emailDomains = typeof user.emailDomains === 'function' ? user.emailDomains() : [];
+
+  const visible = await Boards.findOneAsync({
+    _id: board._id,
+    $or: boardVisibilitySelectors({ userId, orgIds, teamIds, emailDomains, includePublic: true }),
+  }, { fields: { _id: 1 } });
+  return Boolean(visible);
+}
 
 Meteor.methods({
   async watch(watchableType, id, level) {
     check(watchableType, String);
     check(id, String);
     check(level, Match.OneOf(String, null));
+
+    // Admin Panel / Features / Notifications (#5820): the watch feature is
+    // disabled, so ignore any request to change a watch level.
+    if (getFeatureFlags().disableWatch) {
+      throw new Meteor.Error('error-watch-disabled');
+    }
 
     const userId = this.userId;
 
@@ -28,8 +62,39 @@ Meteor.methods({
       throw new Meteor.Error('error-json-schema');
     }
 
-    if (board.permission === 'private' && !board.hasMember(userId))
+    // MAY THIS USER SEE THE BOARD - which is not the same question as "is this
+    // user in board.members", and answering the second one is the bug behind
+    // "Silent does not respond. If we try to change it does not change. Nothing
+    // happens."
+    //
+    // A board is shared with people four ways: membership, an organisation, a
+    // team, and (since #5850) an email domain. Only the first puts anybody in
+    // `members`. Everyone reaching a board through one of the other three could
+    // open it, see the watch button, choose a level - and have this line throw
+    // error-board-notAMember, which the popup swallowed (see
+    // client/components/boards/boardHeader.js). Nothing changed and nothing was
+    // said, which is exactly how it was reported.
+    //
+    // The publications answer the same question with one shared builder
+    // (models/lib/boardVisibilitySelectors), and so does this: ask the database
+    // whether this board is among the ones this user may see. It is the same
+    // rule, so a watch can never be granted where the board itself is not.
+    if (!(await canSeeBoard(userId, board))) {
       throw new Meteor.Error('error-board-notAMember');
+    }
+    // ...and on it, the card by the user's board role: an assigned-only member
+    // watches only their own cards (GHSA-r4gm-mjj9-g3x8). No view shows them
+    // another card's watch button, so this is an attempt.
+    if (watchableType === 'card' &&
+        !require('/models/lib/boardCardScope').assignedOnlyAllowsCard(board, userId, watchableObj)) {
+      try {
+        require('/server/lib/securityLog').record({
+          key: 'authz.assigned', action: 'blocked', source: 'watch:card', userId,
+          detail: 'Assigned-only member tried to watch a card not assigned to them.',
+        });
+      } catch (e) { /* logging must never break the guard */ }
+      throw new Meteor.Error('error-card-doesNotExist');
+    }
 
     await watchableObj.setWatcher(userId, level);
     return true;

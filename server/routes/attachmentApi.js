@@ -1,5 +1,4 @@
 import { Meteor } from 'meteor/meteor';
-import { Accounts } from 'meteor/accounts-base';
 import { WebApp } from 'meteor/webapp';
 import { createAuthMiddleware } from 'meteor/accounts-express';
 import { ReactiveCache } from '/imports/reactiveCache';
@@ -9,13 +8,17 @@ import {
   isTrustedHeaderLoginSource,
 } from '/server/lib/headerLoginAuth';
 import { fileStoreStrategyFactory } from '/models/attachments.server';
-import { Settings } from '../../models/settings';
 import { moveToStorage } from '/models/lib/fileStoreStrategy';
 import { STORAGE_NAME_FILESYSTEM, STORAGE_NAME_GRIDFS, STORAGE_NAME_S3 } from '/models/lib/fileStoreStrategy';
 import AttachmentStorageSettings from '/models/attachmentStorageSettings';
 import fs from 'fs';
 import path from 'path';
 import { ObjectId } from 'bson';
+import { allowIsBoardMemberWithWriteAccess } from '/server/lib/utils';
+import { tripCanary } from '/server/lib/canary';
+import { liveAttachments } from '/models/lib/attachmentSoftDelete';
+import { softDeleteAttachment } from '/server/attachmentSoftDelete';
+import { assignedOnlyAttachmentScope, mayReadBoardAttachment, mayWriteCardAttachment } from '/server/lib/assignedOnlyAttachments';
 
 const HARD_MAX_API_FILE_BYTES = 64 * 1024 * 1024;
 const HARD_MAX_API_UPLOAD_BODY_BYTES = 96 * 1024 * 1024;
@@ -96,13 +99,17 @@ async function getApiTransferLimits() {
 async function authenticateApiRequest(req) {
   // Preferred path: accounts-express middleware populated authenticated user context.
   if (req?.userId) {
-    return req.userId;
+    const user = await require('/server/lib/activeUser').activeUserById(req.userId, 'attachment', req);
+    if (!user) throw new Meteor.Error('unauthorized', 'Invalid credentials');
+    return user._id;
   }
 
   // Optional header-login path for trusted upstream SSO proxies.
   const headerLoginUserId = await findOrCreateHeaderLoginUser(req);
   if (headerLoginUserId) {
-    return headerLoginUserId;
+    const user = await require('/server/lib/activeUser').activeUserById(headerLoginUserId, 'attachment', req);
+    if (!user) throw new Meteor.Error('unauthorized', 'Invalid credentials');
+    return user._id;
   }
 
   // Legacy path kept for backward compatibility.
@@ -113,14 +120,8 @@ async function authenticateApiRequest(req) {
     throw new Meteor.Error('unauthorized', 'Missing X-User-Id or X-Auth-Token headers');
   }
 
-  // Hash the token and validate against stored login tokens
-  const hashedToken = Accounts._hashLoginToken(authToken);
-  const user = await Meteor.users.findOneAsync({
-    _id: userId,
-    'services.resume.loginTokens.hashedToken': hashedToken,
-  });
-
-  if (!user) {
+  const user = await require('/server/lib/activeUser').activeUserByToken(authToken, 'attachment', req);
+  if (!user || user._id !== userId) {
     throw new Meteor.Error('unauthorized', 'Invalid credentials');
   }
 
@@ -139,33 +140,85 @@ function sendErrorResponse(res, statusCode, message) {
 }
 
 // Returns true if the user may *write* to the board (add/change/remove
-// attachments), mirroring Authentication.checkBoardWriteAccess: an active member
-// who is not read-only, comment-only, no-comments, worker, or assigned-only —
-// or a global site admin. Read operations should keep using board.hasMember().
+// attachments), mirroring Authentication.checkBoardWriteAccess: the canonical
+// board write capability, or a global site admin. Read operations should keep
+// using board.hasMember().
+// A stored file as the API's raw answer: streamed, held to `maxBytes` as it
+// flows, and served as a download that cannot run in this origin.
+function sendRawFile(res, readStream, file, maxBytes) {
+  const { limitStream } = require('/server/lib/importAttachmentStream');
+  const { attachmentDisposition } = require('/models/lib/exportFilename');
+  res.writeHead(200, {
+    'Content-Type': file.type || 'application/octet-stream',
+    'Content-Disposition': attachmentDisposition(file.name || 'attachment'),
+    'X-Content-Type-Options': 'nosniff',
+    'Content-Security-Policy': "default-src 'none'; sandbox",
+    ...(Number.isFinite(file.size) ? { 'Content-Length': String(file.size) } : {}),
+  });
+  const body = limitStream(readStream, maxBytes);
+  body.on('error', () => res.destroy());
+  body.pipe(res);
+}
+
 async function userHasBoardWriteAccess(board, userId) {
   if (!board || !userId) {
     return false;
   }
-  const writeAccess = board.members.some(
-    m =>
-      m.userId === userId &&
-      m.isActive &&
-      !m.isNoComments &&
-      !m.isCommentOnly &&
-      !m.isWorker &&
-      !m.isReadOnly &&
-      !m.isReadAssignedOnly,
-  );
-  if (writeAccess) {
+  if (allowIsBoardMemberWithWriteAccess(userId, board)) {
     return true;
   }
   // Global site admins may write to any board.
   const admin = await ReactiveCache.getUser({ _id: userId, isAdmin: true });
-  return admin !== undefined;
+  if (admin !== undefined) {
+    return true;
+  }
+  tripCanary('board.write-without-capability', { userId });
+  return false;
 }
 
 // Upload attachment endpoint
-WebApp.handlers.use('/api', createAuthMiddleware());
+const accountsExpressAuth = createAuthMiddleware();
+WebApp.handlers.use('/api', function activeAccountsExpressAuth(req, res, next) {
+  return accountsExpressAuth(req, res, error => {
+    if (error) return next(error);
+    if (!req.userId) return next();
+    require('/server/lib/activeUser').activeUserById(req.userId, 'api-session', req)
+      .then(user => {
+        if (!user) return sendErrorResponse(res, 401, 'Invalid credentials');
+        return next();
+      }).catch(next);
+  });
+});
+
+// The checks every card upload makes, JSON or raw: the card, board, swimlane
+// and list belong together, the user may write to the board, and the board
+// takes attachments. Returns { board, card } or { status, message }.
+async function checkCardUploadTarget({ boardId, swimlaneId, listId, cardId }, userId) {
+  const card = await ReactiveCache.getCard(cardId);
+  if (!card) return { status: 404, message: 'Card not found' };
+  const board = await ReactiveCache.getBoard(boardId);
+  if (!board) return { status: 404, message: 'Board not found' };
+  if (card.boardId !== boardId) return { status: 400, message: 'Card does not belong to the specified board' };
+  if (card.swimlaneId !== swimlaneId) return { status: 400, message: 'Swimlane ID does not match the card\'s swimlane' };
+  if (card.listId !== listId) return { status: 400, message: 'List ID does not match the card\'s list' };
+  // Uploading requires write access, not just membership (read-only /
+  // comment-only / worker members cannot add attachments).
+  if (!(await userHasBoardWriteAccess(board, userId))) return { status: 403, message: 'You do not have permission to modify this card' };
+  // UnassignedAttachBleed: and the card itself, for an assigned-only member.
+  if (!mayWriteCardAttachment(board, userId, card, 'attachment-api:upload')) return { status: 403, message: 'You do not have permission to modify this card' };
+  if (!board.allowsAttachments) return { status: 403, message: 'Attachments are not allowed on this board' };
+  return { board, card };
+}
+
+// The admin-configured default storage, which every API upload goes to.
+async function apiUploadStorage() {
+  try {
+    const settings = await AttachmentStorageSettings.findOneAsync({});
+    return settings ? settings.getDefaultStorage() : STORAGE_NAME_FILESYSTEM;
+  } catch (error) {
+    return STORAGE_NAME_FILESYSTEM;
+  }
+}
 
 WebApp.handlers.use('/api/attachment/upload', async (req, res, next) => {
     if (req.method !== 'POST') {
@@ -189,6 +242,64 @@ WebApp.handlers.use('/api/attachment/upload', async (req, res, next) => {
       if (apiUploadBlocked) {
         clearTimeout(timeout);
         return sendErrorResponse(res, 403, 'API uploads are disabled by administrator');
+      }
+
+      // A raw upload: the request body is the file itself - any Content-Type
+      // but JSON - and its card is named in the query. It streams into storage
+      // as it arrives, never held in memory or turned into base64, so its size
+      // is limited only by the API upload limit, checked against
+      // Content-Length before reading and counted as the bytes flow.
+      if (!/application\/json/i.test(String(req.headers['content-type'] || ''))) {
+        clearTimeout(timeout);
+        const query = req.query || {};
+        const target = {
+          boardId: String(query.boardId || ''), swimlaneId: String(query.swimlaneId || ''),
+          listId: String(query.listId || ''), cardId: String(query.cardId || ''),
+        };
+        const fileName = String(query.fileName || '').slice(0, 255);
+        if (!target.boardId || !target.swimlaneId || !target.listId || !target.cardId || !fileName) {
+          return sendErrorResponse(res, 400, 'Missing required parameters');
+        }
+        const declared = parseInt(req.headers['content-length'], 10);
+        if (Number.isFinite(declared) && declared > effectiveApiUploadMaxBytes) {
+          return sendErrorResponse(res, 413, 'Attachment exceeds API upload limit');
+        }
+        const checked = await checkCardUploadTarget(target, userId);
+        if (checked.status) return sendErrorResponse(res, checked.status, checked.message);
+        const targetStorage = await apiUploadStorage();
+        const { limitStream } = require('/server/lib/importAttachmentStream');
+        const { addAttachmentFromStream } = require('/models/lib/fileStoreStrategy');
+        const type = String(query.fileType || req.headers['content-type'] || 'application/octet-stream').slice(0, 255);
+        let fileRef;
+        try {
+          fileRef = await addAttachmentFromStream(limitStream(req, effectiveApiUploadMaxBytes), {
+            fileName, type, userId,
+            meta: { ...target, fileId: new ObjectId().toString(), source: 'api', storageBackend: targetStorage },
+          }, fileStoreStrategyFactory);
+        } catch (error) {
+          if (error && error.message === 'import-attachment-too-large') {
+            return sendErrorResponse(res, 413, 'Attachment exceeds API upload limit');
+          }
+          console.error('API raw attachment upload error:', error);
+          return sendErrorResponse(res, 500, 'Failed to upload attachment');
+        }
+        if (targetStorage !== STORAGE_NAME_FILESYSTEM) {
+          Meteor.defer(() => {
+            try {
+              moveToStorage(fileRef, targetStorage, fileStoreStrategyFactory);
+            } catch (error) {
+              console.error('Error moving attachment to target storage:', error);
+            }
+          });
+        }
+        return sendJsonResponse(res, 200, {
+          success: true,
+          attachmentId: fileRef._id,
+          fileName,
+          fileSize: fileRef.size,
+          storageBackend: targetStorage,
+          message: 'Attachment uploaded successfully',
+        });
       }
 
       let body = '';
@@ -237,51 +348,11 @@ WebApp.handlers.use('/api/attachment/upload', async (req, res, next) => {
             return sendErrorResponse(res, 413, 'Attachment exceeds API upload limit');
           }
 
-          // Check if user has permission to modify the card
-          const card = await ReactiveCache.getCard(cardId);
-          if (!card) {
-            return sendErrorResponse(res, 404, 'Card not found');
-          }
-
-          const board = await ReactiveCache.getBoard(boardId);
-          if (!board) {
-            return sendErrorResponse(res, 404, 'Board not found');
-          }
-
-          // Verify that the card belongs to the specified board
-          if (card.boardId !== boardId) {
-            return sendErrorResponse(res, 400, 'Card does not belong to the specified board');
-          }
-
-          // Verify that the swimlaneId and listId match the card's actual swimlane and list
-          if (card.swimlaneId !== swimlaneId) {
-            return sendErrorResponse(res, 400, 'Swimlane ID does not match the card\'s swimlane');
-          }
-
-          if (card.listId !== listId) {
-            return sendErrorResponse(res, 400, 'List ID does not match the card\'s list');
-          }
-
-          // Check permissions: uploading requires write access, not just
-          // membership (read-only / comment-only / worker members cannot add
-          // attachments).
-          if (!(await userHasBoardWriteAccess(board, userId))) {
-            return sendErrorResponse(res, 403, 'You do not have permission to modify this card');
-          }
-
-          // Check if board allows attachments
-          if (!board.allowsAttachments) {
-            return sendErrorResponse(res, 403, 'Attachments are not allowed on this board');
-          }
+          const checked = await checkCardUploadTarget({ boardId, swimlaneId, listId, cardId }, userId);
+          if (checked.status) return sendErrorResponse(res, checked.status, checked.message);
 
           // Always use admin-configured default storage backend for API uploads.
-          let targetStorage = STORAGE_NAME_FILESYSTEM;
-          try {
-            const settings = await AttachmentStorageSettings.findOneAsync({});
-            targetStorage = settings ? settings.getDefaultStorage() : STORAGE_NAME_FILESYSTEM;
-          } catch (error) {
-            targetStorage = STORAGE_NAME_FILESYSTEM;
-          }
+          const targetStorage = await apiUploadStorage();
 
           // Validate storage backend
           if (![STORAGE_NAME_FILESYSTEM, STORAGE_NAME_GRIDFS, STORAGE_NAME_S3].includes(targetStorage)) {
@@ -293,8 +364,6 @@ WebApp.handlers.use('/api/attachment/upload', async (req, res, next) => {
           if (fileBuffer.length > effectiveApiUploadMaxBytes) {
             return sendErrorResponse(res, 413, 'Attachment exceeds API upload limit');
           }
-          const file = new File([fileBuffer], fileName, { type: fileType || 'application/octet-stream' });
-
           // Create attachment metadata
           const fileId = new ObjectId().toString();
           const meta = {
@@ -307,26 +376,16 @@ WebApp.handlers.use('/api/attachment/upload', async (req, res, next) => {
             storageBackend: targetStorage
           };
 
-          // Create attachment
-          const uploader = await Attachments.insertAsync({
-            file: file,
-            meta: meta,
-            isBase64: false,
-            transport: 'http'
-          });
+          // Create attachment. Meteor-Files has insertAsync only on the client;
+          // on the server this JSON branch answered 500 "Attachments.insertAsync
+          // is not a function". writeAsync stores the bytes, and its after-upload
+          // hook validates the file and moves it to the default storage, which
+          // is targetStorage.
+          const uploader = await Attachments.writeAsync(fileBuffer, {
+            fileName, type: fileType || 'application/octet-stream', userId, meta,
+          }, true);
 
           if (uploader) {
-            // Move to target storage if not filesystem
-            if (targetStorage !== STORAGE_NAME_FILESYSTEM) {
-              Meteor.defer(() => {
-                try {
-                  moveToStorage(uploader, targetStorage, fileStoreStrategyFactory);
-                } catch (error) {
-                  console.error('Error moving attachment to target storage:', error);
-                }
-              });
-            }
-
             sendJsonResponse(res, 200, {
               success: true,
               attachmentId: uploader._id,
@@ -357,6 +416,265 @@ WebApp.handlers.use('/api/attachment/upload', async (req, res, next) => {
     }
   });
 
+  // Upload a board BACKGROUND image (board-level, no card). This is the
+  // background counterpart of /api/attachment/upload: it stores a board-level
+  // attachment and sets it as the board's active background. Board-admin gated.
+  WebApp.handlers.use('/api/attachment/upload-background', async (req, res, next) => {
+    if (req.method !== 'POST') {
+      return next();
+    }
+    const timeout = setTimeout(() => {
+      if (!res.headersSent) sendErrorResponse(res, 408, 'Request timeout');
+    }, 30000);
+    try {
+      const userId = await authenticateApiRequest(req);
+      const { apiUploadBlocked, effectiveApiUploadMaxBytes } = await getApiTransferLimits();
+      if (apiUploadBlocked) {
+        clearTimeout(timeout);
+        return sendErrorResponse(res, 403, 'API uploads are disabled by administrator');
+      }
+
+      // A raw upload, as /api/attachment/upload takes one: the body is the
+      // image itself, the board is named in the query, and it streams into
+      // storage within the API upload limit.
+      if (!/application\/json/i.test(String(req.headers['content-type'] || ''))) {
+        clearTimeout(timeout);
+        const query = req.query || {};
+        const boardId = String(query.boardId || '');
+        const fileName = String(query.fileName || '').slice(0, 255);
+        if (!boardId || !fileName) return sendErrorResponse(res, 400, 'Missing required parameters');
+        const declared = parseInt(req.headers['content-length'], 10);
+        if (Number.isFinite(declared) && declared > effectiveApiUploadMaxBytes) {
+          return sendErrorResponse(res, 413, 'Background exceeds API upload limit');
+        }
+        const board = await ReactiveCache.getBoard(boardId);
+        if (!board) return sendErrorResponse(res, 404, 'Board not found');
+        // Managing backgrounds is board-admin (or global admin) gated.
+        const isAdmin = (board.hasAdmin && board.hasAdmin(userId)) ||
+          !!(await ReactiveCache.getUser({ _id: userId, isAdmin: true }));
+        if (!isAdmin) return sendErrorResponse(res, 403, 'Board admin required');
+        const targetStorage = await apiUploadStorage();
+        const { limitStream } = require('/server/lib/importAttachmentStream');
+        const { addAttachmentFromStream } = require('/models/lib/fileStoreStrategy');
+        let fileRef;
+        try {
+          fileRef = await addAttachmentFromStream(limitStream(req, effectiveApiUploadMaxBytes), {
+            fileName, userId,
+            type: String(query.fileType || req.headers['content-type'] || 'image/png').slice(0, 255),
+            meta: { boardId, fileId: new ObjectId().toString(), source: 'api-background', storageBackend: targetStorage },
+          }, fileStoreStrategyFactory);
+        } catch (error) {
+          if (error && error.message === 'import-attachment-too-large') {
+            return sendErrorResponse(res, 413, 'Background exceeds API upload limit');
+          }
+          console.error('API raw background upload error:', error);
+          return sendErrorResponse(res, 500, 'Failed to upload background');
+        }
+        if (targetStorage !== STORAGE_NAME_FILESYSTEM) {
+          Meteor.defer(() => {
+            try {
+              moveToStorage(fileRef, targetStorage, fileStoreStrategyFactory);
+            } catch (error) {
+              console.error('Error moving background to target storage:', error);
+            }
+          });
+        }
+        await board.setBackgroundImage(fileRef._id);
+        const updated = await ReactiveCache.getBoard(boardId);
+        return sendJsonResponse(res, 200, {
+          success: true,
+          attachmentId: fileRef._id,
+          fileName,
+          fileSize: fileRef.size,
+          storageBackend: targetStorage,
+          backgroundImageURL: updated ? updated.backgroundImageURL : '',
+          message: 'Board background uploaded successfully',
+        });
+      }
+
+      let body = '';
+      let bodyBytes = 0;
+      let bodyComplete = false;
+      req.on('data', chunk => {
+        if (bodyComplete) return;
+        bodyBytes += chunk.length || 0;
+        if (bodyBytes > HARD_MAX_API_UPLOAD_BODY_BYTES) {
+          bodyComplete = true;
+          clearTimeout(timeout);
+          if (!res.headersSent) sendErrorResponse(res, 413, 'Request payload exceeds server safety limit');
+          req.destroy();
+          return;
+        }
+        body += chunk.toString();
+      });
+
+      req.on('end', async () => {
+        if (bodyComplete) return;
+        bodyComplete = true;
+        clearTimeout(timeout);
+        try {
+          const data = JSON.parse(body);
+          const { boardId, fileData, fileName, fileType } = data;
+          if (!boardId || !fileData || !fileName) {
+            return sendErrorResponse(res, 400, 'Missing required parameters');
+          }
+          if (typeof fileData !== 'string') {
+            return sendErrorResponse(res, 400, 'Invalid fileData format');
+          }
+          if (fileData.length > maxBase64LengthForBytes(effectiveApiUploadMaxBytes)) {
+            return sendErrorResponse(res, 413, 'Background exceeds API upload limit');
+          }
+          const board = await ReactiveCache.getBoard(boardId);
+          if (!board) {
+            return sendErrorResponse(res, 404, 'Board not found');
+          }
+          // Managing backgrounds is board-admin (or global admin) gated.
+          const isAdmin =
+            (board.hasAdmin && board.hasAdmin(userId)) ||
+            !!(await ReactiveCache.getUser({ _id: userId, isAdmin: true }));
+          if (!isAdmin) {
+            return sendErrorResponse(res, 403, 'Board admin required');
+          }
+
+          let targetStorage = STORAGE_NAME_FILESYSTEM;
+          try {
+            const settings = await AttachmentStorageSettings.findOneAsync({});
+            targetStorage = settings ? settings.getDefaultStorage() : STORAGE_NAME_FILESYSTEM;
+          } catch (error) {
+            targetStorage = STORAGE_NAME_FILESYSTEM;
+          }
+          if (![STORAGE_NAME_FILESYSTEM, STORAGE_NAME_GRIDFS, STORAGE_NAME_S3].includes(targetStorage)) {
+            return sendErrorResponse(res, 400, 'Invalid storage backend');
+          }
+
+          const fileBuffer = Buffer.from(fileData, 'base64');
+          if (fileBuffer.length > effectiveApiUploadMaxBytes) {
+            return sendErrorResponse(res, 413, 'Background exceeds API upload limit');
+          }
+          const fileId = new ObjectId().toString();
+          const meta = { boardId, fileId, source: 'api-background', storageBackend: targetStorage };
+          // writeAsync, not the client-only insertAsync; its after-upload hook
+          // validates the image and moves it to the default storage.
+          const uploader = await Attachments.writeAsync(fileBuffer, {
+            fileName, type: fileType || 'image/png', userId, meta,
+          }, true);
+          if (!uploader) {
+            return sendErrorResponse(res, 500, 'Failed to upload background');
+          }
+          await board.setBackgroundImage(uploader._id);
+          const updated = await ReactiveCache.getBoard(boardId);
+          sendJsonResponse(res, 200, {
+            success: true,
+            attachmentId: uploader._id,
+            fileName,
+            fileSize: fileBuffer.length,
+            storageBackend: targetStorage,
+            backgroundImageURL: updated ? updated.backgroundImageURL : '',
+            message: 'Board background uploaded successfully',
+          });
+        } catch (error) {
+          console.error('API board background upload error:', error);
+          sendErrorResponse(res, 500, error.message);
+        }
+      });
+
+      req.on('error', (error) => {
+        clearTimeout(timeout);
+        if (!res.headersSent) sendErrorResponse(res, 400, 'Request error');
+      });
+    } catch (error) {
+      clearTimeout(timeout);
+      sendErrorResponse(res, 401, error.message);
+    }
+  });
+
+  // Download a board's current BACKGROUND image (board members), as base64.
+  WebApp.handlers.use('/api/attachment/download-background/:boardId', async (req, res, next) => {
+    if (req.method !== 'GET') {
+      return next();
+    }
+    try {
+      const userId = await authenticateApiRequest(req);
+      const { apiDownloadBlocked, effectiveApiDownloadMaxBytes } = await getApiTransferLimits();
+      if (apiDownloadBlocked) {
+        return sendErrorResponse(res, 403, 'API downloads are disabled by administrator');
+      }
+      const board = await ReactiveCache.getBoard(req.params.boardId);
+      if (!board || !board.hasMember(userId)) {
+        return sendErrorResponse(res, 403, 'You do not have permission to access this board');
+      }
+      const attachmentId = board.backgroundImageId;
+      if (!attachmentId) {
+        return sendErrorResponse(res, 404, 'Board has no background image set');
+      }
+      const attachment = await ReactiveCache.getAttachment(attachmentId);
+      if (!attachment) {
+        return sendErrorResponse(res, 404, 'Background attachment not found');
+      }
+      // BackgroundBleed: only this board's own attachment is its background.
+      if (!require('/models/lib/boardBackgroundOwnership').isOwnBoardBackground(board, attachment)) {
+        try {
+          require('/server/lib/securityLog').record({
+            key: 'authz.background', action: 'blocked', source: 'rest:download-background', userId: userId,
+            detail: 'A board background pointed at an attachment of another board.',
+          });
+        } catch (e) { /* logging must never break the guard */ }
+        return sendErrorResponse(res, 404, 'Background attachment not found');
+      }
+      const strategy = fileStoreStrategyFactory.getFileStrategy(attachment, 'original');
+      const readStream = strategy.getReadStream();
+      if (!readStream) {
+        return sendErrorResponse(res, 404, 'File not found in storage');
+      }
+      if (Number.isFinite(attachment.size) && attachment.size > effectiveApiDownloadMaxBytes) {
+        return sendErrorResponse(res, 413, 'Background exceeds API download limit');
+      }
+      // ?raw=1: the image itself, streamed, as /api/attachment/download does.
+      if (req.query && req.query.raw === '1') {
+        sendRawFile(res, readStream, attachment, effectiveApiDownloadMaxBytes);
+        return;
+      }
+      const chunks = [];
+      let totalBytes = 0;
+      let responseSent = false;
+      const fail = (statusCode, message) => {
+        if (responseSent || res.headersSent) return;
+        responseSent = true;
+        try { readStream.destroy(); } catch (e) { /* ignore */ }
+        sendErrorResponse(res, statusCode, message);
+      };
+      readStream.on('data', (chunk) => {
+        totalBytes += chunk.length || 0;
+        if (totalBytes > effectiveApiDownloadMaxBytes) {
+          fail(413, 'Background exceeds API download limit');
+          return;
+        }
+        chunks.push(chunk);
+      });
+      readStream.on('end', () => {
+        if (responseSent || res.headersSent) return;
+        responseSent = true;
+        const fileBuffer = Buffer.concat(chunks);
+        sendJsonResponse(res, 200, {
+          success: true,
+          attachmentId,
+          fileName: attachment.name,
+          fileSize: attachment.size,
+          fileType: attachment.type,
+          base64Data: fileBuffer.toString('base64'),
+          backgroundImageURL: board.backgroundImageURL || '',
+          storageBackend: strategy.getStorageName(),
+        });
+      });
+      readStream.on('error', (error) => {
+        console.error('Background download error:', error);
+        sendErrorResponse(res, 500, error.message);
+      });
+    } catch (error) {
+      sendErrorResponse(res, 401, error.message);
+    }
+  });
+
   // Download attachment endpoint
   WebApp.handlers.use('/api/attachment/download/:attachmentId', async (req, res, next) => {
     if (req.method !== 'GET') {
@@ -383,7 +701,7 @@ WebApp.handlers.use('/api/attachment/upload', async (req, res, next) => {
 
       // Check permissions
       const board = await ReactiveCache.getBoard(attachment.meta.boardId);
-      if (!board || !board.hasMember(userId)) {
+      if (!board || !board.hasMember(userId) || !(await mayReadBoardAttachment(board, userId, attachment))) {
         return sendErrorResponse(res, 403, 'You do not have permission to access this attachment');
       }
 
@@ -397,6 +715,14 @@ WebApp.handlers.use('/api/attachment/upload', async (req, res, next) => {
 
       if (Number.isFinite(attachment.size) && attachment.size > effectiveApiDownloadMaxBytes) {
         return sendErrorResponse(res, 413, 'Attachment exceeds API download limit');
+      }
+
+      // ?raw=1: the file itself, streamed from storage as it is read - never
+      // held in memory or turned into base64 - after the same checks, and held
+      // to the same API download limit as the bytes flow.
+      if (req.query && req.query.raw === '1') {
+        sendRawFile(res, readStream, attachment, effectiveApiDownloadMaxBytes);
+        return;
       }
 
       // Read file data
@@ -495,7 +821,9 @@ WebApp.handlers.use('/api/attachment/upload', async (req, res, next) => {
         query['meta.cardId'] = cardId;
       }
 
-      const attachments = await ReactiveCache.getAttachments(query);
+      const scope = await assignedOnlyAttachmentScope(board, userId);
+      if (scope) query = { $and: [query, scope] };
+      const attachments = await ReactiveCache.getAttachments(liveAttachments(query));
 
       const attachmentList = attachments.map(attachment => {
         const strategy = fileStoreStrategyFactory.getFileStrategy(attachment, 'original');
@@ -540,7 +868,8 @@ WebApp.handlers.use('/api/boards/:boardId/attachments', async (req, res, next) =
     if (!board || !board.hasMember(userId)) {
       return sendErrorResponse(res, 403, 'You do not have permission to access this board');
     }
-    const query = { 'meta.boardId': boardId };
+    const scope = await assignedOnlyAttachmentScope(board, userId);
+    const query = scope ? liveAttachments({ $and: [{ 'meta.boardId': boardId }, scope] }) : liveAttachments({ 'meta.boardId': boardId });
     const attachments = await ReactiveCache.getAttachments(query);
     const attachmentList = attachments.map(attachment => {
       const strategy = fileStoreStrategyFactory.getFileStrategy(attachment, 'original');
@@ -621,6 +950,12 @@ WebApp.handlers.use('/api/boards/:boardId/attachments', async (req, res, next) =
           if (!sourceBoard || !sourceBoard.hasMember(userId)) {
             return sendErrorResponse(res, 403, 'You do not have permission to access the source attachment');
           }
+          // AssignedBleed copy sibling: an assigned-only member copies only
+          // from cards assigned to them (2026-10-02).
+          const sourceCard = sourceAttachment.meta.cardId ? await ReactiveCache.getCard(sourceAttachment.meta.cardId) : null;
+          if (!require('/models/lib/boardCardScope').mayCopyFromBoard(sourceBoard, userId, sourceCard)) {
+            return sendErrorResponse(res, 403, 'You do not have permission to access the source attachment');
+          }
 
           // Check target permissions: writing the copy needs write access.
           const targetBoard = await ReactiveCache.getBoard(targetBoardId);
@@ -637,6 +972,11 @@ WebApp.handlers.use('/api/boards/:boardId/attachments', async (req, res, next) =
           if (targetCard.boardId !== targetBoardId) {
             return sendErrorResponse(res, 400, 'Target card does not belong to the specified board');
           }
+          // UnassignedAttachBleed: an assigned-only member writes only onto a
+          // card assigned to them.
+          if (!mayWriteCardAttachment(targetBoard, userId, targetCard, 'attachment-api:copy')) {
+            return sendErrorResponse(res, 403, 'You do not have permission to modify the target card');
+          }
 
           // Verify that the target swimlaneId and listId match the card's actual swimlane and list
           if (targetCard.swimlaneId !== targetSwimlaneId) {
@@ -652,6 +992,13 @@ WebApp.handlers.use('/api/boards/:boardId/attachments', async (req, res, next) =
             return sendErrorResponse(res, 403, 'Attachments are not allowed on the target board');
           }
 
+          // #6745: refuse a source over the limit BEFORE reading it, and stop
+          // reading as soon as the bytes read pass the limit. The whole file used
+          // to be read into memory first and only then compared with the limit,
+          // so a copy of a 2 GB file held 2 GB of server memory to refuse it.
+          if (Number(sourceAttachment.size) > effectiveApiUploadMaxBytes) {
+            return sendErrorResponse(res, 413, 'Attachment exceeds API upload limit');
+          }
           // Get source file strategy
           const sourceStrategy = fileStoreStrategyFactory.getFileStrategy(sourceAttachment, 'original');
           const readStream = sourceStrategy.getReadStream();
@@ -662,7 +1009,18 @@ WebApp.handlers.use('/api/boards/:boardId/attachments', async (req, res, next) =
 
           // Read source file data
           const chunks = [];
+          let bytesRead = 0;
+          let tooLarge = false;
           readStream.on('data', (chunk) => {
+            if (tooLarge) return;
+            bytesRead += chunk.length;
+            if (bytesRead > effectiveApiUploadMaxBytes) {
+              tooLarge = true;
+              chunks.length = 0;
+              readStream.destroy();
+              sendErrorResponse(res, 413, 'Attachment exceeds API upload limit');
+              return;
+            }
             chunks.push(chunk);
           });
 
@@ -672,8 +1030,6 @@ WebApp.handlers.use('/api/boards/:boardId/attachments', async (req, res, next) =
               if (fileBuffer.length > effectiveApiUploadMaxBytes) {
                 return sendErrorResponse(res, 413, 'Attachment exceeds API upload limit');
               }
-              const file = new File([fileBuffer], sourceAttachment.name, { type: sourceAttachment.type });
-
               // Create new attachment metadata
               const fileId = new ObjectId().toString();
               const meta = {
@@ -687,13 +1043,11 @@ WebApp.handlers.use('/api/boards/:boardId/attachments', async (req, res, next) =
                 copyStorage: sourceStrategy.getStorageName()
               };
 
-              // Create new attachment
-              const uploader = await Attachments.insertAsync({
-                file: file,
-                meta: meta,
-                isBase64: false,
-                transport: 'http'
-              });
+              // Create new attachment: writeAsync, not the client-only
+              // insertAsync; the after-upload hook stores it in copyStorage.
+              const uploader = await Attachments.writeAsync(fileBuffer, {
+                fileName: sourceAttachment.name, type: sourceAttachment.type, userId, meta,
+              }, true);
 
               if (uploader) {
                 sendJsonResponse(res, 200, {
@@ -778,7 +1132,9 @@ WebApp.handlers.use('/api/boards/:boardId/attachments', async (req, res, next) =
           // Check source permissions: a move removes the attachment from the
           // source board, so it requires write access there.
           const sourceBoard = await ReactiveCache.getBoard(sourceAttachment.meta.boardId);
-          if (!sourceBoard || !(await userHasBoardWriteAccess(sourceBoard, userId))) {
+          if (!sourceBoard || !(await userHasBoardWriteAccess(sourceBoard, userId)) ||
+              // GHSA-r4gm-mjj9-g3x8: only a file the caller may read is moved.
+              !(await mayReadBoardAttachment(sourceBoard, userId, sourceAttachment, 'attachment-api:move'))) {
             return sendErrorResponse(res, 403, 'You do not have permission to access the source attachment');
           }
 
@@ -797,6 +1153,11 @@ WebApp.handlers.use('/api/boards/:boardId/attachments', async (req, res, next) =
 
           if (targetCard.boardId !== targetBoardId) {
             return sendErrorResponse(res, 400, 'Target card does not belong to the specified board');
+          }
+          // UnassignedAttachBleed: an assigned-only member writes only onto a
+          // card assigned to them.
+          if (!mayWriteCardAttachment(targetBoard, userId, targetCard, 'attachment-api:move')) {
+            return sendErrorResponse(res, 403, 'You do not have permission to modify the target card');
           }
 
           // Verify that the target swimlaneId and listId match the card's actual swimlane and list
@@ -874,9 +1235,16 @@ WebApp.handlers.use('/api/boards/:boardId/attachments', async (req, res, next) =
       if (!board || !(await userHasBoardWriteAccess(board, userId))) {
         return sendErrorResponse(res, 403, 'You do not have permission to delete this attachment');
       }
+      // UnassignedAttachBleed: board write access is not the card's. An
+      // assigned-only member deletes only from a card assigned to them.
+      const card = attachment.meta.cardId ? await ReactiveCache.getCard(attachment.meta.cardId) : null;
+      if (!mayWriteCardAttachment(board, userId, card, 'attachment-api:delete')) {
+        return sendErrorResponse(res, 403, 'You do not have permission to delete this attachment');
+      }
 
-      // Delete attachment
-      await Attachments.removeAsync(attachmentId);
+      // A soft delete (History.md §12.3): the file stays, the card history
+      // shows who deleted it and restores it. No API call hard-deletes.
+      await softDeleteAttachment({ userId, attachment });
 
       sendJsonResponse(res, 200, {
         success: true,
@@ -907,7 +1275,7 @@ WebApp.handlers.use('/api/boards/:boardId/attachments', async (req, res, next) =
 
       // Check permissions
       const board = await ReactiveCache.getBoard(attachment.meta.boardId);
-      if (!board || !board.hasMember(userId)) {
+      if (!board || !board.hasMember(userId) || !(await mayReadBoardAttachment(board, userId, attachment))) {
         return sendErrorResponse(res, 403, 'You do not have permission to access this attachment');
       }
 

@@ -3,7 +3,7 @@ const http = require('http');
 const path = require('path');
 const crypto = require('crypto');
 const os = require('os');
-const { execFileSync } = require('child_process');
+const { MongoClient } = require('mongodb');
 
 const puppeteer = require('puppeteer-core');
 
@@ -14,13 +14,32 @@ function findChromiumPath() {
   if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH;
 
   const home = os.homedir();
-  const userCandidates = [
-    // Common Playwright browser cache locations
-    path.join(home, '.cache/ms-playwright/chromium-1223/chrome-linux/chrome'),
-    path.join(home, '.var/app/com.visualstudio.code/cache/ms-playwright/chromium-1223/chrome-linux/chrome'),
-    // Puppeteer-managed Chrome cache
-    path.join(home, '.cache/puppeteer/chrome/linux-148.0.7778.167/chrome-linux64/chrome'),
-  ];
+  const userCandidates = [];
+  // Use the executable selected by the installed Playwright version first.
+  // New ARM64 downloads use chrome-linux-arm64, not the old chrome-linux.
+  try {
+    userCandidates.push(require('../playwright/node_modules/playwright-core').chromium.executablePath());
+  } catch { /* Standalone installations can still use the caches below. */ }
+
+  // Playwright revisions change regularly. Discover them instead of pinning a
+  // cache revision that may be gone, and prefer the newest one. VS Code's
+  // Flatpak cache is included because that is where its ARM64 Playwright
+  // extension installs Chromium.
+  for (const cache of [
+    process.env.PLAYWRIGHT_BROWSERS_PATH,
+    path.resolve(__dirname, '../../.tools/ms-playwright'),
+    path.join(home, '.cache/ms-playwright'),
+    path.join(home, '.var/app/com.visualstudio.code/cache/ms-playwright'),
+  ].filter(Boolean)) {
+    try {
+      for (const revision of fs.readdirSync(cache).sort().reverse()) {
+        if (!revision.startsWith('chromium-')) continue;
+        for (const layout of ['chrome-linux', 'chrome-linux64', 'chrome-linux-arm64']) {
+          userCandidates.push(path.join(cache, revision, layout, 'chrome'));
+        }
+      }
+    } catch {}
+  }
 
   const candidates = [
     ...userCandidates,
@@ -31,8 +50,24 @@ function findChromiumPath() {
     '/Applications/Chromium.app/Contents/MacOS/Chromium',
     '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
   ];
+  const compatible = p => {
+    try {
+      fs.accessSync(p, fs.constants.X_OK);
+      if (process.platform !== 'linux') return true;
+      const elf = Buffer.alloc(20);
+      const fd = fs.openSync(p, 'r');
+      try { fs.readSync(fd, elf, 0, elf.length, 0); } finally { fs.closeSync(fd); }
+      if (elf.toString('ascii', 0, 4) !== '\x7fELF') return true;
+      const machine = elf.readUInt16LE(18);
+      return (process.arch === 'arm64' && machine === 183)
+        || (process.arch === 'x64' && machine === 62)
+        || !['arm64', 'x64'].includes(process.arch);
+    } catch {
+      return false;
+    }
+  };
   for (const p of candidates) {
-    try { fs.accessSync(p, fs.constants.X_OK); return p; } catch {}
+    if (compatible(p)) return p;
   }
 
   // Last resort: discover from Puppeteer cache dynamically.
@@ -41,7 +76,7 @@ function findChromiumPath() {
     const versions = fs.readdirSync(cacheDir).sort().reverse();
     for (const version of versions) {
       const resolved = path.join(cacheDir, version, 'chrome-linux64', 'chrome');
-      try { fs.accessSync(resolved, fs.constants.X_OK); return resolved; } catch {}
+      if (compatible(resolved)) return resolved;
     }
   } catch {}
 
@@ -51,8 +86,11 @@ function findChromiumPath() {
 const CHROMIUM_PATH = findChromiumPath();
 const HEADLESS = process.env.HEADLESS !== 'false';
 const KEEP_E2E_DATA = process.env.KEEP_E2E_DATA === '1';
+const DDP_CONNECT_TIMEOUT_MS = Number(process.env.E2E_DDP_CONNECT_TIMEOUT_MS) || 30000;
+const LOGIN_TIMEOUT_MS = Number(process.env.E2E_LOGIN_TIMEOUT_MS) || 30000;
+const SUITE_TIMEOUT_MS = Number(process.env.E2E_SUITE_TIMEOUT_MS) || 10 * 60 * 1000;
 const RUN_ID = `${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
-const ARTIFACT_DIR = process.env.E2E_ARTIFACT_DIR || `/tmp/wekan-list-regressions-${RUN_ID}`;
+const ARTIFACT_DIR = process.env.E2E_ARTIFACT_DIR || path.resolve(__dirname, '../../.tools/tmp', `wekan-list-regressions-${RUN_ID}`);
 
 const TEST_USER_ID = `e2e-user-${RUN_ID}`;
 const TEST_USERNAME = `e2e_${RUN_ID}`;
@@ -74,6 +112,7 @@ const TEST_LIST_IDS = [
 
 let browser;
 let page;
+const browserErrors = [];
 let testBoardId = TEST_BOARD_ID;
 let testSwimlaneId = TEST_SWIMLANE_ID;
 let testListIds = TEST_LIST_IDS;
@@ -96,18 +135,25 @@ function wait(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function mongoEval(script) {
-  const extraPaths = ['/opt/homebrew/bin', '/usr/local/bin'];
-  const PATH = [...extraPaths, process.env.PATH || ''].join(':');
-  return execFileSync('mongosh', ['--quiet', MONGO_URL, '--eval', script], {
-    cwd: process.cwd(),
-    encoding: 'utf8',
-    env: { ...process.env, PATH },
-  }).trim();
+function withTimeout(promise, timeoutMs, message) {
+  let timer;
+  const timeout = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-function toMongoLiteral(value) {
-  return JSON.stringify(value);
+// Run an async callback with a connected MongoDB client (official `mongodb`
+// driver), replacing the old `mongosh` CLI shell-out. Date values are written as
+// real BSON Dates by the driver, so no shell-string / ISODate juggling is needed.
+async function withDb(fn) {
+  const client = new MongoClient(MONGO_URL);
+  try {
+    await client.connect();
+    return await fn(client.db());
+  } finally {
+    await client.close();
+  }
 }
 
 function createResumeToken() {
@@ -116,70 +162,51 @@ function createResumeToken() {
   return { rawToken, hashedToken };
 }
 
-function seedLoginUser() {
+async function seedLoginUser() {
   const { rawToken, hashedToken } = createResumeToken();
-  const script = `
-const now = new Date();
-db.users.deleteOne({ _id: ${toMongoLiteral(TEST_USER_ID)} });
-db.users.insertOne({
-  _id: ${toMongoLiteral(TEST_USER_ID)},
-  createdAt: now,
-  username: ${toMongoLiteral(TEST_USERNAME)},
-  emails: [{ address: ${toMongoLiteral(TEST_EMAIL)}, verified: true }],
-  isAdmin: false,
-  authenticationMethod: 'password',
-  profile: {
-    boardView: 'board-view-swimlanes',
-    listWidths: {},
-    listConstraints: {},
-    autoWidthBoards: {},
-    swimlaneHeights: {},
-    collapsedLists: {},
-    collapsedSwimlanes: {},
-    keyboardShortcuts: false,
-    verticalScrollbars: true,
-    showWeekOfYear: true,
-    dateFormat: 'YYYY-MM-DD',
-    zoomLevel: 1,
-    mobileMode: false,
-    cardZoom: 1,
-    starredBoards: [],
-  },
-  services: {
-    resume: {
-      loginTokens: [{
-        when: now,
-        hashedToken: ${toMongoLiteral(hashedToken)},
-      }],
-    },
-  },
-});
-  `;
-  mongoEval(script);
+  const now = new Date();
+  await withDb(async db => {
+    await db.collection('users').deleteOne({ _id: TEST_USER_ID });
+    await db.collection('users').insertOne({
+      _id: TEST_USER_ID,
+      createdAt: now,
+      username: TEST_USERNAME,
+      emails: [{ address: TEST_EMAIL, verified: true }],
+      isAdmin: false,
+      authenticationMethod: 'password',
+      profile: {
+        boardView: 'board-view-swimlanes',
+        listWidths: {},
+        listConstraints: {},
+        autoWidthBoards: {},
+        swimlaneHeights: {},
+        collapsedLists: {},
+        collapsedSwimlanes: {},
+        keyboardShortcuts: false,
+        verticalScrollbars: true,
+        showWeekOfYear: true,
+        dateFormat: 'YYYY-MM-DD',
+        zoomLevel: 1,
+        mobileMode: false,
+        cardZoom: 1,
+        starredBoards: [],
+      },
+      services: {
+        resume: {
+          loginTokens: [{ when: now, hashedToken }],
+        },
+      },
+    });
+  });
   return rawToken;
 }
 
-function seedBoardDataInMongo() {
+async function seedBoardDataInMongo() {
   const [listAId, listBId, listCId] = TEST_LIST_IDS;
-  const script = `
-const now = new Date();
-db.cards.deleteMany({ boardId: ${toMongoLiteral(TEST_BOARD_ID)} });
-db.lists.deleteMany({ boardId: ${toMongoLiteral(TEST_BOARD_ID)} });
-db.swimlanes.deleteMany({ boardId: ${toMongoLiteral(TEST_BOARD_ID)} });
-db.boards.deleteMany({ _id: ${toMongoLiteral(TEST_BOARD_ID)} });
+  const now = new Date();
 
-db.boards.insertOne({
-  _id: ${toMongoLiteral(TEST_BOARD_ID)},
-  title: ${toMongoLiteral(TEST_BOARD_TITLE)},
-  permission: 'private',
-  migrationVersion: 1,
-  slug: ${toMongoLiteral(TEST_BOARD_SLUG)},
-  archived: false,
-  createdAt: now,
-  modifiedAt: now,
-  stars: 0,
-  members: [{
-    userId: ${toMongoLiteral(TEST_USER_ID)},
+  const member = {
+    userId: TEST_USER_ID,
     isAdmin: true,
     isActive: true,
     isNoComments: false,
@@ -187,69 +214,80 @@ db.boards.insertOne({
     isWorker: false,
     isReadOnly: false,
     isReadAssignedOnly: false,
-  }],
-  color: 'belize',
-  allowsCardCounterList: false,
-  allowsBoardMemberList: false,
-  subtasksDefaultBoardId: null,
-  subtasksDefaultListId: null,
-  dateSettingsDefaultBoardId: null,
-  dateSettingsDefaultListId: null,
-  allowsSubtasks: true,
-  allowsAttachments: true,
-  allowsChecklists: true,
-  allowsComments: true,
-  allowsDescriptionTitle: true,
-  allowsDescriptionText: true,
-  allowsDescriptionTextOnMinicard: false,
-  allowsCoverAttachmentOnMinicard: true,
-  allowsBadgeAttachmentOnMinicard: false,
-  allowsCardSortingByNumberOnMinicard: false,
-  allowsCardNumber: false,
-  allowsActivities: true,
-  allowsLabels: true,
-  allowsCreator: true,
-  allowsCreatorOnMinicard: false,
-  allowsAssignee: true,
-  allowsMembers: true,
-  allowsRequestedBy: true,
-  allowsCardSortingByNumber: true,
-  allowsShowLists: true,
-  allowsAssignedBy: true,
-  allowsShowListsOnMinicard: false,
-  allowsChecklistAtMinicard: false,
-  allowsReceivedDate: true,
-  allowsStartDate: true,
-  allowsEndDate: true,
-  allowsDueDate: true,
-  presentParentTask: 'no-parent',
-  isOvertime: false,
-  type: 'board',
-  sort: -1,
-  showActivities: false,
-});
+  };
 
-db.swimlanes.insertOne({
-  _id: ${toMongoLiteral(TEST_SWIMLANE_ID)},
-  title: 'Default',
-  boardId: ${toMongoLiteral(TEST_BOARD_ID)},
-  archived: false,
-  createdAt: now,
-  updatedAt: now,
-  modifiedAt: now,
-  type: 'swimlane',
-  height: -1,
-  sort: 0,
-});
+  const board = {
+    _id: TEST_BOARD_ID,
+    title: TEST_BOARD_TITLE,
+    permission: 'private',
+    migrationVersion: 1,
+    slug: TEST_BOARD_SLUG,
+    archived: false,
+    createdAt: now,
+    modifiedAt: now,
+    stars: 0,
+    members: [member],
+    color: 'belize',
+    allowsCardCounterList: false,
+    allowsBoardMemberList: false,
+    subtasksDefaultBoardId: null,
+    subtasksDefaultListId: null,
+    dateSettingsDefaultBoardId: null,
+    dateSettingsDefaultListId: null,
+    allowsSubtasks: true,
+    allowsAttachments: true,
+    allowsChecklists: true,
+    allowsComments: true,
+    allowsDescriptionTitle: true,
+    allowsDescriptionText: true,
+    allowsDescriptionTextOnMinicard: false,
+    allowsCoverAttachmentOnMinicard: true,
+    allowsBadgeAttachmentOnMinicard: false,
+    allowsCardSortingByNumberOnMinicard: false,
+    allowsCardNumber: false,
+    allowsActivities: true,
+    allowsLabels: true,
+    allowsCreator: true,
+    allowsCreatorOnMinicard: false,
+    allowsAssignee: true,
+    allowsMembers: true,
+    allowsRequestedBy: true,
+    allowsCardSortingByNumber: true,
+    allowsShowLists: true,
+    allowsAssignedBy: true,
+    allowsShowListsOnMinicard: false,
+    allowsChecklistAtMinicard: false,
+    allowsReceivedDate: true,
+    allowsStartDate: true,
+    allowsEndDate: true,
+    allowsDueDate: true,
+    presentParentTask: 'no-parent',
+    isOvertime: false,
+    type: 'board',
+    sort: -1,
+    showActivities: false,
+  };
 
-db.lists.insertMany([
-  {
-    _id: ${toMongoLiteral(listAId)},
-    title: ${toMongoLiteral(`Alpha ${RUN_ID}`)},
-    boardId: ${toMongoLiteral(TEST_BOARD_ID)},
-    sort: 1,
+  const swimlane = {
+    _id: TEST_SWIMLANE_ID,
+    title: 'Default',
+    boardId: TEST_BOARD_ID,
+    archived: false,
+    createdAt: now,
+    updatedAt: now,
+    modifiedAt: now,
+    type: 'swimlane',
+    height: -1,
+    sort: 0,
+  };
+
+  const makeList = (id, title, sort) => ({
+    _id: id,
+    title,
+    boardId: TEST_BOARD_ID,
+    sort,
     type: 'list',
-    swimlaneId: ${toMongoLiteral(TEST_SWIMLANE_ID)},
+    swimlaneId: TEST_SWIMLANE_ID,
     starred: false,
     archived: false,
     createdAt: now,
@@ -257,51 +295,25 @@ db.lists.insertMany([
     modifiedAt: now,
     wipLimit: { value: 1, enabled: false, soft: false },
     width: 272,
-  },
-  {
-    _id: ${toMongoLiteral(listBId)},
-    title: ${toMongoLiteral(`Beta ${RUN_ID}`)},
-    boardId: ${toMongoLiteral(TEST_BOARD_ID)},
-    sort: 2,
-    type: 'list',
-    swimlaneId: ${toMongoLiteral(TEST_SWIMLANE_ID)},
-    starred: false,
-    archived: false,
-    createdAt: now,
-    updatedAt: now,
-    modifiedAt: now,
-    wipLimit: { value: 1, enabled: false, soft: false },
-    width: 272,
-  },
-  {
-    _id: ${toMongoLiteral(listCId)},
-    title: ${toMongoLiteral(`Gamma ${RUN_ID}`)},
-    boardId: ${toMongoLiteral(TEST_BOARD_ID)},
-    sort: 3,
-    type: 'list',
-    swimlaneId: ${toMongoLiteral(TEST_SWIMLANE_ID)},
-    starred: false,
-    archived: false,
-    createdAt: now,
-    updatedAt: now,
-    modifiedAt: now,
-    wipLimit: { value: 1, enabled: false, soft: false },
-    width: 272,
-  }
-]);
+  });
 
-db.cards.insertMany([
-  {
-    _id: ${toMongoLiteral(`e2eCard1${crypto.randomBytes(4).toString('hex')}`)},
-    title: ${toMongoLiteral(`Seed One ${RUN_ID}`)},
+  const lists = [
+    makeList(listAId, `Alpha ${RUN_ID}`, 1),
+    makeList(listBId, `Beta ${RUN_ID}`, 2),
+    makeList(listCId, `Gamma ${RUN_ID}`, 3),
+  ];
+
+  const makeCard = (suffix, title, listId, cardNumber, sort) => ({
+    _id: `e2eCard${suffix}${crypto.randomBytes(4).toString('hex')}`,
+    title,
     members: [],
     labelIds: [],
     customFields: [],
-    listId: ${toMongoLiteral(listAId)},
-    boardId: ${toMongoLiteral(TEST_BOARD_ID)},
-    swimlaneId: ${toMongoLiteral(TEST_SWIMLANE_ID)},
+    listId,
+    boardId: TEST_BOARD_ID,
+    swimlaneId: TEST_SWIMLANE_ID,
     type: 'cardType-card',
-    cardNumber: 1,
+    cardNumber,
     archived: false,
     parentId: '',
     coverId: '',
@@ -314,8 +326,8 @@ db.cards.insertMany([
     assignees: [],
     spentTime: 0,
     isOvertime: false,
-    userId: ${toMongoLiteral(TEST_USER_ID)},
-    sort: 100,
+    userId: TEST_USER_ID,
+    sort,
     subtaskSort: -1,
     linkedId: '',
     vote: { question: '', positive: [], negative: [], end: null, public: false, allowNonBoardMembers: false },
@@ -325,129 +337,38 @@ db.cards.insertMany([
     showActivities: false,
     showListOnMinicard: false,
     showChecklistAtMinicard: false,
-  },
-  {
-    _id: ${toMongoLiteral(`e2eCard2${crypto.randomBytes(4).toString('hex')}`)},
-    title: ${toMongoLiteral(`Seed Two ${RUN_ID}`)},
-    members: [],
-    labelIds: [],
-    customFields: [],
-    listId: ${toMongoLiteral(listAId)},
-    boardId: ${toMongoLiteral(TEST_BOARD_ID)},
-    swimlaneId: ${toMongoLiteral(TEST_SWIMLANE_ID)},
-    type: 'cardType-card',
-    cardNumber: 2,
-    archived: false,
-    parentId: '',
-    coverId: '',
-    createdAt: now,
-    modifiedAt: now,
-    dateLastActivity: now,
-    description: '',
-    requestedBy: '',
-    assignedBy: '',
-    assignees: [],
-    spentTime: 0,
-    isOvertime: false,
-    userId: ${toMongoLiteral(TEST_USER_ID)},
-    sort: 200,
-    subtaskSort: -1,
-    linkedId: '',
-    vote: { question: '', positive: [], negative: [], end: null, public: false, allowNonBoardMembers: false },
-    targetId_gantt: [],
-    linkType_gantt: [],
-    linkId_gantt: [],
-    showActivities: false,
-    showListOnMinicard: false,
-    showChecklistAtMinicard: false,
-  },
-  {
-    _id: ${toMongoLiteral(`e2eCard3${crypto.randomBytes(4).toString('hex')}`)},
-    title: ${toMongoLiteral(`Seed Three ${RUN_ID}`)},
-    members: [],
-    labelIds: [],
-    customFields: [],
-    listId: ${toMongoLiteral(listBId)},
-    boardId: ${toMongoLiteral(TEST_BOARD_ID)},
-    swimlaneId: ${toMongoLiteral(TEST_SWIMLANE_ID)},
-    type: 'cardType-card',
-    cardNumber: 3,
-    archived: false,
-    parentId: '',
-    coverId: '',
-    createdAt: now,
-    modifiedAt: now,
-    dateLastActivity: now,
-    description: '',
-    requestedBy: '',
-    assignedBy: '',
-    assignees: [],
-    spentTime: 0,
-    isOvertime: false,
-    userId: ${toMongoLiteral(TEST_USER_ID)},
-    sort: 100,
-    subtaskSort: -1,
-    linkedId: '',
-    vote: { question: '', positive: [], negative: [], end: null, public: false, allowNonBoardMembers: false },
-    targetId_gantt: [],
-    linkType_gantt: [],
-    linkId_gantt: [],
-    showActivities: false,
-    showListOnMinicard: false,
-    showChecklistAtMinicard: false,
-  },
-  {
-    _id: ${toMongoLiteral(`e2eCard4${crypto.randomBytes(4).toString('hex')}`)},
-    title: ${toMongoLiteral(`Seed Four ${RUN_ID}`)},
-    members: [],
-    labelIds: [],
-    customFields: [],
-    listId: ${toMongoLiteral(listCId)},
-    boardId: ${toMongoLiteral(TEST_BOARD_ID)},
-    swimlaneId: ${toMongoLiteral(TEST_SWIMLANE_ID)},
-    type: 'cardType-card',
-    cardNumber: 4,
-    archived: false,
-    parentId: '',
-    coverId: '',
-    createdAt: now,
-    modifiedAt: now,
-    dateLastActivity: now,
-    description: '',
-    requestedBy: '',
-    assignedBy: '',
-    assignees: [],
-    spentTime: 0,
-    isOvertime: false,
-    userId: ${toMongoLiteral(TEST_USER_ID)},
-    sort: 100,
-    subtaskSort: -1,
-    linkedId: '',
-    vote: { question: '', positive: [], negative: [], end: null, public: false, allowNonBoardMembers: false },
-    targetId_gantt: [],
-    linkType_gantt: [],
-    linkId_gantt: [],
-    showActivities: false,
-    showListOnMinicard: false,
-    showChecklistAtMinicard: false,
-  }
-]);
-  `;
-  mongoEval(script);
+  });
+
+  const cards = [
+    makeCard('1', `Seed One ${RUN_ID}`, listAId, 1, 100),
+    makeCard('2', `Seed Two ${RUN_ID}`, listAId, 2, 200),
+    makeCard('3', `Seed Three ${RUN_ID}`, listBId, 3, 100),
+    makeCard('4', `Seed Four ${RUN_ID}`, listCId, 4, 100),
+  ];
+
+  await withDb(async db => {
+    await db.collection('cards').deleteMany({ boardId: TEST_BOARD_ID });
+    await db.collection('lists').deleteMany({ boardId: TEST_BOARD_ID });
+    await db.collection('swimlanes').deleteMany({ boardId: TEST_BOARD_ID });
+    await db.collection('boards').deleteMany({ _id: TEST_BOARD_ID });
+    await db.collection('boards').insertOne(board);
+    await db.collection('swimlanes').insertOne(swimlane);
+    await db.collection('lists').insertMany(lists);
+    await db.collection('cards').insertMany(cards);
+  });
 }
 
-function cleanupMongoData() {
-  const script = `
-const boardId = ${toMongoLiteral(testBoardId || null)};
-if (boardId) {
-  db.cards.deleteMany({ boardId });
-  db.lists.deleteMany({ boardId });
-  db.swimlanes.deleteMany({ boardId });
-  db.boards.deleteMany({ _id: boardId });
-}
-db.users.deleteOne({ _id: ${toMongoLiteral(TEST_USER_ID)} });
-  `;
-  mongoEval(script);
+async function cleanupMongoData() {
+  const boardId = testBoardId || null;
+  await withDb(async db => {
+    if (boardId) {
+      await db.collection('cards').deleteMany({ boardId });
+      await db.collection('lists').deleteMany({ boardId });
+      await db.collection('swimlanes').deleteMany({ boardId });
+      await db.collection('boards').deleteMany({ _id: boardId });
+    }
+    await db.collection('users').deleteOne({ _id: TEST_USER_ID });
+  });
 }
 
 async function screenshot(name) {
@@ -462,6 +383,40 @@ async function waitForMeteorGlobals(targetPage) {
     () => typeof Meteor !== 'undefined',
     { timeout: 60000 },
   );
+}
+
+async function meteorDiagnostics(targetPage) {
+  try {
+    return await targetPage.evaluate(() => ({
+      href: location.href,
+      hasMeteor: typeof Meteor !== 'undefined',
+      status: typeof Meteor !== 'undefined' && typeof Meteor.status === 'function'
+        ? Meteor.status() : null,
+      userId: typeof Meteor !== 'undefined' && typeof Meteor.userId === 'function'
+        ? Meteor.userId() : null,
+      loggingIn: typeof Meteor !== 'undefined' && typeof Meteor.loggingIn === 'function'
+        ? Meteor.loggingIn() : null,
+    }));
+  } catch (error) {
+    return { diagnosticError: error.message };
+  }
+}
+
+async function waitForMeteorConnection(targetPage) {
+  try {
+    await targetPage.waitForFunction(
+      () => typeof Meteor !== 'undefined'
+        && typeof Meteor.status === 'function'
+        && Meteor.status().connected,
+      { timeout: DDP_CONNECT_TIMEOUT_MS },
+    );
+  } catch (error) {
+    const diagnostic = await meteorDiagnostics(targetPage);
+    throw new Error(
+      'DDP did not connect within ' + DDP_CONNECT_TIMEOUT_MS + 'ms: '
+        + JSON.stringify(diagnostic),
+    );
+  }
 }
 
 // Fire a navigation without blocking on load/domcontentloaded — Rspack HMR
@@ -479,24 +434,62 @@ async function reloadAndWait(targetPage) {
 }
 
 async function loginWithToken(targetPage, rawToken) {
+  // clientStorage:none makes Meteor.loginWithToken memory-only. Put the seeded
+  // credential in the native HttpOnly cookie too, so the new DDP connection
+  // made by the final navigation resumes exactly as a production login does.
+  await targetPage.setCookie({
+    name: 'meteor_login_token',
+    value: rawToken,
+    url: BASE_URL,
+    httpOnly: true,
+    sameSite: 'Lax',
+  });
   await gotoAndWait(targetPage, `${BASE_URL}/sign-in`);
-  const loginResult = await targetPage.evaluate(async token => {
+  await waitForMeteorConnection(targetPage);
+  const loginResult = await targetPage.evaluate(async ({ token, timeoutMs }) => {
     return await new Promise(resolve => {
+      let settled = false;
+      let timer;
+      const state = () => ({
+        status: typeof Meteor.status === 'function' ? Meteor.status() : null,
+        userId: Meteor.userId(),
+        loggingIn: typeof Meteor.loggingIn === 'function' ? Meteor.loggingIn() : null,
+      });
+      const finish = result => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(result);
+      };
+      timer = setTimeout(() => {
+        finish({ error: `login callback timed out after ${timeoutMs}ms`, ...state() });
+      }, timeoutMs);
       Meteor.loginWithToken(token, err => {
-        resolve({
+        finish({
           error: err && (err.reason || err.message),
-          userId: Meteor.userId(),
+          ...state(),
         });
       });
     });
-  }, rawToken);
-  assert(!loginResult.error, `Login with resume token failed: ${loginResult.error}`);
-  assert(loginResult.userId === TEST_USER_ID, 'Unexpected logged-in test user');
+  }, { token: rawToken, timeoutMs: LOGIN_TIMEOUT_MS });
+  assert(!loginResult.error,
+    `Login with resume token failed: ${loginResult.error}; state=${JSON.stringify(loginResult)}`);
+  try {
+    await targetPage.waitForFunction(
+      expectedUserId => Meteor.userId() === expectedUserId,
+      { timeout: LOGIN_TIMEOUT_MS },
+      TEST_USER_ID,
+    );
+  } catch (error) {
+    const diagnostic = await meteorDiagnostics(targetPage);
+    throw new Error(`Login did not settle on ${TEST_USER_ID}: ${JSON.stringify(diagnostic)}`);
+  }
   await gotoAndWait(targetPage, BASE_URL);
+  await waitForMeteorConnection(targetPage);
 }
 
 async function seedBoardData() {
-  seedBoardDataInMongo();
+  await seedBoardDataInMongo();
   await reloadAndWait(page);
   return {
     boardId: TEST_BOARD_ID,
@@ -520,6 +513,7 @@ async function openBoard(boardId, slug) {
     listCount: document.querySelectorAll('.js-list:not(.js-list-composer)').length,
     body: document.body.innerText.slice(0, 1000),
   }));
+  debugInfo.browserErrors = browserErrors.slice(-10);
   throw new Error(`Board lists did not render: ${JSON.stringify(debugInfo)}`);
 }
 
@@ -665,7 +659,7 @@ async function switchBoardView(toggleSelector) {
 
 async function runTest() {
   ensureDir(ARTIFACT_DIR);
-  const rawToken = seedLoginUser();
+  const rawToken = await seedLoginUser();
 
   browser = await puppeteer.launch({
     headless: HEADLESS ? 'new' : false,
@@ -674,6 +668,13 @@ async function runTest() {
     defaultViewport: { width: 1600, height: 1000 },
   });
   page = await browser.newPage();
+  page.on('pageerror', error => browserErrors.push(`pageerror: ${error.stack || error.message}`));
+  page.on('console', message => {
+    if (message.type() === 'error') browserErrors.push(`console: ${message.text()}`);
+  });
+  page.on('requestfailed', request => {
+    browserErrors.push(`request: ${request.url()} - ${request.failure()?.errorText || 'failed'}`);
+  });
 
   logStep('Logging in with a generated resume token');
   await loginWithToken(page, rawToken);
@@ -739,15 +740,31 @@ async function runTest() {
   await secondPage.click('.js-toggle-board-view');
   await secondPage.waitForSelector('.js-pop-over .js-open-lists-view', { timeout: 10000 });
   await secondPage.click('.js-pop-over .js-open-lists-view');
-  await wait(1000);
-  const secondSessionOrder = await secondPage.$$eval(
-    '.list-group.js-lists .js-list .list-header-name',
-    nodes => nodes.map(node => node.innerText.replace(/\s+/g, ' ').trim()),
-  );
-  assert(
-    JSON.stringify(secondSessionOrder) === JSON.stringify(listViewMovedOrder),
-    'Second session did not see persisted list order',
-  );
+  // Poll until the second session's list order matches the persisted order
+  // rather than reading once after a fixed delay — under load the fresh
+  // session's subscription can take longer than a second to deliver the lists.
+  const expectedOrderJson = JSON.stringify(listViewMovedOrder);
+  try {
+    await secondPage.waitForFunction(
+      expected => {
+        const titles = Array.from(
+          document.querySelectorAll('.list-group.js-lists .js-list .list-header-name'),
+        ).map(node => node.innerText.replace(/\s+/g, ' ').trim());
+        return JSON.stringify(titles) === expected;
+      },
+      { timeout: 20000 },
+      expectedOrderJson,
+    );
+  } catch (error) {
+    const secondSessionOrder = await secondPage.$$eval(
+      '.list-group.js-lists .js-list .list-header-name',
+      nodes => nodes.map(node => node.innerText.replace(/\s+/g, ' ').trim()),
+    );
+    assert(
+      false,
+      `Second session did not see persisted list order. Expected ${expectedOrderJson}, got ${JSON.stringify(secondSessionOrder)}`,
+    );
+  }
   await secondPage.close();
 
   logStep('Testing list reorder persistence in Swimlanes view');
@@ -786,7 +803,11 @@ async function runTest() {
   }
 
   try {
-    await runTest();
+    await withTimeout(
+      runTest(),
+      SUITE_TIMEOUT_MS,
+      `E2E suite exceeded ${SUITE_TIMEOUT_MS}ms`,
+    );
   } catch (error) {
     console.error(`\n[wekan-e2e] FAIL: ${error.message}`);
     if (page) {
@@ -804,7 +825,7 @@ async function runTest() {
     }
     if (!KEEP_E2E_DATA) {
       try {
-        cleanupMongoData();
+        await cleanupMongoData();
       } catch (cleanupError) {
         console.error(`[wekan-e2e] Cleanup warning: ${cleanupError.message}`);
       }

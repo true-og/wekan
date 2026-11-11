@@ -1,0 +1,605 @@
+name: AppImage
+
+# Build WeKan as an AppImage for every CPU an AppImage runtime exists for, and
+# attach them to a WeKan release. The ordinary full-release path calls this
+# workflow from release-all.yml with the exact tag after its core bundles are
+# published; workflow_dispatch remains available for rebuilding an AppImage.
+#
+# WHAT IS INSIDE IS WHAT WEKAN ALREADY SHIPS. release-all.yml already produces a
+# bundle that runs offline with nothing installed: the Meteor server (main.js),
+# the bundled Node.js the release was built against, the wekan/FerretDB v1 fork
+# with its embedded pure-Go SQLite backend, the wekan/mongo-tools-patches binaries, the
+# cpu-exec/qemu-user shim from #6458, and start-wekan.sh to bring them up. That
+# bundle is already relocatable and already self-contained - it is the offline
+# zip people download today - so this workflow does NOT rebuild WeKan. It takes
+# the wekan-<version>-<arch>.zip off the release and wraps it, which means the
+# AppImage is byte-for-byte the same server, Node and FerretDB as the zip beside
+# it rather than a second build that might differ.
+#
+# So there is no MongoDB to install, no Node to install, and no database server
+# to run: FerretDB v1 keeps everything in SQLite files under the AppImage's data
+# directory. One download, one file, double-click.
+#
+# WHICH CPUs. An AppImage needs a runtime binary for its architecture, and those
+# exist for x86_64, aarch64, armhf and i686. WeKan publishes Linux bundles for
+# amd64 and arm64, so those are the two that can be wrapped: x86_64 from amd64,
+# aarch64 from arm64. Each is built on a runner of its own CPU, because
+# appimagetool has to run on the architecture it is packing for. If a bundle for
+# another architecture appears on a release, add it to the matrix and it will be
+# wrapped the same way.
+#
+# WHERE THE DATA GOES. A .deb or a container has somewhere obvious to put its
+# data; an AppImage is one file that may live on a USB stick, and the one place
+# it can always write is the user's home. WRITABLE_PATH defaults to
+# ~/.local/share/wekan here, so running the AppImage twice keeps the same boards,
+# and setting WRITABLE_PATH yourself still overrides it - the launcher's own
+# variables all still work.
+#
+# WHERE THE APPIMAGE ITSELF MOUNTS. Separately from WRITABLE_PATH, the
+# AppImage runtime mounts the squashfs this file carries under
+# $TMPDIR/.mount_<name>.<random> before AppRun ever runs - /tmp by default,
+# which is sometimes a small tmpfs. AppRun relocates every launch after the
+# first to WRITABLE_PATH/app instead (and sweeps out orphaned leftovers from
+# /tmp), so a small /tmp never fills up with WeKan's own mount. This is
+# AppImage-specific: no other WeKan platform (Docker, snap, .deb, the bundle
+# zip) uses FUSE-mounts-itself the way an AppImage does, so none of them are
+# touched by this.
+
+on:
+  # Callable, so release-all-missing.yml can ask for just the architectures
+  # a release is short of. The build itself stays here - a second copy of the
+  # appimages build would drift from this one.
+  workflow_call:
+    inputs:
+      tag:
+        required: false
+        type: string
+      publish:
+        required: false
+        default: true
+        type: boolean
+      only:
+        description: 'Only build these architectures, as a JSON array (e.g. ["aarch64"]); empty = all'
+        required: false
+        default: ''
+        type: string
+
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to wrap and attach to (empty = newest release)'
+        required: false
+        type: string
+      publish:
+        description: 'Attach the AppImages to the release'
+        required: false
+        default: true
+        type: boolean
+      only:
+        description: 'Only build these architectures, as a JSON array (e.g. ["aarch64"]); empty = all'
+        required: false
+        default: ''
+        type: string
+
+# Read-only by default; the job that writes is granted it below.
+permissions:
+  contents: read
+
+concurrency:
+  group: wekan-appimage-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: find the release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      tag: ${{ steps.find.outputs.tag }}
+      version: ${{ steps.find.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+          GITHUB_CTX_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG}"
+          # --repo on every gh call, whether or not the job happens to have
+          # checked out: a call that relies on an inferred remote breaks the day
+          # somebody removes the checkout, and the error it gives - "fatal: not
+          # a git repository" - names neither gh nor the workflow.
+          [ -n "$tag" ] || tag="$(gh release list --repo "${GITHUB_CTX_REPOSITORY}" \
+            --limit 1 --json tagName --jq '.[0].tagName')"
+          if [ -z "$tag" ]; then
+            echo "::error::No release to wrap, and no tag was given."
+            exit 1
+          fi
+          # The bundles are named wekan-10.57-amd64.zip against tag v10.57.
+          version="${tag#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Wrapping the bundles from $tag (version $version)"
+
+  build:
+    permissions:
+      contents: write
+    # The file's architecture, -musl included: two jobs of one name write their
+    # logs to one directory of the run's log archive, and its files then ask
+    # to be overwritten when it is unpacked (v12.54: AppImage x86_64 and
+    # aarch64, twice each).
+    name: AppImage ${{ matrix.name_arch || matrix.appimage_arch }}
+    needs: release
+    runs-on: ${{ matrix.runs_on }}
+    # A 32-bit job that cannot run on the runner it was given must not fail the
+    # release for the architectures that built fine.
+    continue-on-error: ${{ matrix.tolerate_failure || false }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - appimage_arch: x86_64
+            bundle_arch: amd64
+            runs_on: ubuntu-24.04
+          - appimage_arch: aarch64
+            bundle_arch: arm64
+            runs_on: ubuntu-24.04-arm
+          # The other two architectures an AppImage runtime EXISTS for. There
+          # are four in total - x86_64, aarch64, i686, armhf - and that is the
+          # whole limit: the runtime is the ELF the kernel executes, so an
+          # architecture with no runtime cannot have an AppImage at all. That is
+          # why ppc64le, s390x, riscv64 and loong64 are not here and never will
+          # be; they are served by the bundle zip and the .deb.
+          #
+          # i686 builds on the x86_64 runner, which runs 32-bit x86 natively -
+          # no emulation, no multiarch, and appimagetool-i686 runs as-is.
+          - appimage_arch: i686
+            bundle_arch: i386
+            runs_on: ubuntu-24.04
+          # armhf builds on the aarch64 runner, which runs 32-bit ARM only if
+          # the kernel was built with CONFIG_COMPAT and the 32-bit loader is
+          # installed. GitHub does not promise either, so this one is allowed to
+          # fail without taking the release with it - the same treatment TSC
+          # gives its emulated armhf job. If it turns out to work reliably,
+          # drop the flag; if it never does, drop the entry.
+          - appimage_arch: armhf
+            bundle_arch: armhf
+            runs_on: ubuntu-24.04-arm
+            tolerate_failure: true
+          # Alpine and the other musl systems: the musl bundles musl.yml builds
+          # (releases/musl/build-bundle.sh). The same AppImage runtime - it is
+          # static, so it runs on musl - around a musl Node.js, named apart from
+          # the glibc AppImage and started inside Alpine to be checked.
+          - appimage_arch: x86_64
+            name_arch: x86_64-musl
+            bundle_arch: linux-x64-musl
+            runs_on: ubuntu-24.04
+            musl: true
+          - appimage_arch: aarch64
+            name_arch: aarch64-musl
+            bundle_arch: linux-arm64-musl
+            runs_on: ubuntu-24.04-arm
+            musl: true
+    # WHICH entries this run wants, decided here because it cannot be decided
+    # where it belongs. A job-level `if:` cannot see `matrix` - GitHub exposes
+    # that context to runs-on, env, name, steps and a few others, but not to a
+    # job's own condition - and a workflow that tries answers
+    #   Unrecognized named-value: 'matrix'
+    # and refuses to load at all, taking every workflow that CALLS it with it.
+    # A job-level env CAN see matrix, so the answer is computed once here and
+    # every step below asks for it.
+    env:
+      BUILD_THIS: ${{ inputs.only == '' || contains(fromJSON(inputs.only), matrix.name_arch || matrix.appimage_arch) }}
+      # The file's name: the CPU, plus -musl for a musl AppImage.
+      NAME_ARCH: ${{ matrix.name_arch || matrix.appimage_arch }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+        if: ${{ env.BUILD_THIS == 'true' }}
+
+      # An AppImage only WRAPS an existing release bundle
+      # (wekan-<version>-<arch>.zip); it cannot build one. When this workflow is
+      # asked to fill a gap for a release whose base bundle is not published yet
+      # (release in progress, or it failed), `gh release download` finds "no
+      # assets to download" and the job failed hard. Turn that into a graceful
+      # skip: if the bundle this arch needs is not on the release, flip BUILD_THIS
+      # off so every step below (all gated on it) is skipped with a notice. The
+      # AppImage is built normally once the base bundle exists.
+      - name: Skip this arch if its release bundle is not published yet
+        if: ${{ env.BUILD_THIS == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEEDS_RELEASE_VERSION: ${{ needs.release.outputs.version }}
+          MATRIX_BUNDLE_ARCH: ${{ matrix.bundle_arch }}
+          GITHUB_CTX_REPOSITORY: ${{ github.repository }}
+          NEEDS_RELEASE_TAG: ${{ needs.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          zip="wekan-${NEEDS_RELEASE_VERSION}-${MATRIX_BUNDLE_ARCH}.zip"
+          # Read the complete response before searching: grep -q can close a
+          # pipe early and turn a present asset into a SIGPIPE failure.
+          assets=$(gh release view --repo "${GITHUB_CTX_REPOSITORY}" "${NEEDS_RELEASE_TAG}" \
+            --json assets --jq '.assets[].name')
+          if grep -Fxq "$zip" <<< "$assets"; then
+            echo "OK: $zip is on ${NEEDS_RELEASE_TAG}; building its AppImage."
+          else
+            echo "::notice::$zip is not on ${NEEDS_RELEASE_TAG} yet - skipping this AppImage (it can only wrap a bundle that exists)."
+            echo "BUILD_THIS=false" >> "$GITHUB_ENV"
+          fi
+
+      - name: Fetch the release bundle for this architecture
+        if: ${{ env.BUILD_THIS == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEEDS_RELEASE_VERSION: ${{ needs.release.outputs.version }}
+          MATRIX_BUNDLE_ARCH: ${{ matrix.bundle_arch }}
+          NEEDS_RELEASE_TAG: ${{ needs.release.outputs.tag }}
+          GITHUB_CTX_REPOSITORY: ${{ github.repository }}
+          MATRIX_MUSL: ${{ matrix.musl }}
+        run: |
+          set -euo pipefail
+          zip="wekan-${NEEDS_RELEASE_VERSION}-${MATRIX_BUNDLE_ARCH}.zip"
+          gh release download "${NEEDS_RELEASE_TAG}" \
+            --repo "${GITHUB_CTX_REPOSITORY}" --pattern "$zip" --clobber
+          unzip -q "$zip"
+          # A zip that exists is not a bundle that runs; these are the two files
+          # the AppImage is built around.
+          # A musl bundle's node-runtime holds GCC's C++ runtime, which its
+          # Node.js needs and a bare Alpine lacks; a glibc one holds libatomic.
+          required="bundle/main.js bundle/node bundle/ferretdb bundle/start-wekan.sh"
+          if [ "${MATRIX_MUSL}" = true ]; then
+            required="$required bundle/node-runtime/libstdc++.so.6 bundle/node-runtime/libgcc_s.so.1"
+          else
+            required="$required bundle/node-runtime/libatomic.so.1"
+          fi
+          # And every other library a musl Node.js needs: x86-64's also needs
+          # libatomic, and the v12.53 x86_64 musl AppImage did not start in a
+          # bare Alpine without it.
+          if [ "${MATRIX_MUSL}" = true ]; then
+            for lib in $(readelf -dW bundle/node | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
+              case "$lib" in libc.musl-*|ld-musl-*|libc.so) continue ;; esac
+              required="$required bundle/node-runtime/$lib"
+            done
+          fi
+          for f in $required; do
+            if [ ! -e "$f" ]; then
+              echo "::error::$zip has no $f - it is not a runnable WeKan bundle."
+              exit 1
+            fi
+          done
+          chmod +x bundle/node bundle/ferretdb bundle/start-wekan.sh
+          python3 releases/check-telemetry.py --bundle bundle
+          du -sh bundle
+
+      - name: Build the AppDir
+        if: ${{ env.BUILD_THIS == 'true' }}
+        env:
+          NEEDS_RELEASE_VERSION: ${{ needs.release.outputs.version }}
+          MATRIX_APPIMAGE_ARCH: ${{ matrix.appimage_arch }}
+        run: |
+          set -euo pipefail
+          version="${NEEDS_RELEASE_VERSION}"
+          arch="${MATRIX_APPIMAGE_ARCH}"
+          rm -rf AppDir
+          mkdir -p AppDir/usr/lib/wekan AppDir/usr/share/applications \
+                   AppDir/usr/share/icons/hicolor/512x512/apps
+          cp -a bundle AppDir/usr/lib/wekan/bundle
+
+          # WeKan's own icon, from public/. 512x512 is what appimagetool wants
+          # for the thumbnail a desktop shows.
+          cp public/android-chrome-512x512.png \
+             AppDir/usr/share/icons/hicolor/512x512/apps/wekan.png
+          cp AppDir/usr/share/icons/hicolor/512x512/apps/wekan.png AppDir/wekan.png
+
+          cat > AppDir/usr/share/applications/wekan.desktop <<'DESKTOP'
+          [Desktop Entry]
+          Type=Application
+          Name=WeKan
+          GenericName=Kanban board
+          Comment=Open Source kanban board with FerretDB and Node.js included
+          Exec=wekan
+          Icon=wekan
+          Terminal=true
+          Categories=Office;ProjectManagement;
+          Keywords=kanban;board;tasks;project;
+          DESKTOP
+          cp AppDir/usr/share/applications/wekan.desktop AppDir/wekan.desktop
+
+          # AppRun is what the AppImage runs. It does three things the launcher
+          # cannot do for itself: pick a writable place for the data (an AppImage
+          # is read-only and may sit on a USB stick), say where WeKan is once it
+          # has started, and then hand over to start-wekan.sh, which is the same
+          # launcher the offline zip uses - so every variable it documents
+          # (WRITABLE_PATH, PORT, ROOT_URL, MONGO_URL, WEKAN_DB, ...) still works.
+          cat > AppDir/AppRun <<'APPRUN'
+          #!/bin/sh
+          set -eu
+          HERE="$(dirname "$(readlink -f "$0")")"
+          BUNDLE="$HERE/usr/lib/wekan/bundle"
+
+          # An AppImage is read-only, so the data cannot live beside it.
+          : "${WRITABLE_PATH:=${XDG_DATA_HOME:-$HOME/.local/share}/wekan}"
+          export WRITABLE_PATH
+
+          # The AppImage runtime mounts ITSELF (the squashfs this file carries)
+          # under $TMPDIR/.mount_<name>.<random> - defaulting to /tmp when
+          # TMPDIR is unset - before AppRun ever runs, so the FIRST mount of a
+          # launch cannot be redirected from in here. What CAN be done: send
+          # every launch from this point on to WRITABLE_PATH/app instead, and
+          # clean up whatever an earlier, /tmp-mounted launch left behind.
+          # Reported in production: checkmk warned
+          # "/tmp/.mount_wekan.OhaGOG ... 100% used" because /tmp was a small
+          # tmpfs and a read-only squashfs mount always reports itself as
+          # full, regardless of size - that is normal for any squashfs mount,
+          # but a small /tmp made it look like a leak and paged someone.
+          #
+          # Only when the caller did not already choose a TMPDIR (an explicit
+          # administrator setting - even TMPDIR=/tmp - is left alone), and
+          # only for a real mounted AppImage: the runtime exports APPIMAGE to
+          # the mounted copy's absolute path, which is what re-execing here
+          # needs and which running AppRun directly (e.g. during development)
+          # never sets. WEKAN_APPIMAGE_RELOCATED marks the re-exec so this
+          # runs exactly once per launch, not forever.
+          if [ -z "${TMPDIR:-}" ] && [ -n "${APPIMAGE:-}" ] \
+             && [ "${WEKAN_APPIMAGE_RELOCATED:-}" != "1" ]; then
+            APPIMAGE_TMP="$WRITABLE_PATH/app"
+            mkdir -p "$APPIMAGE_TMP"
+
+            # Sweep WeKan's own leftover mount directories out of /tmp -
+            # ORPHANED ones only. An entry /proc/mounts still lists as a live
+            # mount belongs to a running instance (quite possibly the very
+            # one this AppRun is executing out of right now) and must not be
+            # touched; one no longer listed there is left over from an
+            # earlier launch that was killed rather than shut down cleanly,
+            # and is safe to remove.
+            for d in /tmp/.mount_*[Ee]kan*; do
+              [ -d "$d" ] || continue
+              if ! awk -v d="$d" '$2==d{f=1} END{exit !f}' /proc/mounts 2>/dev/null; then
+                rm -rf "$d" 2>/dev/null || true
+              fi
+            done
+
+            export TMPDIR="$APPIMAGE_TMP"
+            export WEKAN_APPIMAGE_RELOCATED=1
+            exec "$APPIMAGE" "$@"
+          fi
+
+          : "${PORT:=8080}"
+          export PORT
+          : "${ROOT_URL:=http://localhost:$PORT}"
+          export ROOT_URL
+
+          mkdir -p "$WRITABLE_PATH"
+
+          echo "WeKan is starting."
+          echo "  Open:  $ROOT_URL"
+          echo "  Data:  $WRITABLE_PATH"
+          echo "  Stop:  Ctrl-C"
+          echo
+          echo "Set WRITABLE_PATH, PORT, ROOT_URL or MONGO_URL to change any of"
+          echo "this; WEKAN_DB=mongodb uses your own database instead of the"
+          echo "bundled FerretDB."
+          echo
+
+          # A missing AppImage may be rebuilt around an ALREADY-PUBLISHED base
+          # bundle. In that case its start-wekan.sh predates fixes in this
+          # checkout. Keep the 32-bit V8 address-space ceiling in AppRun too,
+          # so an i686/armhf AppImage made for an older release can start. An
+          # administrator's explicit NODE_OPTIONS remains authoritative.
+          case "@APPIMAGE_ARCH@" in
+            i686|armhf)
+              : "${NODE_OPTIONS:=--max-old-space-size=1024}"
+              export NODE_OPTIONS
+              ;;
+          esac
+
+          exec "$BUNDLE/start-wekan.sh" "$@"
+          APPRUN
+          sed -i "s/@APPIMAGE_ARCH@/$arch/" AppDir/AppRun
+          chmod +x AppDir/AppRun
+          # The AppImage runs as whoever starts it, not as this runner, so
+          # everything in it must be readable by all. v12.69's FerretDB and
+          # mongo-tools were 0711 and appimagetool refused to pack them.
+          chmod -R a+rX AppDir
+
+      - name: Pack the AppImage
+        if: ${{ env.BUILD_THIS == 'true' }}
+        env:
+          NEEDS_RELEASE_VERSION: ${{ needs.release.outputs.version }}
+          MATRIX_APPIMAGE_ARCH: ${{ matrix.appimage_arch }}
+        run: |
+          set -euo pipefail
+          version="${NEEDS_RELEASE_VERSION}"
+          arch="${MATRIX_APPIMAGE_ARCH}"
+          name="WeKan-${version}-${NAME_ARCH}"
+
+          curl -fSL --retry 5 --retry-delay 10 -o appimagetool \
+            "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${arch}.AppImage"
+          chmod +x appimagetool
+
+          mkdir -p dist
+          # A runner has no FUSE, so the tool cannot mount itself; this unpacks
+          # it to a temporary directory and runs it from there instead.
+          APPIMAGE_EXTRACT_AND_RUN=1 ARCH="$arch" \
+            ./appimagetool AppDir "dist/${name}.AppImage"
+
+          chmod +x "dist/${name}.AppImage"
+          # Checksum keeps the .AppImage extension in its name, matching the zip
+          # convention (wekan-<v>-<arch>.zip.sha256sum) and what
+          # releases/expected-assets.sh looks for. Naming it ${name}.sha256sum
+          # (extension dropped) meant "what is missing" never found the checksum,
+          # so every run rebuilt the AppImage even when it was already published.
+          ( cd dist
+            md5sum    "${name}.AppImage" > "${name}.AppImage.md5sum"
+            sha256sum "${name}.AppImage" > "${name}.AppImage.sha256sum" )
+          ls -lh dist
+
+      - name: Check that it starts
+        id: smoke
+        if: ${{ env.BUILD_THIS == 'true' }}
+        env:
+          NEEDS_RELEASE_VERSION: ${{ needs.release.outputs.version }}
+          MATRIX_MUSL: ${{ matrix.musl }}
+          MATRIX_APPIMAGE_ARCH: ${{ matrix.appimage_arch }}
+        run: |
+          set -euo pipefail
+          version="${NEEDS_RELEASE_VERSION}"
+          app="dist/WeKan-${version}-${NAME_ARCH}.AppImage"
+          # An AppImage that packs is not an AppImage that runs. Start it, wait
+          # for WeKan to answer on its port, then stop it - so a broken bundle
+          # is caught here rather than by whoever downloads it.
+          export WRITABLE_PATH="$PWD/smoke-data" PORT=8080
+
+          # A musl AppImage runs its musl Node.js, which an Ubuntu runner cannot,
+          # so it is started where it is meant to run: inside Alpine.
+          if [ "${MATRIX_MUSL}" = true ]; then
+            docker run --rm --network host -v "$PWD:/work" -w /work -e APP="$app" alpine:3.23 sh -ec '
+              apk add --no-cache curl >/dev/null
+              export WRITABLE_PATH=/work/smoke-data PORT=8080
+              APPIMAGE_EXTRACT_AND_RUN=1 "./$APP" > smoke.log 2>&1 &
+              pid=$!
+              for _ in $(seq 1 90); do
+                if curl -fsS -o /dev/null "http://127.0.0.1:8080/sign-in"; then echo "WeKan answered on port 8080 in Alpine."; kill $pid; exit 0; fi
+                kill -0 $pid 2>/dev/null || break
+                sleep 2
+              done
+              kill $pid 2>/dev/null || true
+              echo "::error::the musl AppImage did not answer on port 8080 in Alpine; its log follows"
+              tail -n 100 smoke.log
+              exit 1'
+            exit 0
+          fi
+
+          # A CHECK THAT CANNOT RUN IS NOT A FAILED CHECK. Probe the INNER Node,
+          # not the AppImage runtime: on the arm64 runner the armhf AppImage
+          # runtime itself executes, while its bundled hard-float Node cannot
+          # when /lib/ld-linux-armhf.so.3 is absent. Probing the outer wrapper
+          # misclassified that missing loader as an application startup bug.
+          # AppDir is the exact tree just packed, so this also avoids extracting
+          # the large image merely to make the capability decision.
+          if ! LD_LIBRARY_PATH="$PWD/AppDir/usr/lib/wekan/bundle/node-runtime${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" AppDir/usr/lib/wekan/bundle/node --version >/dev/null 2>&1; then
+            echo "::warning::this runner cannot execute the bundled ${MATRIX_APPIMAGE_ARCH} Node binary, so the AppImage was packed but not started. It is uploaded unchecked."
+            exit 0
+          fi
+
+          APPIMAGE_EXTRACT_AND_RUN=1 "$app" > smoke.log 2>&1 &
+          pid=$!
+          ok=false
+          for _ in $(seq 1 90); do
+            if curl -fsS -o /dev/null "http://localhost:8080/sign-in"; then ok=true; break; fi
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 2
+          done
+          kill "$pid" 2>/dev/null || true
+          wait "$pid" 2>/dev/null || true
+          if [ "$ok" != true ]; then
+            echo "::error::the AppImage did not answer on port 8080; its log follows"
+            tail -n 100 smoke.log
+            exit 1
+          fi
+          echo "WeKan answered on port 8080."
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ env.BUILD_THIS == 'true' }}
+        with:
+          name: appimage-${{ matrix.name_arch || matrix.appimage_arch }}
+          path: dist/
+          if-no-files-found: error
+
+      # Attached HERE, by the job that packed and smoke-tested it, the moment it
+      # passed - not by a later job that waited for every architecture and then
+      # uploaded them all. The x86_64 AppImage is on the release while armhf is
+      # still building, and one slow or failed architecture never holds the
+      # others back.
+      #
+      # always() + the smoke test's outcome: a cancel that arrives after the
+      # AppImage was built and checked still attaches it.
+      - name: Attach this AppImage to the release
+        if: ${{ always() && env.BUILD_THIS == 'true' && steps.smoke.outcome == 'success' && inputs.publish != false }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_CTX_REPOSITORY: ${{ github.repository }}
+          NEEDS_RELEASE_TAG: ${{ needs.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(dist/*.AppImage dist/*.AppImage.md5sum dist/*.AppImage.sha256sum)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::dist/ holds no AppImage to attach although the build and smoke test passed."
+            exit 1
+          fi
+          # --repo inside the script, so gh never has to infer the repository
+          # from a git remote. Retried, bounded, and verified by name and size.
+          bash releases/github-release-upload.sh "${GITHUB_CTX_REPOSITORY}" "${NEEDS_RELEASE_TAG}" "${files[@]}"
+
+  # The last job no longer uploads anything: each build job above attached its
+  # own AppImage as soon as it was built and checked. This one only says, at the
+  # end, what is on the release and what is not - and it runs even when the run
+  # was cancelled (always()), so the summary covers whatever did get attached.
+  publish:
+    timeout-minutes: 30
+    name: check what was attached
+    needs: [release, build]
+    if: ${{ always() && needs.release.result == 'success' && inputs.publish != false }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Say what was built, and what was not
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEEDS_RELEASE_VERSION: ${{ needs.release.outputs.version }}
+          GITHUB_CTX_REPOSITORY: ${{ github.repository }}
+          NEEDS_RELEASE_TAG: ${{ needs.release.outputs.tag }}
+          NEEDS_BUILD_RESULT: ${{ needs.build.result }}
+          INPUTS_ONLY: ${{ inputs.only }}
+        run: |
+          set -euo pipefail
+          version="${NEEDS_RELEASE_VERSION}"
+          # The architectures THIS run builds: the musl run asked after the
+          # glibc AppImages, which another run attaches, and warned of all
+          # four as missing (v12.54).
+          wants="x86_64 aarch64 i686 armhf x86_64-musl aarch64-musl"
+          if [ -n "${INPUTS_ONLY}" ]; then
+            wants="$(python3 -c 'import json, sys; print(" ".join(json.loads(sys.argv[1])))' "${INPUTS_ONLY}")"
+          fi
+          gh release view --repo "${GITHUB_CTX_REPOSITORY}" "${NEEDS_RELEASE_TAG}" \
+            --json assets --jq '.assets[].name' > published.txt
+          if grep -qE "^WeKan-${version}-.*\.AppImage$" published.txt; then
+            # Every architecture the matrix builds. A missing one WARNS rather
+            # than fails: the 32-bit pair is allowed not to build, and an
+            # architecture whose base bundle was never published has nothing to
+            # wrap. What must not happen silently is one going missing unnoticed.
+            for want in $wants; do
+              for f in "WeKan-${version}-${want}.AppImage" "WeKan-${version}-${want}.AppImage.sha256sum"; do
+                grep -qxF "$f" published.txt || \
+                  echo "::warning::$f is not on ${NEEDS_RELEASE_TAG} - see the AppImage $want build job's log"
+              done
+            done
+            echo "AppImages on $(gh release view --repo "${GITHUB_CTX_REPOSITORY}" "${NEEDS_RELEASE_TAG}" --json url --jq .url):"
+            grep -E "^WeKan-${version}-.*\.AppImage" published.txt || true
+          else
+            # No AppImage was attached. That is only a FAILURE if there was a base
+            # bundle to wrap: an AppImage cannot be built without one, and the
+            # build jobs skip (not fail) when the base bundle is not published yet.
+            base_present=false
+            for arch in amd64 arm64 i386 armhf; do
+              grep -qx "wekan-${version}-${arch}.zip" published.txt && base_present=true
+            done
+            if [ "$base_present" = false ]; then
+              echo "::notice::No base bundle (wekan-${version}-{amd64,arm64}.zip) is on ${NEEDS_RELEASE_TAG} yet, so there is nothing to wrap - skipping. release-all.yml builds the AppImages once the base bundles are published."
+              exit 0
+            fi
+            if [ "${NEEDS_BUILD_RESULT}" = "cancelled" ]; then
+              echo "::warning::The run was cancelled before any AppImage finished building; nothing was attached."
+              exit 0
+            fi
+            echo "::error::A base bundle is published but no architecture attached an AppImage - every build job failed. Their logs say why."
+            exit 1
+          fi

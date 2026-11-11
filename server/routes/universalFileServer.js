@@ -1,3 +1,4 @@
+import { readAuthenticatedLegacyAvatar } from '/server/lib/legacyAvatarRead';
 /**
  * Universal File Server
  * Ensures all attachments and avatars are always visible regardless of ROOT_URL and PORT settings
@@ -5,19 +6,66 @@
  */
 
 import { Meteor } from 'meteor/meteor';
+import { check } from 'meteor/check';
 import { WebApp } from 'meteor/webapp';
 import { ReactiveCache } from '/imports/reactiveCache';
-import { Accounts } from 'meteor/accounts-base';
 import Attachments from '/models/attachments';
 import AttachmentStorageSettings from '/models/attachmentStorageSettings';
-import { STORAGE_NAME_GRIDFS } from '/models/lib/fileStoreConstants';
+import { STORAGE_NAME_FILESYSTEM, STORAGE_NAME_GRIDFS } from '/models/lib/fileStoreConstants';
 import { fileStoreStrategyFactory as attachmentStoreFactory } from '/models/attachments.server';
 import Avatars from '/models/avatars';
 import { fileStoreStrategyFactory as avatarStoreFactory } from '/models/avatars.server';
+import { correctedNameForStoredFile } from '/models/lib/fileTypeCorrection';
+const { sanitizeDownloadFileName } = require('/imports/lib/fileNameDisplay');
 import Boards from '/models/boards';
+import Settings from '/models/settings';
+const {isActiveSiteLogo} = require('/models/lib/siteLogo');
 import { getAttachmentWithBackwardCompatibility, getOldAttachmentStream } from '/models/lib/attachmentBackwardCompatibility';
+import { canReadBoard } from '/models/lib/boardVisibility';
+import { assignedOnlyCardIds, mayReadBoardAttachment } from '/server/lib/assignedOnlyAttachments';
 import fs from 'fs';
 import path from 'path';
+import { DocumentPreviews, indexDocumentText } from '/server/lib/documentGif';
+import { boundedStreamBuffer, gifCacheKey } from '/server/lib/imageGif';
+import { convertImageBufferToThumbnail, cachedThumbnail, rememberThumbnail } from '/server/lib/imageThumbnail';
+const { isThumbnailPath, canThumbnail, THUMBNAIL_TYPE } = require('/models/lib/attachmentThumbnail');
+// CacheBleed (GHSA-w3qg-pf27-g68r): files are served after an access check, so never shared-cacheable.
+const { setPrivateFileCacheHeaders, privateFileCacheHeaders } = require('/models/lib/fileCacheHeaders');
+const { parseRange, partialContentHeaders, ifRangeAllows } = require('/models/lib/httpRange');
+// SVG is served sanitized, as an image (server/lib/svgResponse.js).
+const svgResponse = require('/server/lib/svgResponse');
+// The avatar types served inline; anything else is a download (AvatarMimeBleed).
+const INLINE_AVATAR_TYPES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp', 'image/avif', 'image/bmp']);
+const { readableWithoutMembership } = require('/models/lib/boardPermission');
+
+async function normalizeStoredNameOnRead(collection, fileObj, factory) {
+  if (!fileObj) return fileObj;
+  const result = await correctedNameForStoredFile(fileObj, factory);
+  if (!result.changed) return fileObj;
+  const originalName = fileObj.name;
+  const dot = result.name.lastIndexOf('.');
+  const extension = dot > 0 ? result.name.slice(dot + 1).toLowerCase() : '';
+  await collection.updateAsync({ _id: fileObj._id }, { $set: {
+    name: result.name,
+    extension,
+    extensionWithDot: extension ? `.${extension}` : '',
+  } });
+  fileObj.name = result.name;
+  try {
+    await require('/server/lib/filenameSanitizeLog').logFilenameSanitized({
+      fileObj,
+      source: 'fileRead',
+      reasons: require('/models/lib/uploadFileName').sanitizationReasons(
+        originalName,
+        result.detectedMime || fileObj.type,
+        result.name,
+      ),
+      from: originalName,
+      to: result.name,
+    });
+  } catch (e) { /* filename correction must not prevent the read */ }
+  return fileObj;
+}
 
 function parseNonNegativeInt(value, fallback = 0) {
   const parsed = Number.parseInt(value, 10);
@@ -66,8 +114,53 @@ async function getAttachmentDownloadLimitSettings() {
   };
 }
 
+// Indexes an attachment's text for search only - no client-facing route.
+// The viewer no longer reads this: DOCX/XLSX/PPTX render client-side via
+// office-open-xml-viewer and PDF renders via the browser's native <embed>.
+// Called from Attachments.onAfterUpload in the background, since nothing
+// fetches a preview manifest to trigger indexing lazily any more.
+export async function indexAttachmentDocumentText(attachment) {
+  const settings = await AttachmentStorageSettings.findOneAsync({});
+  const storage = settings?.getDefaultStorage?.() || STORAGE_NAME_FILESYSTEM;
+  if (settings?.isStorageWriteEnabled && !settings.isStorageWriteEnabled(storage)) {
+    throw new Error('Default attachment storage is not writable');
+  }
+  return indexDocumentText(attachment, {
+    factory: attachmentStoreFactory, collection: Attachments.collection,
+    getDefaultStorage: async () => storage,
+  });
+}
+
 if (Meteor.isServer) {
   console.log('Universal file server initializing...');
+
+  Meteor.methods({
+    async searchAttachmentDocumentText(boardId, query) {
+      check(boardId, String);
+      check(query, String);
+      const needle = query.normalize('NFKC').replace(/\s+/g, ' ').trim().slice(0, 200);
+      if (needle.length < 2) return [];
+      const board = await ReactiveCache.getBoard(boardId);
+      if (!board || !(await canReadBoard(this.userId, board))) {
+        throw new Meteor.Error('not-authorized');
+      }
+      // An assigned-only member searches only their own cards' documents
+      // (AssignedBleed, GHSA-3cgr-47wm-9cc9): boardId alone matched the
+      // extracted text of every card. Ordinary use, so nothing is logged.
+      const assignedCardIds = await assignedOnlyCardIds(board, this.userId);
+      const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const rows = await DocumentPreviews.find(
+        { boardId, searchText: { $regex: escaped, $options: 'i' },
+          ...(assignedCardIds ? { cardId: { $in: assignedCardIds } } : {}) },
+        { fields: { attachmentId: 1, cardId: 1, searchText: 1 }, limit: 50 },
+      ).fetchAsync();
+      return rows.map(row => {
+        const at = row.searchText.toLocaleLowerCase().indexOf(needle.toLocaleLowerCase());
+        return { attachmentId: row.attachmentId, cardId: row.cardId,
+          snippet: row.searchText.slice(Math.max(0, at - 80), Math.max(0, at - 80) + 240) };
+      });
+    },
+  });
 
   /**
    * Helper function to set appropriate headers for file serving
@@ -116,8 +209,8 @@ if (Meteor.isServer) {
   // Consider PDF safe inline by extension if type is missing/mis-set
   const isSafeInline = safeInlineTypes.has(typeLower) || (isAttachment && isPdfByExt);
 
-    // Always send strong caching and integrity headers
-    res.setHeader('Cache-Control', 'public, max-age=31536000'); // Cache for 1 year
+    // Private, revalidated caching (CacheBleed) and integrity headers
+    setPrivateFileCacheHeaders(res);
     res.setHeader('ETag', `"${fileObj._id}"`);
     res.setHeader('X-Content-Type-Options', 'nosniff');
 
@@ -156,10 +249,19 @@ if (Meteor.isServer) {
         res.setHeader('Content-Disposition', buildContentDispositionHeader('attachment', sanitizeFilenameForHeader(fileObj.name)));
         res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox;");
         res.setHeader('X-Frame-Options', 'DENY');
-      } else {
-        // For typical image avatars, use provided type if present, otherwise fall back to a safe generic image type
-        res.setHeader('Content-Type', typeLower || 'image/jpeg');
+      } else if (INLINE_AVATAR_TYPES.has(typeLower.split(';')[0].trim())) {
+        // AvatarMimeBleed, prefix-route sibling (2026-10-02): only a known
+        // raster image type is served inline, under its exact canonical
+        // name and a restrictive CSP. This branch used to echo whatever type
+        // was stored - 'text/html; charset=utf-8' passed the exact-match
+        // dangerous list - and serve it inline with no CSP.
+        res.setHeader('Content-Type', typeLower.split(';')[0].trim());
         res.setHeader('Content-Disposition', buildContentDispositionHeader('inline', sanitizeFilenameForHeader(fileObj.name)));
+        res.setHeader('Content-Security-Policy', "default-src 'none'; img-src 'self'; style-src 'unsafe-inline';");
+      } else {
+        res.setHeader('Content-Type', 'application/octet-stream');
+        res.setHeader('Content-Disposition', buildContentDispositionHeader('attachment', sanitizeFilenameForHeader(fileObj.name)));
+        res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox;");
       }
     }
   }
@@ -170,6 +272,9 @@ if (Meteor.isServer) {
   function handleConditionalRequest(req, res, fileObj) {
     const ifNoneMatch = req.headers['if-none-match'];
     if (ifNoneMatch && ifNoneMatch === `"${fileObj._id}"`) {
+      // A 304 repeats the caching rules of the 200 it stands for.
+      setPrivateFileCacheHeaders(res);
+      res.setHeader('ETag', `"${fileObj._id}"`);
       res.writeHead(304);
       res.end();
       return true;
@@ -227,6 +332,9 @@ if (Meteor.isServer) {
     try {
       if (!avatar) return false;
 
+      // Sandstorm already gated grain access; trust the platform (see isSandstormRequest).
+      if (isSandstormRequest(req)) return true;
+
       // 1) Check explicit board context via query
       const q = parseQuery(req);
       const boardId = q.boardId || q.board || q.b;
@@ -234,16 +342,20 @@ if (Meteor.isServer) {
         const board = await ReactiveCache.getBoard(boardId);
         if (board && board.isPublic && board.isPublic()) return true;
 
-        // If private board is specified, require membership of requester
+        // Otherwise require a signed-in requester who may read the board: a
+        // member, or anybody signed in on an 'instance' board (#3249).
         const token = extractLoginToken(req);
-        const user = token ? await getUserFromToken(token) : null;
+        const user = process.env.NEXTCLOUD_EXAPP === 'true'
+          ? await getNextcloudRequestUser(req) : token ? await getUserFromToken(token) : null;
         if (user && board && board.hasMember && board.hasMember(user._id)) return true;
+        if (user && board && readableWithoutMembership(board.permission, true)) return true;
         return false;
       }
 
       // 2) Authenticated request without explicit board context
       const token = extractLoginToken(req);
-      const user = token ? await getUserFromToken(token) : null;
+      const user = process.env.NEXTCLOUD_EXAPP === 'true'
+          ? await getNextcloudRequestUser(req) : token ? await getUserFromToken(token) : null;
       if (user) return true;
 
       // 3) Allow if avatar owner is on any public board (so avatars are public only when on public boards)
@@ -332,16 +444,38 @@ if (Meteor.isServer) {
   }
 
   /**
-   * Resolve a user from a raw login token string
+   * On Sandstorm, grain access is already gated by the Sandstorm platform: every
+   * request that reaches WeKan has been authorized by Sandstorm and carries the
+   * bridge-injected X-Sandstorm-User-Id header. There is no Meteor login token or
+   * cookie in that model (auth is via connection.setUserId() + X-Sandstorm-*
+   * headers), so the token-based board/avatar authorization below would always
+   * fail with 403 and images (attachment thumbnails, minicard covers, slideshow)
+   * would break. Trust the platform: an X-Sandstorm-User-Id header means an
+   * authenticated grain user. Thanks to xet7.
    */
+  function isSandstormRequest(req) {
+    return !!(
+      Meteor.settings &&
+      Meteor.settings.public &&
+      Meteor.settings.public.sandstorm &&
+      req &&
+      req.headers &&
+      req.headers['x-sandstorm-user-id']
+    );
+  }
+
+  /**
+   * Resolve the identity already verified by the Nextcloud gateway.
+   */
+  async function getNextcloudRequestUser(req) {
+    const userId = await require('/server/lib/requestUser').getUserIdFromRequest(req);
+    return userId ? await Meteor.users.findOneAsync(userId) : null;
+  }
+
   async function getUserFromToken(rawToken) {
     try {
       if (!rawToken || typeof rawToken !== 'string' || rawToken.length < 10) return null;
-      const hashed = Accounts._hashLoginToken(rawToken);
-      return await Meteor.users.findOneAsync(
-        { 'services.resume.loginTokens.hashedToken': hashed },
-        { fields: { _id: 1 } },
-      );
+      return await require('/server/lib/activeUser').activeUserByToken(rawToken, 'files');
     } catch (e) {
       // In case accounts-base is not available or any error occurs
       if (process.env.DEBUG === 'true') {
@@ -352,17 +486,26 @@ if (Meteor.isServer) {
   }
 
   /**
-   * Authorization helper for board-bound files
+   * Authorization helper for attachment downloads (including Files Report)
    * - Public boards: allow
-   * - Private boards: require valid user who is a member
+   * - Private boards: require an active member or an enabled site administrator
    */
-  async function isAuthorizedForBoard(req, board) {
+  // `attachment`: the file asked for. Membership is not enough for it: an
+  // assigned-only member reads only their own cards' files (AssignedBleed,
+  // GHSA-3cgr-47wm-9cc9); `source` names the route in Admin Panel -> Problems.
+  async function isAuthorizedForBoard(req, board, attachment, source) {
     try {
       if (!board) return false;
-      if (board.isPublic && board.isPublic()) return true;
+      // Sandstorm already gated grain access; trust the platform (see isSandstormRequest).
+      if (isSandstormRequest(req)) return true;
       const token = extractLoginToken(req);
-      const user = token ? await getUserFromToken(token) : null;
-      return !!(user && board.hasMember && board.hasMember(user._id));
+      const user = process.env.NEXTCLOUD_EXAPP === 'true'
+          ? await getNextcloudRequestUser(req) : token ? await getUserFromToken(token) : null;
+      // Files Report already publishes every attachment to site administrators.
+      // Keep this exception local to attachment routes, not general board reads.
+      if (user?.isAdmin === true && user.loginDisabled !== true) return true;
+      if (!canReadBoard(user && user._id, board)) return false;
+      return await mayReadBoardAttachment(board, user && user._id, attachment, source);
     } catch (e) {
       if (process.env.DEBUG === 'true') {
         console.warn('Authorization check failed:', e);
@@ -387,9 +530,10 @@ if (Meteor.isServer) {
       return 'download';
     }
 
-    // First, remove any control characters (0x00-0x1F, 0x7F) that would break HTTP headers
-    // This includes newlines, carriage returns, tabs, and other control chars
-    let sanitized = filename.replace(/[\x00-\x1F\x7F]/g, '');
+    // Decode a URL-encoded name and REMOVE all invisible/format characters (incl.
+    // control chars, zero-width, bidi, BOM) so the downloaded file gets a clean,
+    // unambiguous name — matching how filenames are shown in the UI.
+    let sanitized = sanitizeDownloadFileName(filename);
 
     // If the filename is all ASCII printable characters (0x20-0x7E), use it directly
     if (/^[\x20-\x7E]*$/.test(sanitized)) {
@@ -420,6 +564,33 @@ if (Meteor.isServer) {
   }
 
   /**
+   * Stream a file - or, for an SVG, send it sanitized: inline as an image, or
+   * as the download that was asked for (server/lib/svgResponse.js).
+   */
+  function serveFile(req, res, readStream, fileObj) {
+    if (!svgResponse.isSvg(fileObj && fileObj.type, fileObj && fileObj.name)) {
+      streamFile(res, readStream, fileObj);
+      return;
+    }
+    svgResponse.sendInlineSvg(res, readStream, {
+      download: isDownloadRequested(req),
+      fileName: fileObj.name,
+      // Active markup removed on the way out: logged like the stream sanitizer's.
+      onSanitized: text => {
+        try {
+          const { classifyExploitKinds } = require('/imports/lib/fileNameDisplay');
+          require('/server/lib/filenameSanitizeLog').logContentSanitized({
+            fileObj, source: 'fileView', kinds: classifyExploitKinds(text),
+          });
+        } catch (e) { /* logging must never break serving */ }
+      },
+    }).catch(error => {
+      console.error('SVG serve error:', error);
+      if (!res.headersSent) { res.writeHead(500); res.end('Error reading file'); }
+    });
+  }
+
+  /**
    * Helper function to stream file with error handling
    */
   function streamFile(res, readStream, fileObj) {
@@ -438,6 +609,27 @@ if (Meteor.isServer) {
     });
 
     readStream.pipe(res);
+  }
+
+  // #3275: a thumbnail is a WebP of at most THUMBNAIL_EDGE pixels. Cached as
+  // the original is (CacheBleed): it is readable by the same people as the
+  // original, which is not everybody, and revalidated so a revocation holds.
+  function sendThumbnail(req, res, attachment, key, buffer) {
+    const etag = `"${attachment._id}-thumbnail-${key.slice(0, 16)}"`;
+    if (req.headers['if-none-match'] === etag) {
+      res.writeHead(304, { ETag: etag, ...privateFileCacheHeaders() });
+      res.end();
+      return;
+    }
+    res.writeHead(200, {
+      'Content-Type': THUMBNAIL_TYPE,
+      'Content-Length': buffer.length,
+      ...privateFileCacheHeaders(),
+      ETag: etag,
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': "default-src 'none'; sandbox;",
+    });
+    res.end(buffer);
   }
 
   // ============================================================================
@@ -470,21 +662,36 @@ if (Meteor.isServer) {
         return;
       }
 
-      // Check permissions
-      const board = await ReactiveCache.getBoard(attachment.meta.boardId);
-      if (!board) {
-        res.writeHead(404);
-        res.end('Board not found');
-        return;
+      // The currently configured site logo must be readable on the login
+      // page, before a user can authenticate. No other attachment is public
+      // through this exception, including an older replaced logo.
+      const siteLogo = attachment.meta?.source === 'site-logo';
+      if (siteLogo) {
+        const setting = await Settings.findOneAsync();
+        if (!isActiveSiteLogo(attachment, setting, fileId)) {
+          res.writeHead(404);
+          res.end('Logo not found');
+          return;
+        }
+      } else {
+        const board = await ReactiveCache.getBoard(attachment.meta.boardId);
+        if (!board) {
+          res.writeHead(404);
+          res.end('Board not found');
+          return;
+        }
+        const authorized = await isAuthorizedForBoard(req, board, attachment, 'file-server:cdn');
+        if (!authorized) {
+          res.writeHead(403);
+          res.end('Access denied');
+          return;
+        }
       }
 
-      // Enforce cookie/header/query-based auth for private boards
-      const authorized = await isAuthorizedForBoard(req, board);
-      if (!authorized) {
-        res.writeHead(403);
-        res.end('Access denied');
-        return;
-      }
+      // Lazy upgrade: only touch old metadata when an authorized request is
+      // actually reading the file. This also makes the download header use the
+      // detected extension on this very request.
+      await normalizeStoredNameOnRead(Attachments, attachment, attachmentStoreFactory);
 
       // Handle conditional requests
       if (handleConditionalRequest(req, res, attachment)) {
@@ -529,6 +736,40 @@ if (Meteor.isServer) {
         }
       }
 
+      // #3275: /cdn/storage/attachments/<id>/thumbnail - everything above
+      // (board access, download block and limit, storage read flag) has
+      // already been applied, so a thumbnail is readable exactly when the
+      // original is.
+      const wantsThumbnail = isThumbnailPath((req.url || '').replace(/^\/cdn\/storage\/attachments(?=\/)/, ''));
+      if (wantsThumbnail && !canThumbnail(attachment)) {
+        res.writeHead(404);
+        res.end('No thumbnail for this attachment');
+        return;
+      }
+      const thumbnailKey = wantsThumbnail ? gifCacheKey(attachment) : null;
+      const cached = wantsThumbnail ? cachedThumbnail(thumbnailKey) : null;
+      if (cached) {
+        sendThumbnail(req, res, attachment, thumbnailKey, cached);
+        return;
+      }
+
+      // #6745: a Range request (a video seek, a resumed download) streams only
+      // the bytes asked for, from the storage backend itself. Legacy
+      // CollectionFS files and thumbnails are always sent whole.
+      const size = Number(attachment.size);
+      let range = null;
+      // An SVG is sent whole and sanitized (svgResponse.js): no range of it.
+      if (!wantsThumbnail && attachment?.meta?.source !== 'legacy' && !svgResponse.isSvg(attachment.type, attachment.name)
+        && Number.isSafeInteger(size)
+        && ifRangeAllows(req.headers['if-range'], `"${attachment._id}"`)) {
+        range = parseRange(req.headers.range, size);
+      }
+      if (range === 'unsatisfiable') {
+        res.writeHead(416, { 'Content-Range': `bytes */${size}`, 'Accept-Ranges': 'bytes' });
+        res.end();
+        return;
+      }
+
       // Choose proper streaming based on source
       let readStream;
       if (attachment?.meta?.source === 'legacy') {
@@ -537,7 +778,7 @@ if (Meteor.isServer) {
       } else {
         // New Meteor-Files storage
         const strategy = attachmentStoreFactory.getFileStrategy(attachment, 'original');
-        readStream = strategy.getReadStream();
+        readStream = strategy.getReadStream(range || undefined);
       }
 
       if (!readStream) {
@@ -546,10 +787,27 @@ if (Meteor.isServer) {
         return;
       }
 
+      if (wantsThumbnail) {
+        let thumbnail;
+        try {
+          thumbnail = await convertImageBufferToThumbnail(await boundedStreamBuffer(readStream));
+        } catch (error) {
+          // Too large, damaged or a format the converter cannot read: the
+          // original, which passed the same checks, still shows the image.
+          if (typeof readStream.destroy === 'function') readStream.destroy();
+          res.writeHead(302, { Location: Meteor.absoluteUrl(`cdn/storage/attachments/${fileId}`), 'Cache-Control': 'no-store' });
+          res.end();
+          return;
+        }
+        rememberThumbnail(thumbnailKey, thumbnail);
+        sendThumbnail(req, res, attachment, thumbnailKey, thumbnail);
+        return;
+      }
+
       // Set headers and stream file
       if (isDownloadRequested(req)) {
         // Force download if requested via query param
-        res.setHeader('Cache-Control', 'public, max-age=31536000');
+        setPrivateFileCacheHeaders(res);
         res.setHeader('ETag', `"${attachment._id}"`);
         if (attachment.size) res.setHeader('Content-Length', attachment.size);
         res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -559,7 +817,14 @@ if (Meteor.isServer) {
       } else {
         setFileHeaders(res, attachment, true);
       }
-      streamFile(res, readStream, attachment);
+      if (attachment?.meta?.source !== 'legacy') res.setHeader('Accept-Ranges', 'bytes');
+      if (range) {
+        for (const [name, value] of Object.entries(partialContentHeaders(range, size))) {
+          res.setHeader(name, value);
+        }
+        res.statusCode = 206;
+      }
+      serveFile(req, res, readStream, attachment);
 
     } catch (error) {
       console.error('Attachment server error:', error);
@@ -591,6 +856,19 @@ if (Meteor.isServer) {
       // Get avatar from database
       const avatar = await ReactiveCache.getAvatar(fileId);
       if (!avatar) {
+        // This prefix route mounts before avatarServer's narrower route and
+        // also receives /<id>/original/<filename>. Read CollectionFS here
+        // rather than masking the authenticated legacy fallback with a 404.
+        const legacy = await readAuthenticatedLegacyAvatar(req, fileId);
+        if (legacy) {
+          if (handleConditionalRequest(req, res, legacy.avatar)) {
+            legacy.stream.destroy();
+            return;
+          }
+          setFileHeaders(res, legacy.avatar, false);
+          serveFile(req, res, legacy.stream, legacy.avatar);
+          return;
+        }
         res.writeHead(404);
         res.end('Avatar not found');
         return;
@@ -602,6 +880,8 @@ if (Meteor.isServer) {
         res.end('Access denied');
         return;
       }
+
+      await normalizeStoredNameOnRead(Avatars, avatar, avatarStoreFactory);
 
       // Handle conditional requests
       if (handleConditionalRequest(req, res, avatar)) {
@@ -620,7 +900,7 @@ if (Meteor.isServer) {
 
       // Set headers and stream file
       setFileHeaders(res, avatar, false);
-      streamFile(res, readStream, avatar);
+      serveFile(req, res, readStream, avatar);
 
     } catch (error) {
       console.error('Avatar server error:', error);
@@ -670,7 +950,7 @@ if (Meteor.isServer) {
       }
 
       // Enforce cookie/header/query-based auth for private boards
-      if (!(await isAuthorizedForBoard(req, board))) {
+      if (!(await isAuthorizedForBoard(req, board, attachment, 'file-server:cfs'))) {
         res.writeHead(403);
         res.end('Access denied');
         return;
@@ -686,7 +966,7 @@ if (Meteor.isServer) {
       if (fileStream) {
         if (isDownloadRequested(req)) {
           // Force download if requested
-          res.setHeader('Cache-Control', 'public, max-age=31536000');
+          setPrivateFileCacheHeaders(res);
           res.setHeader('ETag', `"${attachment._id}"`);
           if (attachment.size) res.setHeader('Content-Length', attachment.size);
           res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -696,7 +976,7 @@ if (Meteor.isServer) {
         } else {
           setFileHeaders(res, attachment, true);
         }
-        streamFile(res, fileStream, attachment);
+        serveFile(req, res, fileStream, attachment);
       } else {
         res.writeHead(404);
         res.end('Legacy attachment file not found in GridFS');
@@ -732,10 +1012,20 @@ if (Meteor.isServer) {
       // Try to get avatar from database (new structure first)
       let avatar = await ReactiveCache.getAvatar(avatarId);
 
-      // If not found in new structure, try to handle legacy format
       if (!avatar) {
-        // For legacy avatars, we might need to handle different ID formats
-        // This is a fallback for old CollectionFS avatars
+        // This prefix route mounts before avatarServer's narrower route and
+        // also receives /<id>/original/<filename>. Read CollectionFS here
+        // rather than masking the authenticated legacy fallback with a 404.
+        const legacy = await readAuthenticatedLegacyAvatar(req, avatarId);
+        if (legacy) {
+          if (handleConditionalRequest(req, res, legacy.avatar)) {
+            legacy.stream.destroy();
+            return;
+          }
+          setFileHeaders(res, legacy.avatar, false);
+          serveFile(req, res, legacy.stream, legacy.avatar);
+          return;
+        }
         res.writeHead(404);
         res.end('Avatar not found');
         return;
@@ -765,7 +1055,7 @@ if (Meteor.isServer) {
 
       // Set headers and stream file
       setFileHeaders(res, avatar, false);
-      streamFile(res, readStream, avatar);
+      serveFile(req, res, readStream, avatar);
 
     } catch (error) {
       console.error('Legacy avatar server error:', error);

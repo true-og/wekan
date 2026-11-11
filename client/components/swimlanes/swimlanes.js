@@ -1,18 +1,58 @@
+import { titlesFromComposer } from '/client/components/forms/multilineTitleChoice';
 import { ReactiveCache } from '/imports/reactiveCache';
+import { setSortableOptions } from '/client/lib/sortableOptions';
 import { once } from '/imports/lib/collectionHelpers';
-import dragscroll from '@wekanteam/dragscroll';
+import {
+  suspendBoardDragscroll,
+  resumeBoardDragscroll,
+  isBoardDragscrollSuspended,
+} from '/client/lib/boardDragscroll';
 import Lists from '/models/lists';
 import { CSSEvents } from '/client/lib/cssEvents';
 import { Filter } from '/client/lib/filter';
 import { EscapeActions } from '/client/lib/escapeActions';
 import { Utils } from '/client/lib/utils';
+import { currentUserWith } from '/client/lib/currentUserWith';
+import { TAPi18n } from '/imports/i18n';
+import { defaultSwimlaneIdForBoard } from '/client/components/lists/listAddHelpers';
+import { errorMessage } from '/client/lib/errorMessage';
 const { calculateIndex } = Utils;
 
+// #4223 (Bigboard): normally exactly one board's lists are ever on the page,
+// so the plain '.js-swimlane, .js-lists' selector only ever connects a
+// board's own lists to each other. Bigboard stacks EVERY board's lists on
+// one page at once, so the same selector would let a list be dragged from
+// one board's section into another's. Scope the connect selector to the
+// dragged element's own board (via the data-board-id already rendered on
+// .js-swimlane/.js-lists) when one is present; falls back to the previous
+// unscoped selector otherwise, so ordinary single-board views are unaffected.
+function connectWithSelector($listsDom) {
+  const boardId = $listsDom && $listsDom.attr && $listsDom.attr('data-board-id');
+  if (boardId) {
+    return `.js-swimlane[data-board-id="${boardId}"], .js-lists[data-board-id="${boardId}"]`;
+  }
+  return '.js-swimlane, .js-lists';
+}
+
 function saveSorting(ui) {
+  // #5462 (defense in depth): a logged-in user without write access must never
+  // persist a list reorder, even if a sortable was left enabled. Anonymous
+  // users on public boards fall through to the localStorage path below.
+  if (Meteor.userId() && !Utils.canModifyBoard()) {
+    return;
+  }
   // To attribute the new index number, we need to get the DOM element
   // of the previous and the following list -- if any.
-  const prevListDom = ui.item.prev('.js-list').get(0);
-  const nextListDom = ui.item.next('.js-list').get(0);
+  // Use prevAll/nextAll (not prev/next) so non-list siblings between lists do
+  // not break neighbour detection: the lists container also renders the
+  // +addListInline composer and, when a card is open, a +cardDetails element.
+  // jQuery's .prev('.js-list') only matches an *immediately* adjacent sibling,
+  // so an interspersed composer/cardDetails made calculateIndex mis-detect the
+  // first/last position and compute a wrong sort, so the reordered list landed
+  // elsewhere and looked like it did not persist. See
+  // https://github.com/wekan/wekan/issues/5997
+  const prevListDom = ui.item.prevAll('.js-list:not(.js-list-composer)').get(0);
+  const nextListDom = ui.item.nextAll('.js-list:not(.js-list-composer)').get(0);
   const sortIndex = calculateIndex(prevListDom, nextListDom, 1);
 
   const listDomElement = ui.item.get(0);
@@ -56,11 +96,43 @@ function saveSorting(ui) {
     sort: sortIndex.base,
   };
 
-  // Check if the list was dropped in a different swimlane
-  const isDifferentSwimlane = targetSwimlaneId && targetSwimlaneId !== originalSwimlaneId;
+  // Check if the list was dropped in a different swimlane.
+  //
+  // #6484: only rebind a list to a swimlane when it was ALREADY swimlane-scoped
+  // (originalSwimlaneId set) and actually crossed into a DIFFERENT swimlane. A
+  // board-wide list has swimlaneId === null / getEffectiveSwimlaneId() === null
+  // and renders under EVERY swimlane (see filterCardsByListAndSwimlane and
+  // currentListIsInThisSwimlane: a null swimlaneId matches every swimlane). Since
+  // targetSwimlaneId is ALWAYS the swimlane the list is shown under in swimlanes
+  // view, the old `targetSwimlaneId !== originalSwimlaneId` was true for ANY nudge
+  // of a board-wide list, so it set list.swimlaneId AND moved every card to that
+  // one swimlane — the list then vanished from all the other swimlanes. Requiring
+  // originalSwimlaneId keeps board-wide lists board-wide; genuinely
+  // swimlane-scoped lists can still be moved between swimlanes.
+  const isDifferentSwimlane =
+    originalSwimlaneId &&
+    targetSwimlaneId &&
+    targetSwimlaneId !== originalSwimlaneId;
 
   // If the list was dropped in a different swimlane, update the swimlaneId
   if (isDifferentSwimlane) {
+    // #6478: moving a list to a DIFFERENT swimlane is high-impact — it re-homes
+    // every card in the list — and is easy to trigger accidentally on touch (the
+    // reporter merged lists this way and needed ~15 min to recover). Confirm on
+    // touch/small screens before applying; on decline, revert the drag by
+    // re-rendering from the server and abort. (Ctrl+Z can also undo it after the
+    // fact — see userPositionHistory.undoLast.)
+    if (
+      (Utils.isMiniScreen() || Utils.isTouchScreenOrShowDesktopDragHandles()) &&
+      typeof window !== 'undefined' &&
+      typeof window.confirm === 'function' &&
+      // eslint-disable-next-line no-alert
+      !window.confirm(TAPi18n.__('confirm-move-list-to-swimlane'))
+    ) {
+      Meteor.subscribe('board', list.boardId, false);
+      resumeBoardDragscroll(); // #6558: the drag is over, panning comes back
+      return;
+    }
     updateData.swimlaneId = targetSwimlaneId;
 
     // Move all cards in the list to the new swimlane
@@ -127,17 +199,9 @@ function saveSorting(ui) {
     // Silent fail
   }
 
-  // Re-enable dragscroll after list dragging is complete
-  try {
-    dragscroll.reset();
-  } catch (e) {
-    // Silent fail
-  }
-
-  // Re-enable dragscroll on all swimlanes
-  $('.js-swimlane').each(function () {
-    $(this).addClass('dragscroll');
-  });
+  // Re-enable dragscroll after list dragging is complete - the swimlanes AND
+  // the canvas, exactly as they were tagged before the drag (#6558).
+  resumeBoardDragscroll();
 }
 
 function currentListIsInThisSwimlane(swimlaneId) {
@@ -308,7 +372,7 @@ function initSortable(boardComponent, $listsDom) {
 
   try {
     $listsDom.sortable({
-      connectWith: '.js-swimlane, .js-lists',
+      connectWith: connectWithSelector($listsDom),
       tolerance: 'pointer',
       appendTo: '.board-canvas',
       helper(evt, item) {
@@ -321,26 +385,27 @@ function initSortable(boardComponent, $listsDom) {
       distance: 3,
       forcePlaceholderSize: true,
       cursor: 'move',
+      // #5462: only users with write access may reorder lists. Without this,
+      // read-only / comment-only members could drag lists, firing a server
+      // write that is denied with `403 Access denied` (and the list snaps
+      // back). The two other list sortables already gate on canModifyBoard().
+      disabled: !Utils.canModifyBoard() || !Utils.canDragBoardObject('list'),
       start(evt, ui) {
         ui.helper.css('z-index', 1000);
         ui.placeholder.height(ui.helper.height());
         ui.placeholder.width(ui.helper.width());
+        ui.placeholder.css('min-width', ui.helper.width()); // #6763
         EscapeActions.executeUpTo('popup-close');
         if (boardComponent) boardComponent.setIsDragging(true);
 
         // Add visual feedback for list being dragged
         ui.item.addClass('ui-sortable-helper');
 
-        // Disable dragscroll during list dragging to prevent interference
-        try {
-          dragscroll.reset();
-        } catch (e) {
-        }
-
-        // Also disable dragscroll on all swimlanes during list dragging
-        $('.js-swimlane').each(function() {
-          $(this).removeClass('dragscroll');
-        });
+        // #6558: no panning while a list is dragged. This used to call
+        // dragscroll.reset() FIRST and remove the class afterwards, which does
+        // nothing - reset() binds to whatever carries the class at that moment,
+        // so the listeners stayed - and it left `.board-canvas` tagged anyway.
+        suspendBoardDragscroll();
       },
       beforeStop(evt, ui) {
         // Clean up visual feedback
@@ -371,6 +436,68 @@ Template.swimlane.onCreated(function () {
   this._lastDragPositionX = 0;
 });
 
+// The list drag-and-drop of one row of lists, shared by a swimlane and by the
+// Lists view (listsGroup). Any sortable already on the element is replaced, so
+// a re-render does not stack a second one.
+function initListsSortable(tpl, $parent, handleSelector, boardComponent) {
+  if ($parent.data('uiSortable') || $parent.data('sortable')) {
+    try {
+      $parent.sortable('destroy');
+    } catch (e) {}
+  }
+
+  // Check for drag handles
+  const $handles = $parent.find('.js-list-handle');
+
+  // Test if drag handles are clickable
+  $handles.on('click', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+  });
+
+  $parent.sortable({
+    connectWith: connectWithSelector($parent),
+    tolerance: 'pointer',
+    appendTo: '.board-canvas',
+    helper: 'clone',
+    items: '.js-list:not(.js-list-composer)',
+    placeholder: 'list placeholder',
+    distance: 7,
+    handle: handleSelector,
+    disabled: !Utils.canModifyBoard() || !Utils.canDragBoardObject('list'),
+    dropOnEmpty: true,
+    start(evt, ui) {
+      ui.helper.css('z-index', 1000);
+      ui.placeholder.height(ui.helper.height());
+      ui.placeholder.width(ui.helper.width());
+      ui.placeholder.css('min-width', ui.helper.width()); // #6763
+      EscapeActions.executeUpTo('popup-close');
+      if (boardComponent) boardComponent.setIsDragging(true);
+      suspendBoardDragscroll(); // #6558
+    },
+    stop(evt, ui) {
+      resumeBoardDragscroll(); // #6558
+      if (boardComponent) boardComponent.setIsDragging(false);
+      saveSorting(ui);
+    },
+  });
+  // Reactively update handle when user toggles desktop drag handles
+  tpl.autorun(() => {
+    const newHandle = Utils.isTouchScreenOrShowDesktopDragHandles()
+      ? '.js-list-handle'
+      : '.js-list-header';
+    if ($parent.data('uiSortable') || $parent.data('sortable')) {
+      try {
+        // #6745: only what changed.
+        setSortableOptions($parent, {
+          handle: newHandle,
+          disabled: !Utils.canModifyBoard() || !Utils.canDragBoardObject('list'),
+        });
+      } catch (e) {}
+    }
+  });
+}
+
 Template.swimlane.onRendered(function () {
   const tpl = this;
   const boardBodyEl = tpl.firstNode?.parentElement?.closest?.('.board-body') || document.querySelector('.board-body');
@@ -395,56 +522,18 @@ Template.swimlane.onRendered(function () {
 
   // Wait for DOM to be ready
   setTimeout(() => {
+    // A reactive board-view switch can destroy this swimlane before the
+    // deferred sortable setup runs. TemplateInstance.$() deliberately throws
+    // on a removed DomRange, which turned an otherwise successful render or
+    // interaction into a page-level "Can't select in removed DomRange" error.
+    if (tpl.view.isDestroyed) return;
     const handleSelector = Utils.isTouchScreenOrShowDesktopDragHandles()
       ? '.js-list-handle'
       : '.js-list-header';
-    const $parent = tpl.$('.js-lists');
+    const $parent = $listsDom;
 
     if ($parent.length > 0) {
-
-      // Check for drag handles
-      const $handles = $parent.find('.js-list-handle');
-
-      // Test if drag handles are clickable
-      $handles.on('click', function (e) {
-        e.preventDefault();
-        e.stopPropagation();
-      });
-
-      $parent.sortable({
-        connectWith: '.js-swimlane, .js-lists',
-        tolerance: 'pointer',
-        appendTo: '.board-canvas',
-        helper: 'clone',
-        items: '.js-list:not(.js-list-composer)',
-        placeholder: 'list placeholder',
-        distance: 7,
-        handle: handleSelector,
-        disabled: !Utils.canModifyBoard(),
-        dropOnEmpty: true,
-        start(evt, ui) {
-          ui.helper.css('z-index', 1000);
-          ui.placeholder.height(ui.helper.height());
-          ui.placeholder.width(ui.helper.width());
-          EscapeActions.executeUpTo('popup-close');
-          if (boardComponent) boardComponent.setIsDragging(true);
-        },
-        stop(evt, ui) {
-          if (boardComponent) boardComponent.setIsDragging(false);
-          saveSorting(ui);
-        },
-      });
-      // Reactively update handle when user toggles desktop drag handles
-      tpl.autorun(() => {
-        const newHandle = Utils.isTouchScreenOrShowDesktopDragHandles()
-          ? '.js-list-handle'
-          : '.js-list-header';
-        if ($parent.data('uiSortable') || $parent.data('sortable')) {
-          try {
-            $parent.sortable('option', 'handle', newHandle);
-          } catch (e) {}
-        }
-      });
+      initListsSortable(tpl, $parent, handleSelector, boardComponent);
     }
   }, 100);
 });
@@ -482,6 +571,20 @@ function initializeSwimlaneResize(tpl, retryCount = 0) {
     return;
   }
 
+  // #6680: hide the handle entirely while the board-wide lock is on, the
+  // same way client/components/lists/list.js hides its own resize handle -
+  // otherwise the blue drag-height line still shows on hover even though
+  // startResize() below refuses to act on it, which reads as broken rather
+  // than locked.
+  tpl.autorun(() => {
+    const board = ReactiveCache.getBoard(swimlane.boardId);
+    if (board && board.getSwimlaneHeightResizeLocked()) {
+      $resizeHandle.hide();
+    } else {
+      $resizeHandle.show();
+    }
+  });
+
   let isResizing = false;
   let startY = 0;
   let startHeight = 0;
@@ -499,6 +602,12 @@ function initializeSwimlaneResize(tpl, retryCount = 0) {
   };
 
   const startResize = (e) => {
+    // #6680: a board-wide lock, toggled from the top header, disables the
+    // swimlane-height drag handle for everyone on this board.
+    const board = ReactiveCache.getBoard(swimlane.boardId);
+    if (board && board.getSwimlaneHeightResizeLocked()) {
+      return;
+    }
     isResizing = true;
     startY = getEventPageY(e);
     startHeight = parseInt($swimlane.css('height')) || 300;
@@ -530,6 +639,15 @@ function initializeSwimlaneResize(tpl, retryCount = 0) {
     $swimlane[0].style.setProperty('flex-grow', '0');
     $swimlane[0].style.setProperty('flex-shrink', '0');
 
+    // #6675: the dependency-line overlay (dependencyOverlay.js) only redraws
+    // on scroll/window-resize; a swimlane's own height changing here fires
+    // neither, so without this its lines keep the coordinates from before
+    // the drag - stale positions that can visibly run past this swimlane's
+    // new (shorter) edge and on top of the swimlane below it. Its own
+    // listener is already rAF-throttled, so firing this on every mousemove
+    // is not a performance concern.
+    window.dispatchEvent(new Event('wekan-swimlane-resized'));
+
     e.preventDefault();
     e.stopPropagation();
   };
@@ -558,6 +676,11 @@ function initializeSwimlaneResize(tpl, retryCount = 0) {
     $swimlane.removeClass('swimlane-resizing');
     $('body').removeClass('swimlane-resizing-active');
     $('body').css('user-select', '');
+
+    // #6675: one more recompute once overflow reverts from the forced
+    // "visible" of .swimlane-resizing back to the base rule's "auto" - see
+    // the matching dispatch in doResize.
+    window.dispatchEvent(new Event('wekan-swimlane-resized'));
 
     // Save the new height using the existing system
     const boardId = swimlane.boardId;
@@ -622,8 +745,19 @@ function initializeSwimlaneResize(tpl, retryCount = 0) {
 }
 
 Template.swimlane.helpers({
+  // #6745: board-role checks only (see listHeader.js) - not the whole user.
+  currentUser() {
+    return currentUserWith(['username']);
+  },
+  // #2805: with the board's shared list header row on, only the first
+  // swimlane shows its list headers, sticky (swimlanes.css).
+  isFirstSwimlane() {
+    const board = Utils.getCurrentBoard();
+    const first = board && board.hasSharedListHeaders && board.hasSharedListHeaders() && board.swimlanes()[0];
+    return !!(first && first._id === this._id);
+  },
   canSeeAddList() {
-    return ReactiveCache.getCurrentUser().isBoardAdmin();
+    return ReactiveCache.getCurrentUser()?.isBoardAdmin();
   },
   lists() {
     const swimlane = this;
@@ -658,6 +792,24 @@ Template.swimlane.helpers({
       }
     }
     return combined;
+  },
+  // #6465: the add-list composer is no longer a standing column. It opens AFTER a
+  // specific list when that list's header add-list button is clicked (the target
+  // list _id is kept in Session 'wekan-add-list-after'). Rendered after the list
+  // in the DOM, it appears to the RIGHT of the list in LTR and to the LEFT in RTL
+  // (the lists lane is a flex row that reverses under dir=rtl).
+  isAddListAfter(listId) {
+    return Session.get('wekan-add-list-after') === listId;
+  },
+  // Empty swimlane / empty board: there are no list headers to host the button,
+  // so offer a + button that reveals the inline composer only when clicked.
+  swimlaneHasNoLists() {
+    return !this.myLists || this.myLists().length === 0;
+  },
+  // #6465: is the empty-state create-list form open for this swimlane? (Set by the
+  // + button; until then only the button shows.)
+  isEmptyAddListOpen(swimlaneId) {
+    return Session.get('wekan-add-list-empty') === swimlaneId;
   },
   collapseSwimlane() {
     return Utils.getSwimlaneCollapseState(this);
@@ -722,7 +874,19 @@ Template.swimlane.helpers({
   },
 });
 
+// #6465: open the empty-state create-list form for a swimlane (shared by the
+// Swimlanes and Lists views). Until clicked, an empty swimlane/board shows only the
+// + button; this reveals the inline composer, scoped to the clicked swimlane.
+function openEmptyAddList(event) {
+  event.preventDefault();
+  const swimlaneId = $(event.currentTarget).data('swimlane') || null;
+  Session.set('wekan-add-list-after', null);
+  Session.set('wekan-add-list-swimlane', swimlaneId);
+  Session.set('wekan-add-list-empty', swimlaneId);
+}
+
 Template.swimlane.events({
+  'click .js-open-empty-add-list': openEmptyAddList,
   // Click-and-drag action
   'mousedown .board-canvas'(evt, tpl) {
     const noDragInside = ['a', 'input', 'textarea', 'p'].concat(
@@ -732,6 +896,18 @@ Template.swimlane.events({
     ).concat([
       '.js-list-resize-handle',
       '.js-swimlane-resize-handle',
+      // #6558: everything that is a DRAG SOURCE rather than a pan surface.
+      // This lane-panning handler is a second implementation of drag-scroll,
+      // and it used to ignore the `nodragscroll` marker the dragscroll library
+      // honours - so pressing a card (which carries `nodragscroll` when the
+      // card itself is the sortable's handle) started a horizontal lane pan
+      // that ran ALONGSIDE the card drag: the card followed the pointer while
+      // the list slid sideways under it, and the drop landed somewhere else.
+      // `.handle` covers the card/list/swimlane drag handles when handles are
+      // on, `.nodragscroll` covers the minicards, resize handles, checklists
+      // and anything else already marked as not-for-panning.
+      '.nodragscroll',
+      '.handle',
     ]);
 
     const isResizeHandle = $(evt.target).closest('.js-list-resize-handle, .js-swimlane-resize-handle').length > 0;
@@ -755,6 +931,12 @@ Template.swimlane.events({
     }
   },
   mousemove(evt, tpl) {
+    // #6558: a card / list / swimlane drag has taken over the pointer - stop
+    // panning, whatever started it.
+    if (tpl._isDragging && isBoardDragscrollSuspended()) {
+      tpl._isDragging = false;
+      return;
+    }
     if (tpl._isDragging) {
       // Update the canvas position
       tpl.listsDom.scrollLeft -= evt.clientX - tpl._lastDragPositionX;
@@ -771,64 +953,143 @@ Template.swimlane.events({
 });
 
 
-Template.addListForm.onCreated(function () {
-  this.currentBoard = Utils.getCurrentBoard();
-  this.isListTemplatesSwimlane =
-    this.currentBoard.isTemplatesBoard() &&
-    Template.currentData().isListTemplatesSwimlane();
+// #6465: the inline add-list composer that opens after a specific list (or at the
+// start of an empty swimlane). Its data context is the swimlane it creates the
+// list in; the target list (for positioning) is Session 'wekan-add-list-after'.
+Template.addListInline.onCreated(function () {
   this.currentSwimlane = Template.currentData();
 });
 
-Template.addListForm.helpers({
+Template.addListInline.helpers({
+  // #6465 follow-up: the lists of the swimlane this composer opens in, so the
+  // "add after which list" position selector (restored) can be shown.
   swimlaneLists() {
-    const swimlane = Template.instance().currentSwimlane;
-    if (!swimlane?._id) return [];
+    const swimlaneId =
+      Session.get('wekan-add-list-swimlane') ||
+      Template.instance().currentSwimlane?._id;
+    if (!swimlaneId) return [];
     return ReactiveCache.getLists(
-      { swimlaneId: swimlane._id, archived: false },
+      { swimlaneId, archived: false },
       { sort: { sort: 1 } },
     );
   },
+  // Pre-select the list whose header add-list button opened this composer.
+  isDefaultAfterList(listId) {
+    return Session.get('wekan-add-list-after') === listId;
+  },
 });
 
-Template.addListForm.events({
+Template.addListInline.events({
   async submit(evt, tpl) {
     evt.preventDefault();
-
     const titleInput = tpl.find('.list-name-input');
-    const title = titleInput?.value.trim();
+    const titles = titlesFromComposer(titleInput);
+    if (!titles.length || tpl.creatingLists) return;
 
-    if (!title) return;
-
+    // Position: honour the explicit "add after list" selector when present
+    // (its options mirror the swimlane's lists, defaulting to the one whose
+    // header opened this composer), and derive nextListId from the following
+    // option so the new list is inserted between them. Fall back to the header
+    // button's target (Session) for the empty-board/start case.
     const positionInput = tpl.find('.list-position-input');
-    const afterListId =
-      positionInput && positionInput.value ? positionInput.value.trim() : null;
-    const nextListId =
-      positionInput &&
-      positionInput.selectedIndex >= 0 &&
-      positionInput.options[positionInput.selectedIndex + 1]
-        ? positionInput.options[positionInput.selectedIndex + 1].value
-        : null;
+    let afterListId;
+    let nextListId = null;
+    if (positionInput && positionInput.value) {
+      afterListId = positionInput.value.trim();
+      const next = positionInput.options[positionInput.selectedIndex + 1];
+      nextListId = next ? next.value : null;
+    } else {
+      afterListId = Session.get('wekan-add-list-after') || null;
+    }
 
+    tpl.creatingLists = true;
+    titleInput.disabled = true;
+    let created = 0;
     try {
-      await Meteor.callAsync('createListAfter', {
-        title,
-        boardId: Session.get('currentBoard'),
-        swimlaneId: tpl.currentSwimlane._id,
-        afterListId,
-        nextListId,
-        type: tpl.isListTemplatesSwimlane ? 'template-list' : 'list',
-      });
-
+      for (const title of titles) {
+        afterListId = await Meteor.callAsync('createListAfter', {
+          title,
+          boardId: Session.get('currentBoard'),
+          // The header button records the swimlane the list is displayed in; the
+          // empty-swimlane composer falls back to its own swimlane data context.
+          swimlaneId: Session.get('wekan-add-list-swimlane') || tpl.currentSwimlane?._id,
+          afterListId,
+          nextListId,
+          type: 'list',
+        });
+        created += 1;
+      }
       titleInput.value = '';
       titleInput.focus();
+      // Empty-state flow: the swimlane now has a list, so drop the empty-composer
+      // flag — if it becomes empty again the + button (not the form) shows first.
+      Session.set('wekan-add-list-empty', null);
     } catch (error) {
-      console.error('Failed to create list after selected list:', error);
+      titleInput.value = titles.slice(created).join('\n');
+      console.error('Failed to create list:', error);
+    } finally {
+      tpl.creatingLists = false;
+      titleInput.disabled = false;
+      titleInput.focus();
+      titleInput.dispatchEvent(new Event('input', { bubbles: true }));
     }
   },
+  // Restore the "or template" option: create the list from a template.
   'click .js-list-template': Popup.open('searchElement'),
+  // #2809
+  'click .js-link-list': Popup.open('linkList'),
+  'click .js-close-add-list-inline'() {
+    closeAddListComposer();
+  },
 });
 
+// Close the inline add-list composer (the one opened after a list, or in an empty
+// swimlane). The X in the composer and Escape do the same thing.
+function closeAddListComposer() {
+  Session.set('wekan-add-list-after', null);
+  Session.set('wekan-add-list-swimlane', null);
+  Session.set('wekan-add-list-empty', null);
+}
+
+// #6865: Escape closes the add-list composer. Only the X did: the composer stays
+// open after a list is created, so one can add several, and then Escape did
+// nothing. It is closed at the level of an inlined form (below popups and modals,
+// above the card's details and the sidebar), and not by a click elsewhere, as an
+// inlined form is not.
+EscapeActions.register(
+  'inlinedForm',
+  closeAddListComposer,
+  () => !!(Session.get('wekan-add-list-after') || Session.get('wekan-add-list-empty')),
+  { enabledOnClick: false },
+);
+
 Template.listsGroup.helpers({
+  // #6745: board-role checks only (see listHeader.js) - not the whole user.
+  currentUser() {
+    return currentUserWith(['username']);
+  },
+  // Issue #6142: the add-list composer needs a swimlane as its data context
+  // (it creates the list in that swimlane). In Lists mode the listsGroup data
+  // context is the board, not a swimlane, so resolve the board's default
+  // swimlane here, for the empty-board + button and the inline composer.
+  defaultSwimlane() {
+    const board = Template.currentData();
+    const swimlaneId = defaultSwimlaneIdForBoard(board);
+    if (!swimlaneId) return null;
+    return ReactiveCache.getSwimlane({ _id: swimlaneId });
+  },
+  // #6465: same add-list-after-a-list behaviour as the swimlanes view.
+  isAddListAfter(listId) {
+    return Session.get('wekan-add-list-after') === listId;
+  },
+  boardHasNoLists() {
+    const board = Template.currentData();
+    return !board || !board.lists || board.lists().length === 0;
+  },
+  // #6465: is the empty-board create-list form open? (Set by the + button.)
+  isEmptyAddListOpen(swimlaneId) {
+    return Session.get('wekan-add-list-empty') === swimlaneId;
+  },
   currentCardIsInThisList(listId, swimlaneId) {
     return currentCardIsInThisList(listId, swimlaneId);
   },
@@ -853,6 +1114,11 @@ Template.listsGroup.helpers({
   },
 });
 
+Template.listsGroup.events({
+  // #6465: empty board (Lists view) + button reveals the inline composer.
+  'click .js-open-empty-add-list': openEmptyAddList,
+});
+
 Template.listsGroup.onRendered(function () {
   const tpl = this;
   const boardBodyEl2 = tpl.firstNode?.parentElement?.closest?.('.board-body') || document.querySelector('.board-body');
@@ -866,62 +1132,15 @@ Template.listsGroup.onRendered(function () {
 
   // Wait for DOM to be ready
   setTimeout(() => {
+    if (tpl.view.isDestroyed) return;
     const handleSelector = Utils.isTouchScreenOrShowDesktopDragHandles()
       ? '.js-list-handle'
       : '.js-list-header';
     const $parent = $listsDom;
 
     // Initialize sortable even if there are no lists (to allow dropping into empty swimlanes)
-    if ($parent.length > 0 && $parent.hasClass('js-lists')) {
-      if ($parent.data('uiSortable') || $parent.data('sortable')) {
-        try {
-          $parent.sortable('destroy');
-        } catch (e) {}
-      }
-
-      // Check for drag handles
-      const $handles = $parent.find('.js-list-handle');
-
-      // Test if drag handles are clickable
-      $handles.on('click', function (e) {
-        e.preventDefault();
-        e.stopPropagation();
-      });
-
-      $parent.sortable({
-        connectWith: '.js-swimlane, .js-lists',
-        tolerance: 'pointer',
-        appendTo: '.board-canvas',
-        helper: 'clone',
-        items: '.js-list:not(.js-list-composer)',
-        placeholder: 'list placeholder',
-        distance: 7,
-        handle: handleSelector,
-        disabled: !Utils.canModifyBoard(),
-        dropOnEmpty: true,
-        start(evt, ui) {
-          ui.helper.css('z-index', 1000);
-          ui.placeholder.height(ui.helper.height());
-          ui.placeholder.width(ui.helper.width());
-          EscapeActions.executeUpTo('popup-close');
-          if (boardComponent) boardComponent.setIsDragging(true);
-        },
-        stop(evt, ui) {
-          if (boardComponent) boardComponent.setIsDragging(false);
-          saveSorting(ui);
-        },
-      });
-      // Reactively update handle when user toggles desktop drag handles
-      tpl.autorun(() => {
-        const newHandle = Utils.isTouchScreenOrShowDesktopDragHandles()
-          ? '.js-list-handle'
-          : '.js-list-header';
-        if ($parent.data('uiSortable') || $parent.data('sortable')) {
-          try {
-            $parent.sortable('option', 'handle', newHandle);
-          } catch (e) {}
-        }
-      });
+    if ($parent.length > 0) {
+      initListsSortable(tpl, $parent, handleSelector, boardComponent);
     }
   }, 100);
 });
@@ -992,78 +1211,109 @@ function swimlaneDoneEvent(serverMethod, tpl) {
   );
 }
 
-Template.moveSwimlanePopup.onCreated(function () {
-  this.currentSwimlane = Template.currentData();
-  this.selectedBoardId = new ReactiveVar(Utils.getCurrentBoard()._id);
-  this.selectedSwimlaneId = new ReactiveVar('');
-  setFirstSelectedSwimlane(this);
+/**
+ * Move swimlane and Copy swimlane: the same dialog, twice. Both ask which board
+ * and which swimlane to go above or below, keep the same two selections while
+ * you answer, and end by calling a method - and the METHOD is the only thing
+ * that differs, which is what `method` is.
+ *
+ * The markup is one template as well (`swimlaneDestinationPicker` in
+ * swimlanes.jade); its events bubble up to the popup that includes it, which is
+ * the one holding these selections.
+ */
+function registerSwimlaneDialogTemplate(templateName, method) {
+  Template[templateName].onCreated(function () {
+    this.currentSwimlane = Template.currentData();
+    this.selectedBoardId = new ReactiveVar(Utils.getCurrentBoard()._id);
+    this.selectedSwimlaneId = new ReactiveVar('');
+    setFirstSelectedSwimlane(this);
+  });
+
+  // The picker is a template of its own, so what it needs is this instance,
+  // handed to it as `dialog`.
+  Template[templateName].helpers({
+    board() {
+      return Utils.getCurrentBoard();
+    },
+    dialog() {
+      return Template.instance();
+    },
+  });
+
+  Template[templateName].events({
+    'click .js-done'(event, tpl) {
+      swimlaneDoneEvent(method, tpl);
+    },
+    'change .js-select-boards'(event, tpl) {
+      tpl.selectedBoardId.set($(event.currentTarget).val());
+      setFirstSelectedSwimlane(tpl);
+    },
+    'change .js-select-swimlanes'(event, tpl) {
+      tpl.selectedSwimlaneId.set($(event.currentTarget).val());
+    },
+  });
+}
+
+registerSwimlaneDialogTemplate('moveSwimlanePopup', 'moveSwimlane');
+registerSwimlaneDialogTemplate('copySwimlanePopup', 'copySwimlane');
+
+// The two selects of those dialogs, in one template. The dialog - the popup's
+// own instance - is kept here, because inside `each toBoard in toBoards` the
+// data context is a board.
+Template.swimlaneDestinationPicker.onCreated(function () {
+  this.autorun(() => {
+    const data = Template.currentData();
+    this.dialog = data && data.dialog;
+  });
 });
 
-Template.moveSwimlanePopup.helpers({
-  board() {
-    return Utils.getCurrentBoard();
-  },
+Template.swimlaneDestinationPicker.helpers({
   toBoards() {
     return swimlaneToBoards(false);
   },
   toSwimlanes() {
-    return getSwimlanesForBoard(Template.instance().selectedBoardId.get());
+    return getSwimlanesForBoard(Template.instance().dialog.selectedBoardId.get());
   },
   isSelectedBoard(boardId) {
-    return Template.instance().selectedBoardId.get() === boardId;
+    return Template.instance().dialog.selectedBoardId.get() === boardId;
   },
   isSelectedSwimlane(swimlaneId) {
-    return Template.instance().selectedSwimlaneId.get() === swimlaneId;
+    return Template.instance().dialog.selectedSwimlaneId.get() === swimlaneId;
   },
 });
 
-Template.moveSwimlanePopup.events({
-  'click .js-done'(event, tpl) {
-    swimlaneDoneEvent('moveSwimlane', tpl);
-  },
-  'change .js-select-boards'(event, tpl) {
-    tpl.selectedBoardId.set($(event.currentTarget).val());
-    setFirstSelectedSwimlane(tpl);
-  },
-  'change .js-select-swimlanes'(event, tpl) {
-    tpl.selectedSwimlaneId.set($(event.currentTarget).val());
-  },
+// #2809: Template.currentData() of the popup is the board the list is added to.
+Template.linkListPopup.onCreated(function () {
+  this.sourceLists = new ReactiveVar([]);
 });
 
-Template.copySwimlanePopup.onCreated(function () {
-  this.currentSwimlane = Template.currentData();
-  this.selectedBoardId = new ReactiveVar(Utils.getCurrentBoard()._id);
-  this.selectedSwimlaneId = new ReactiveVar('');
-  setFirstSelectedSwimlane(this);
+Template.linkListPopup.helpers({
+  linkableBoards() {
+    const current = Utils.getCurrentBoard();
+    return ReactiveCache.getBoards({ archived: false, type: 'board', _id: { $ne: current && current._id } }, { sort: { title: 1 } });
+  },
+  sourceLists() { return Template.instance().sourceLists.get(); },
+  noSourceLists() { return Template.instance().sourceLists.get().length === 0; },
 });
 
-Template.copySwimlanePopup.helpers({
-  board() {
-    return Utils.getCurrentBoard();
+Template.linkListPopup.events({
+  'change .js-link-list-board'(event, tpl) {
+    const boardId = event.currentTarget.value;
+    tpl.sourceLists.set([]);
+    if (!boardId) return;
+    Meteor.call('linkableLists', boardId, (error, lists) => { if (!error) tpl.sourceLists.set(lists || []); });
   },
-  toBoards() {
-    return swimlaneToBoards(false);
-  },
-  toSwimlanes() {
-    return getSwimlanesForBoard(Template.instance().selectedBoardId.get());
-  },
-  isSelectedBoard(boardId) {
-    return Template.instance().selectedBoardId.get() === boardId;
-  },
-  isSelectedSwimlane(swimlaneId) {
-    return Template.instance().selectedSwimlaneId.get() === swimlaneId;
-  },
-});
-
-Template.copySwimlanePopup.events({
-  'click .js-done'(event, tpl) {
-    swimlaneDoneEvent('copySwimlane', tpl);
-  },
-  'change .js-select-boards'(event, tpl) {
-    tpl.selectedBoardId.set($(event.currentTarget).val());
-    setFirstSelectedSwimlane(tpl);
-  },
-  'change .js-select-swimlanes'(event, tpl) {
-    tpl.selectedSwimlaneId.set($(event.currentTarget).val());
+  async 'click .js-link-list-create, submit .js-link-list-form'(event, tpl) {
+    event.preventDefault();
+    const board = Utils.getCurrentBoard();
+    const sourceBoardId = tpl.$('.js-link-list-board').val();
+    const sourceListId = tpl.$('.js-link-list-list').val();
+    if (!board || !sourceBoardId || !sourceListId) return;
+    try {
+      await Meteor.callAsync('createLinkedList', { boardId: board._id, sourceBoardId, sourceListId });
+      Popup.back();
+    } catch (error) {
+      alert(errorMessage(error));
+    }
   },
 });

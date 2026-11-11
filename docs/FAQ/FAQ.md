@@ -18,10 +18,10 @@ that by providing one-click installation on various platforms.
 - Wekan is used in [most countries of the world](https://snapcraft.io/wekan).
 - Wekan largest user has 30k users using Wekan in their company.
 - Wekan has been [translated](https://app.transifex.com/wekan/) to about 70+ languages.
-- [Features](Features): Wekan has real-time user interface.
-- [Platforms](Platforms): Wekan supports many platforms.
+- [Features](../Features/Features.md): Wekan has real-time user interface.
+- [Platforms](../Platforms): Wekan supports many platforms.
   Wekan is critical part of new platforms Wekan is currently being integrated to.
-- [Integrations](Integrations): Current possible integrations and future plans.
+- [Integrations](../Features/Board-Sidebar/Board-Settings/Import-Export/Integrations/Integrations.md): Current possible integrations and future plans.
 
 ## About niche of WeKan
 
@@ -30,7 +30,7 @@ It's a very specific niche, with limited amount competitors, with all of this ap
 - Kanban with very many features, polish and usability
 - Permissive MIT license (if some other changes to GPL, Open Core, has https://sso.tax , is propietary etc, it's not in same niche anymore)
 - Self-hosted (or SaaS)
-- All code https://github.com/wekan/wekan and docs https://github.com/wekan/wekan/wiki Open Source
+- All code https://github.com/wekan/wekan and docs [Wekan documentation](../README.md) Open Source
 - Available for many OS and CPU platforms, listed at download/install section of https://wekan.fi
 - Translated to 70+ languages at https://app.transifex.com/wekan
 - Has optional affordable Commercial Support for Features/Fixes/Support/Hosting available https://wekan.fi/commercial-support/ that funds development of WeKan. Commercial Support provides private support chat with maintainer of WeKan.
@@ -40,19 +40,19 @@ It's a very specific niche, with limited amount competitors, with all of this ap
 
 ## Requirements
 
-- 64bit: Linux [Snap](https://github.com/wekan/wekan-snap/wiki/Install) or [Sandstorm](https://sandstorm.io) /
-  [Mac](Mac) / [Windows](Install-Wekan-from-source-on-Windows).
-  [More Platforms](Platforms). [ARM progress](https://github.com/wekan/wekan/issues/1053#issuecomment-410919264).
+- 64bit: Linux [Snap](https://github.com/wekan/wekan-snap/wiki/Install) or [Sandstorm](https://sandstorm.org) /
+  [Mac](../Platforms/Propietary/OS/Mac) / [Windows](../Platforms/Propietary/OS/Windows/Install-Wekan-from-source-on-Windows.md).
+  [More Platforms](../Platforms). [ARM progress](https://github.com/wekan/wekan/issues/1053#issuecomment-410919264).
 - 1 GB RAM minimum free for Wekan. Production server should have miminum total 4 GB RAM.
-  For thousands of users, for example with [Docker](https://github.com/wekan/wekan/blob/main/docker-compose.yml): 3 frontend servers,
+  For thousands of users, for example with [Docker](../../docker-compose.yml): 3 frontend servers,
   each having 2 CPU and 2 wekan-app containers. One backend wekan-db server with many CPUs.
 - Enough disk space and alerts about low disk space. If you run out disk space, MongoDB database gets corrupted.
 - SECURITY: Updating to newest Wekan version very often. Please check you do not have automatic updates of Sandstorm or Snap turned off.
   Old versions have security issues because of old versions Node.js etc. Only newest Wekan is supported.
   Wekan on Sandstorm is not usually affected by any Standalone Wekan (Snap/Docker/Source) security issues.
 - [Reporting all new bugs immediately](https://github.com/wekan/wekan/issues).
-  New features and fixes are added to Wekan [many times a day](https://github.com/wekan/wekan/blob/main/CHANGELOG.md).
-- [Backups](Backup) of Wekan database once a day miminum.
+  New features and fixes are added to Wekan [many times a day](../../CHANGELOG.md).
+- [Backups](../Backup/Backup.md) of Wekan database once a day miminum.
   Bugs, updates, users deleting list or card, harddrive full, harddrive crash etc can eat your data. There is no undo yet.
   Some bug can cause Wekan board to not load at all, requiring manual fixing of database content.
 
@@ -65,7 +65,7 @@ It's a very specific niche, with limited amount competitors, with all of this ap
 [Lauri Ojansivu](https://github.com/xet7) is CEO at [WeKan Team](https://wekan.fi),
 Cross-Platform FOSS maintainer,
 Cloud Architect, Full-Stack Developer, SysAdmin and SysOp.
-He has experience of [having added and removed over 4 million lines of code](https://github.com/wekan/wekan/blob/main/releases/count-lines-of-code-per-committer.sh) to
+He has experience of [having added and removed over 4 million lines of code](../../releases/count-lines-of-code-per-committer.sh) to
 [Meteor Full-Stack Web Framework](https://www.meteor.com)
 based [WeKan Open Source kanban](https://wekan.fi),
 that has been [translated to 70+ languages](https://explore.transifex.com/wekan/wekan/),
@@ -105,7 +105,7 @@ Wekan:
 - Snap/Docker/Sandstorm versions runs inside sandbox and does not have any access to elsewhere on server filesystem.
   - Snap version of Wekan is built directly from https://github.com/wekan/wekan repo on Canonical's build service that does security checks etc.
   - Docker version of Wekan is built directly from https://github.com/wekan/wekan by [Quay](https://quay.io/wekan/wekan) and [Docker Hub](https://hub.docker.com/r/wekanteam/wekan/) and they do security checks etc.
-  - Sandstorm version is checked by [ocdtrekkie](https://github.com/ocdtrekkie) that it does not break anything, before he lets new version of Wekan into [Sandstorm App Market](https://apps.sandstorm.io/app/m86q05rdvj14yvn78ghaxynqz7u2svw6rnttptxx49g1785cdv1h).
+  - Sandstorm version is checked by [ocdtrekkie](https://github.com/ocdtrekkie) that it does not break anything, before he lets new version of Wekan into [Sandstorm App Market](https://apps.sandstorm.org/app/m86q05rdvj14yvn78ghaxynqz7u2svw6rnttptxx49g1785cdv1h).
 - Wekan does not load any files from Internet, when starting Wekan. For further restrictions, you could on internal server only allow incoming and outgoing traffic from
   on internal server firewall to those computers that need to use Wekan.
 - There is contributors to Wekan from all over the world, that add fixes and features to Wekan.
@@ -119,7 +119,7 @@ Usually:
 * Slowest: Once a month.
 * One release contains anything from one typo fix to many major features and bugfixes.
 
-For [Wekan Platforms](Platforms), it means these choices:
+For [Wekan Platforms](../Platforms), it means these choices:
 
 * Snap: You get updates automatically immediately, or updates automatically scheduled at midnight
 * Source/Docker/VirtualBox: You need to test and install new Wekan version yourself
@@ -150,7 +150,7 @@ c) Develop feature yourself and submit it as pull requests to devel [Wekan repo]
 
 For Sandstorm-specific features, have the feature enabled in Sandstorm by using environment variable isSandstorm = true like is at wekan/sandstorm.js .
 
-In wiki there is [Developer Documentation](Developer-Documentation).
+In wiki there is [Developer Documentation](../DeveloperDocs/Developer-Documentation.md).
 
 ## Will you accept my pull request?
 We totally rely on pull requests for new features and bug fixes. If your pull request works, it's very likely to be accepted by xet7.
@@ -176,7 +176,7 @@ Yes, Libreboard was the old project name, which superseded the even older projec
 After renaming it to Libreboard, a [new logo] was designed and the project continued to live on as Libreboard. Unfortunately it turned out, that the new logo was apparently ripped-off from a [concept] published at Dribbble, and so a new logo had to be found. There were a lot of [ideas from the community][logo-ticket], and at the end Maxime [proposed][wekan-proposal] a completely new name, Wekan, together with a design proposal for a new logo.
 
 ## What was Wekan fork / Wefork?
-After 2016-09-02 there were no pull requests reviewed and integrated for nearly 2 months. At 2016-10-20 Wekan community created fork and started merging many bugfixes and new features into Wefork. 2017-01-29 Wekan author mquandalle gave access to Wekan and at 2017-01-31 xet7 started merging Wefork back to Wekan. 2017-02-08 All of Wefork is now merged and moved back to official Wekan. Wefork will not accept any new issues and pull requests. All development happens on Wekan. [Wefork announcement and merging back](https://github.com/wekan/wekan/issues/640#issuecomment-276383458), more info: [Team](Team)
+After 2016-09-02 there were no pull requests reviewed and integrated for nearly 2 months. At 2016-10-20 Wekan community created fork and started merging many bugfixes and new features into Wefork. 2017-01-29 Wekan author mquandalle gave access to Wekan and at 2017-01-31 xet7 started merging Wefork back to Wekan. 2017-02-08 All of Wefork is now merged and moved back to official Wekan. Wefork will not accept any new issues and pull requests. All development happens on Wekan. [Wefork announcement and merging back](https://github.com/wekan/wekan/issues/640#issuecomment-276383458), more info: [Team](Team.md)
 
 ## What is the difference between Wekan and Trello?
 The main difference between the two is that Wekan is completely open source and available under the permissive MIT license. That makes it possible to host it on your own server (or your company's or organization's server) and you keep the full control over all data. No need to fear it will disappear some day, like a commercial service like Trello could.  
@@ -242,8 +242,8 @@ Add only one link to this FAQ. Do not in any way comment or feed the trolls.
 Not a Company, Not a Startup, Not a Product with Enterprise version. Everything is now [Open Source](https://en.wikipedia.org/wiki/Open-source_software) and [Free software](https://en.wikipedia.org/wiki/Free_software).
 
 ## What is Sandstorm?
-[Sandstorm](https://sandstorm.io) is a open-source and free software security audited platform with grains, logging, admin settings, server clustering and App Market. App Market has Wekan as installable App. SSO options like LDAP, passwordless email, SAML, GitHub and Google Auth are already available on Sandstorm. Sandstorm is preferred platform for Wekan, as it would take a lot of work to reimplement everything in standalone Wekan. 
+[Sandstorm](https://sandstorm.org) is a open-source and free software security audited platform with grains, logging, admin settings, server clustering and App Market. App Market has Wekan as installable App. SSO options like LDAP, passwordless email, SAML, GitHub and Google Auth are already available on Sandstorm. Sandstorm is preferred platform for Wekan, as it would take a lot of work to reimplement everything in standalone Wekan. 
 
 ## How can you contribute to Sandstorm?
-See [Sandstorm website about contributing pull requests](https://sandstorm.io) and [returning to Open Source community roots, including donation info](https://sandstorm.io/news/2017-02-06-sandstorm-returning-to-community-roots).
+See [Sandstorm website about contributing pull requests](https://sandstorm.org) and [returning to Open Source community roots, including donation info](https://sandstorm.org/news/2017-02-06-sandstorm-returning-to-community-roots).
 

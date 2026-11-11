@@ -1,14 +1,23 @@
 import DOMPurify from 'dompurify';
+import { allowedUriRegExp } from '/models/lib/urlSchemeAllowlist';
 
-// Centralized secure DOMPurify configuration to prevent XSS and CSS injection attacks
-export function getSecureDOMPurifyConfig() {
-  return {
+// Centralized secure DOMPurify configuration to prevent XSS and CSS injection attacks.
+//
+// options.stripLinks — when true, anchor (<a>) tags are removed while their visible
+// text is kept (KEEP_CONTENT), so every link (both markdown links like
+// [label](url) and raw HTML <a href> tags) renders as plain, non-clickable text.
+// Used by the Admin Panel / Features "render links as plain text" toggle.
+export function getSecureDOMPurifyConfig(options = {}) {
+  const config = {
     // Allow common markdown elements including anchor tags
-    ALLOWED_TAGS: ['a', 'p', 'br', 'strong', 'em', 'u', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'blockquote', 'pre', 'code', 'img', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'hr', 'div', 'span'],
+    ALLOWED_TAGS: ['a', 'p', 'br', 'strong', 'em', 'u', 's', 'del', 'strike', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'blockquote', 'pre', 'code', 'img', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'hr', 'div', 'span'],
     // Allow safe attributes including href for anchor tags
     ALLOWED_ATTR: ['href', 'title', 'alt', 'src', 'width', 'height', 'target', 'rel'],
     // Allow safe protocols for links
-    ALLOWED_URI_REGEXP: /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|cid|xmpp):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
+    // Plus the custom schemes an administrator listed (#3218, options.urlSchemes
+    // from models/lib/urlSchemeAllowlist.js, which never includes javascript:
+    // or data:).
+    ALLOWED_URI_REGEXP: allowedUriRegExp(options.urlSchemes),
     // Allow unknown protocols but be cautious
     ALLOW_UNKNOWN_PROTOCOLS: false,
     // Sanitize DOM for security
@@ -21,112 +30,79 @@ export function getSecureDOMPurifyConfig() {
     FORBID_ATTR: ['xlink:href', 'onload', 'onerror', 'onclick', 'onmouseover', 'onfocus', 'onblur', 'onchange', 'onsubmit', 'onreset', 'onselect', 'onunload', 'onresize', 'onscroll', 'onkeydown', 'onkeyup', 'onkeypress', 'onmousedown', 'onmouseup', 'onmouseover', 'onmouseout', 'onmousemove', 'ondblclick', 'oncontextmenu', 'onwheel', 'ontouchstart', 'ontouchend', 'ontouchmove', 'ontouchcancel', 'onabort', 'oncanplay', 'oncanplaythrough', 'ondurationchange', 'onemptied', 'onended', 'onerror', 'onloadeddata', 'onloadedmetadata', 'onloadstart', 'onpause', 'onplay', 'onplaying', 'onprogress', 'onratechange', 'onseeked', 'onseeking', 'onstalled', 'onsuspend', 'ontimeupdate', 'onvolumechange', 'onwaiting', 'onbeforeunload', 'onhashchange', 'onpagehide', 'onpageshow', 'onpopstate', 'onstorage', 'onunload', 'style', 'class', 'id', 'data-*', 'aria-*'],
     // Block data URIs that could contain malicious content
     ALLOW_DATA_ATTR: false,
-    // Custom hooks for additional security
-    HOOKS: {
-      uponSanitizeElement: function(node, data) {
-        // Block any remaining dangerous elements
-        const dangerousTags = ['svg', 'style', 'script', 'link', 'meta', 'iframe', 'object', 'embed', 'applet'];
-        if (node.tagName && dangerousTags.includes(node.tagName.toLowerCase())) {
-          if (process.env.DEBUG === 'true') {
-            console.warn('Blocked potentially dangerous element:', node.tagName);
-          }
-          return false;
-        }
-
-        // Block img tags with SVG data URIs that could contain malicious JavaScript
-        if (node.tagName && node.tagName.toLowerCase() === 'img') {
-          const src = node.getAttribute('src');
-          if (src) {
-            // Block all SVG data URIs to prevent XSS via embedded JavaScript
-            if (src.startsWith('data:image/svg') || src.endsWith('.svg')) {
-              if (process.env.DEBUG === 'true') {
-                console.warn('Blocked potentially malicious SVG image:', src);
-              }
-              return false;
-            }
-
-            // Additional check for base64 encoded SVG with script tags
-            if (src.startsWith('data:image/svg+xml;base64,')) {
-              try {
-                const base64Content = src.split(',')[1];
-                const decodedContent = atob(base64Content);
-                if (decodedContent.includes('<script') || decodedContent.includes('javascript:')) {
-                  if (process.env.DEBUG === 'true') {
-                    console.warn('Blocked SVG with embedded JavaScript:', src.substring(0, 100) + '...');
-                  }
-                  return false;
-                }
-              } catch (e) {
-                // If decoding fails, block it as a safety measure
-                if (process.env.DEBUG === 'true') {
-                  console.warn('Blocked malformed SVG data URI:', src);
-                }
-                return false;
-              }
-            }
-          }
-        }
-
-        // Block elements with dangerous attributes
-        const dangerousAttrs = ['style', 'onload', 'onerror', 'onclick', 'onmouseover', 'onfocus', 'onblur'];
-        for (const attr of dangerousAttrs) {
-          if (node.hasAttribute && node.hasAttribute(attr)) {
-            if (process.env.DEBUG === 'true') {
-              console.warn('Blocked element with dangerous attribute:', node.tagName, attr);
-            }
-            return false;
-          }
-        }
-
-        return true;
-      },
-      uponSanitizeAttribute: function(node, data) {
-        // Block style attributes completely
-        if (data.attrName === 'style') {
-          if (process.env.DEBUG === 'true') {
-            console.warn('Blocked style attribute');
-          }
-          return false;
-        }
-
-        // Block class and id attributes that might be used for CSS injection
-        if (data.attrName === 'class' || data.attrName === 'id') {
-          if (process.env.DEBUG === 'true') {
-            console.warn('Blocked class/id attribute:', data.attrName, data.attrValue);
-          }
-          return false;
-        }
-
-        // Block data attributes
-        if (data.attrName && data.attrName.startsWith('data-')) {
-          if (process.env.DEBUG === 'true') {
-            console.warn('Blocked data attribute:', data.attrName);
-          }
-          return false;
-        }
-
-        // Allow href attribute for anchor tags only
-        if (data.attrName === 'href') {
-          // Only allow href on anchor tags
-          if (node.tagName && node.tagName.toLowerCase() === 'a') {
-            return true;
-          } else {
-            if (process.env.DEBUG === 'true') {
-              console.warn('Blocked href attribute on non-anchor element:', node.tagName);
-            }
-            return false;
-          }
-        }
-
-        return true;
-      }
-    }
+    // No HOOKS here: DOMPurify has no such option and never ran the functions
+    // that used to sit in this key. FORBID_TAGS/FORBID_ATTR above already
+    // remove every element and attribute those functions described (style,
+    // class, id, data-*, inputs, svg), and ALLOWED_URI_REGEXP refuses data:
+    // URLs.
   };
+
+  if (options.stripLinks) {
+    // Forbid <a> but keep its inner text (KEEP_CONTENT is already true above), so
+    // links become plain, non-clickable text instead of clickable anchors.
+    config.FORBID_TAGS = config.FORBID_TAGS.concat(['a']);
+  }
+
+  return config;
 }
 
-// Convenience function for secure sanitization
-export function sanitizeHTML(html) {
-  return DOMPurify.sanitize(html, getSecureDOMPurifyConfig());
+// Code highlighting classes (highlight.js): only these, only on <code>/<span>
+// inside <pre>. Every other class is still removed by FORBID_ATTR. The markdown
+// package keeps the same classes in its own pass; this is the card viewer's
+// second pass, which would otherwise strip them again.
+const HIGHLIGHT_CLASS = /^(?:hljs(?:-[a-z0-9_-]+)?|language-[a-z0-9_+#-]+)$/i;
+function insidePre(node) {
+  for (let parent = node.parentNode; parent; parent = parent.parentNode) {
+    if (parent.nodeName && parent.nodeName.toLowerCase() === 'pre') return true;
+  }
+  return false;
+}
+// An attribute hook keeps an attribute by setting data.forceKeepAttr (its
+// return value is ignored). forceKeepAttr keeps the attribute AS IT IS ON THE
+// ELEMENT, not data.attrValue, so the filtered value is written back first.
+function keepHighlightClasses(node, data) {
+  if (data.attrName !== 'class') return;
+  const tag = node.nodeName ? node.nodeName.toLowerCase() : '';
+  if ((tag !== 'code' && tag !== 'span') || !insidePre(node)) return;
+  const classes = String(data.attrValue || '').split(/\s+/).filter(name => HIGHLIGHT_CLASS.test(name));
+  if (!classes.length) return;
+  data.attrValue = classes.join(' ');
+  node.setAttribute('class', data.attrValue);
+  data.forceKeepAttr = true;
+}
+
+// wekan/wekan#2419: the markdown package renders "- [ ] Task" as a disabled
+// <input type="checkbox">, and the card viewer sanitizes that output again
+// here. The config above forbids every <input>; sanitizeHTML() admits exactly
+// that one shape and removes any other input (text, password, file, or one
+// carrying a name, value or form), so card text cannot draw a live form field.
+function onlyTaskCheckboxes(node) {
+  if (!node.nodeName || node.nodeName.toLowerCase() !== 'input') return;
+  const type = (node.getAttribute('type') || '').toLowerCase();
+  if (type !== 'checkbox' || node.hasAttribute('name') || node.hasAttribute('value')
+    || node.hasAttribute('form') || node.hasAttribute('formaction')) {
+    node.parentNode.removeChild(node);
+    return;
+  }
+  node.setAttribute('disabled', '');
+}
+
+// Convenience function for secure sanitization. The checkbox and highlight
+// hooks are added for this call only, so other DOMPurify users in the app are
+// not affected.
+export function sanitizeHTML(html, options = {}) {
+  const config = getSecureDOMPurifyConfig(options);
+  config.ALLOWED_TAGS = config.ALLOWED_TAGS.concat(['input']);
+  config.FORBID_TAGS = config.FORBID_TAGS.filter(tag => tag !== 'input');
+  config.ALLOWED_ATTR = config.ALLOWED_ATTR.concat(['type', 'checked', 'disabled']);
+  DOMPurify.addHook('uponSanitizeAttribute', keepHighlightClasses);
+  DOMPurify.addHook('afterSanitizeAttributes', onlyTaskCheckboxes);
+  try {
+    return DOMPurify.sanitize(html, config);
+  } finally {
+    DOMPurify.removeHook('uponSanitizeAttribute', keepHighlightClasses);
+    DOMPurify.removeHook('afterSanitizeAttributes', onlyTaskCheckboxes);
+  }
 }
 
 // Convenience function for sanitizing text (no HTML)

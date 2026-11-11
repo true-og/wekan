@@ -3,6 +3,17 @@ import { Mongo } from 'meteor/mongo';
 import { ReactiveCache, ReactiveMiniMongoIndex } from '/imports/reactiveCache';
 import Activities from '/models/activities';
 import ChecklistItems from '/models/checklistItems';
+import {
+  isChecklistShownAtMinicard,
+  toggledChecklistAtMinicard,
+} from '/models/lib/minicardChecklistVisibility';
+import {
+  buildCopiedChecklistDoc,
+  buildCopiedItemDoc,
+  firstAppendSort,
+} from '/models/lib/checklistTemplateCopy';
+import { CHECKLIST_RESET_INTERVALS } from '/models/lib/checklistResetSchedule';
+import { selectBulkCheckItemIds } from '/models/lib/checklistBulkCheck';
 const { SimpleSchema } = require('/imports/simpleSchema');
 
 const Checklists = new Mongo.Collection('checklists');
@@ -35,6 +46,11 @@ Checklists.attachSchema(
        */
       type: String,
       defaultValue: 'Checklist',
+    },
+    dueAt: {
+      /** Date the whole checklist is due; independent of item deadlines. */
+      type: Date,
+      optional: true,
     },
     finishedAt: {
       /**
@@ -92,31 +108,96 @@ Checklists.attachSchema(
     },
     showChecklistAtMinicard: {
       /**
-       * show this checklist on minicard?
+       * show this checklist on minicard? Unset = follow the board's
+       * allowsChecklistsOnMinicard default; true/false override it.
        */
+      // Reported by email: unchecking "Show on minicard" did nothing. It could not
+      // do anything - the minicard ORed this with the board default, which is TRUE
+      // out of the box, so the only value that ever mattered was the board's. This
+      // is an OVERRIDE now, and an override needs a third state: with
+      // `defaultValue: false` every checklist was born "hidden", making "hidden"
+      // and "not chosen" the same value. See models/lib/minicardChecklistVisibility.js.
       type: Boolean,
-      defaultValue: false,
+      optional: true,
+    },
+    resetInterval: {
+      /**
+       * #3818 / #4729: automatically uncheck all items of this checklist on a
+       * recurring schedule. 'none' (default) never resets automatically.
+       * See models/lib/checklistResetSchedule.js and
+       * server/checklistResetSchedule.js for the due-date calculation and the
+       * periodic job that applies it.
+       */
+      type: String,
+      allowedValues: CHECKLIST_RESET_INTERVALS,
+      defaultValue: 'none',
+      optional: true,
+    },
+    lastResetAt: {
+      /**
+       * When the automatic-reset job last unchecked this checklist's items.
+       * Falls back to createdAt (in isChecklistResetDue()) until the first
+       * automatic reset happens.
+       */
+      type: Date,
+      optional: true,
     },
   }),
 );
 
 Checklists.helpers({
-  async copy(newCardId) {
-    let copyObj = Object.assign({}, this);
-    delete copyObj._id;
-    copyObj.cardId = newCardId;
-    // Drop the copied boardId so the server before.insert hook re-derives it
-    // from the destination card (which may be on a different board).
-    delete copyObj.boardId;
-    const newChecklistId = await Checklists.insertAsync(copyObj);
+  getDue() {
+    return this.dueAt;
+  },
+  async setDue(dueAt) {
+    return await Checklists.updateAsync(this._id, { $set: { dueAt } });
+  },
+  async unsetDue() {
+    return await Checklists.updateAsync(this._id, { $unset: { dueAt: '' } });
+  },
+  /**
+   * Copy this checklist (and its items) onto another card.
+   * @param newCardId the destination card
+   * @param options.resetChecked when true, every copied item is inserted
+   *   unchecked regardless of its source `isFinished` state. Used when
+   *   applying a template checklist onto an existing card (#4017), where a
+   *   template's items should never arrive pre-checked. Ordinary
+   *   copy/duplicate keeps the source checked state, so this defaults to
+   *   false so existing callers (e.g. the "Copy Checklist" popup, card
+   *   copy) are unaffected.
+   */
+  async copy(newCardId, options = {}) {
+    const { resetChecked = false } = options;
+    // #5688: copy the checklist and its items with `.direct` so the per-document
+    // before/after.insert hooks do NOT fire. The after.insert hooks look up the
+    // card and insert an activity per checklist item — for a card with many
+    // items that is an N+1 activity-insert storm that made a copy take minutes
+    // and spike the CPU. We set boardId ourselves (the before.insert hook would
+    // otherwise derive it) from the destination card, which may be on a
+    // different board. Same approach as the cardRemover delete path.
+    const newCard = await ReactiveCache.getCard(newCardId);
+    const boardId = newCard && newCard.boardId;
+
+    const copyObj = buildCopiedChecklistDoc(this, {
+      newCardId,
+      boardId,
+      sort: this.sort,
+    });
+    copyObj.createdAt = new Date();
+    const newChecklistId = await Checklists.direct.insertAsync(copyObj);
+
     const items = await ReactiveCache.getChecklistItems({ checklistId: this._id });
     for (const item of items) {
-      item._id = null;
-      item.checklistId = newChecklistId;
-      item.cardId = newCardId;
-      delete item.boardId;
-      await ChecklistItems.insertAsync(item);
+      const copyItem = buildCopiedItemDoc(item, {
+        newChecklistId,
+        newCardId,
+        boardId,
+        resetChecked,
+      });
+      await ChecklistItems.direct.insertAsync(copyItem);
     }
+
+    return newChecklistId;
   },
 
   itemCount() {
@@ -159,23 +240,48 @@ Checklists.helpers({
     }
     return ret;
   },
+  /** Per-checklist "hide checked items" state, read from THIS checklist only
+   * (issue #5408). Never falls back to a card/global flag, so toggling one
+   * checklist never affects the others. Kept in sync with the pure helper
+   * checklistHideState() in server/lib/checklistHide.js (unit-tested there). */
+  hideCheckedState() {
+    return this.hideCheckedChecklistItems === true;
+  },
+  /** Should the given (checked/unchecked) item be hidden for THIS checklist?
+   * An item is hidden only when it is checked and this checklist's toggle is
+   * on. Mirrors the pure helper isItemHidden() in server/lib/checklistHide.js. */
+  isItemHidden(isChecked) {
+    return isChecked === true && this.hideCheckedState() === true;
+  },
   showChecklist(hideFinishedChecklistIfItemsAreHidden) {
     let ret = true;
-    if (this.isFinished() && hideFinishedChecklistIfItemsAreHidden === true && (this.hideCheckedChecklistItems === true || this.hideAllChecklistItems)) {
+    if (this.isFinished() && hideFinishedChecklistIfItemsAreHidden === true && (this.hideCheckedState() === true || this.hideAllChecklistItems)) {
       ret = false;
     }
     return ret;
   },
+  // #2473: "Check all items" / "Uncheck all items" on the checklist's action
+  // menu. selectBulkCheckItemIds() (models/lib/checklistBulkCheck.js, unit
+  // tested there) is what decides WHICH items belong to this checklist - kept
+  // pure/testable so "every item of this checklist, regardless of starting
+  // state" and "items of any other checklist are untouched" can be asserted
+  // without a database.
   async checkAllItems() {
     const checkItems = await ReactiveCache.getChecklistItems({ checklistId: this._id });
+    const ids = selectBulkCheckItemIds(checkItems, this._id);
     for (const item of checkItems) {
-      await item.check();
+      if (ids.includes(item._id)) {
+        await item.check();
+      }
     }
   },
   async uncheckAllItems() {
     const checkItems = await ReactiveCache.getChecklistItems({ checklistId: this._id });
+    const ids = selectBulkCheckItemIds(checkItems, this._id);
     for (const item of checkItems) {
-      await item.uncheck();
+      if (ids.includes(item._id)) {
+        await item.uncheck();
+      }
     }
   },
   itemIndex(itemId) {
@@ -204,12 +310,72 @@ Checklists.helpers({
       $set: { hideAllChecklistItems: !this.hideAllChecklistItems },
     });
   },
-  async toggleShowChecklistAtMinicard() {
+  // Is this checklist on the minicard right now? The board's
+  // allowsChecklistsOnMinicard is the default and this checklist's own field, when
+  // it has one, overrides it (models/lib/minicardChecklistVisibility.js). The
+  // caller passes the board's value: this runs in client templates, where a
+  // synchronous answer is needed.
+  isShownAtMinicard(boardAllowsChecklistsOnMinicard) {
+    return isChecklistShownAtMinicard(this, boardAllowsChecklistsOnMinicard);
+  },
+  async toggleShowChecklistAtMinicard(boardAllowsChecklistsOnMinicard) {
     return await Checklists.updateAsync(this._id, {
-      $set: { showChecklistAtMinicard: !this.showChecklistAtMinicard },
+      $set: {
+        showChecklistAtMinicard:
+          toggledChecklistAtMinicard(this, boardAllowsChecklistsOnMinicard),
+      },
+    });
+  },
+  /** #3818 / #4729: set (or clear, with 'none') this checklist's automatic-reset
+   * interval. Does not itself uncheck anything - the periodic job in
+   * server/checklistResetSchedule.js does that once the interval comes due. */
+  async setResetInterval(resetInterval) {
+    if (!CHECKLIST_RESET_INTERVALS.includes(resetInterval)) return undefined;
+    return await Checklists.updateAsync(this._id, {
+      $set: { resetInterval },
     });
   },
 });
+
+/**
+ * Append every checklist (and its items) of a source card onto a destination
+ * card, in source order, leaving the destination card's existing checklists
+ * untouched (#4017: apply a template card's checklists onto an already
+ * existing card). Copied items always come in unchecked, regardless of the
+ * source card's own checked state — a template being applied should never
+ * pre-check its target. Reuses the same per-checklist `copy()` helper the
+ * "Copy Checklist" popup and card-copy (`Cards.copy`) already use, so the
+ * copy semantics (fresh ids, `.direct` inserts to skip the per-item activity
+ * storm, board re-homing) stay in one place.
+ * @param sourceCardId the template/source card whose checklists are copied
+ * @param targetCardId the existing card the checklists are appended onto
+ * @returns the array of newly created checklist ids, in source order
+ */
+Checklists.copyAllFromCardToCard = async function (sourceCardId, targetCardId) {
+  const sourceChecklists = await ReactiveCache.getChecklists(
+    { cardId: sourceCardId },
+    { sort: { sort: 1 } },
+  );
+
+  // Place the appended checklists after whatever the target card already has,
+  // in source order, rather than reusing the source card's own sort values
+  // (which could collide with, or sort ahead of, the target's existing
+  // checklists).
+  const targetChecklists = await ReactiveCache.getChecklists(
+    { cardId: targetCardId },
+    { sort: { sort: 1 } },
+  );
+  let nextSort = firstAppendSort(targetChecklists);
+
+  const newChecklistIds = [];
+  for (const checklist of sourceChecklists) {
+    const newChecklistId = await checklist.copy(targetCardId, { resetChecked: true });
+    await Checklists.direct.updateAsync(newChecklistId, { $set: { sort: nextSort } });
+    nextSort += 1;
+    newChecklistIds.push(newChecklistId);
+  }
+  return newChecklistIds;
+};
 
 Checklists.before.insert((userId, doc) => {
   doc.createdAt = new Date();
@@ -217,4 +383,14 @@ Checklists.before.insert((userId, doc) => {
     doc.userId = userId;
   }
 });
+if (Meteor.isServer) {
+  // A card's checklists in their own order, and the board-wide queries the
+  // export and the minicard badges make.
+  const { ensureIndex } = require('/server/lib/mongoStartup');
+  Meteor.startup(async () => {
+    await ensureIndex(Checklists, { cardId: 1, sort: 1 });
+    await ensureIndex(Checklists, { boardId: 1 });
+  });
+}
+
 export default Checklists;

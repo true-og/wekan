@@ -1,0 +1,316 @@
+'use strict';
+const { openRulesMenuEntry } = require('../helpers/rulesMenu');
+
+/**
+ * Spec 20 — Rules (automation)
+ *
+ * Covers:
+ *  - The Rules page opens as a fullscreen board-scoped page (/b/:id/:slug/rules)
+ *  - Creating an event rule (trigger -> action) adds it to the rules list
+ *  - The Import / Export dialog opens and offers JSON/CSV export
+ *  - Selecting rules and the visual Workflow view work
+ */
+
+const { test, expect } = require('../fixtures');
+const db = require('../helpers/db');
+const { navigateInApp, loginWithToken } = require('../helpers/auth');
+
+async function openRulesPage(page, board) {
+  await navigateInApp(page, `/b/${board.boardId}/${board.slug}/rules`);
+  // The rules list (or its empty-state) renders inside the fullscreen page.
+  await page.locator('.rules-page').waitFor({ timeout: 20_000 });
+}
+
+// This page's controls - its views and Import / Export rules - are in Board
+// Settings, under Rules, in the board sidebar the Rules page uses
+// (tests/playwright/helpers/rulesMenu.js, models/lib/pageSidebar.js).
+
+test.describe('Rules', () => {
+  test('Rules opens as a fullscreen page with the board rules header', async ({ boardPage, board }) => {
+    await openRulesPage(boardPage, board);
+    // Header bar title and the page wrapper are present (not a modal overlay).
+    await expect(boardPage.locator('.rules-page')).toBeVisible();
+    await expect(boardPage.locator('#modal')).toHaveCount(0);
+  });
+
+  test('can create an event rule and see it in the list', async ({ boardPage, board }) => {
+    await openRulesPage(boardPage, board);
+
+    // Name the rule and go to the trigger step.
+    await boardPage.locator('#ruleTitle').fill('Top on create');
+    await boardPage.locator('.js-goto-trigger').click();
+
+    // Board trigger: "when a card is created" -> go to action.
+    await boardPage.locator('.js-add-create-trigger.js-goto-action').first().click();
+
+    // Board action: generic "move card to top/bottom of its list" -> save.
+    await boardPage.locator('.js-add-gen-move-action.js-goto-rules').first().click();
+
+    // The new rule appears in the list.
+    await expect(boardPage.locator('.rules-lists-item')).toHaveCount(1, { timeout: 15_000 });
+  });
+
+  test('RuleBleed: cross-board actions require destination write access', async ({
+    boardPage,
+    board,
+    user,
+    user2,
+  }) => {
+    const privateTarget = db.seedBoard({ ownerId: user2.id, title: 'Private target' });
+    const writableTarget = db.seedBoard({ ownerId: user.id, title: 'Writable target' });
+    const trigger = { activityType: 'createCard' };
+    const actionFor = target => ({
+      actionType: 'moveCardToTop',
+      boardId: target.boardId,
+      listName: 'List A',
+      swimlaneName: 'Default',
+    });
+
+    try {
+      const denied = await boardPage.evaluate(
+        async ({ boardId, triggerDoc, actionDoc }) => {
+          try {
+            await Meteor.callAsync(
+              'rules.createRule',
+              boardId,
+              'Denied cross-board rule',
+              triggerDoc,
+              actionDoc,
+            );
+            return null;
+          } catch (error) {
+            return error.error;
+          }
+        },
+        {
+          boardId: board.boardId,
+          triggerDoc: trigger,
+          actionDoc: actionFor(privateTarget),
+        },
+      );
+      expect(denied).toBe('not-authorized');
+      // Scope this to the fixture board. A previous interrupted run against an
+      // older server may have left a rule with the same human-readable title;
+      // titles are intentionally not unique across boards.
+      expect(db.countDocuments('rules', {
+        boardId: board.boardId,
+        title: 'Denied cross-board rule',
+      })).toBe(0);
+
+      const allowed = await boardPage.evaluate(
+        ({ boardId, triggerDoc, actionDoc }) => Meteor.callAsync(
+          'rules.createRule',
+          boardId,
+          'Allowed cross-board rule',
+          triggerDoc,
+          actionDoc,
+        ),
+        {
+          boardId: board.boardId,
+          triggerDoc: trigger,
+          actionDoc: actionFor(writableTarget),
+        },
+      );
+      expect(allowed._id).toBeTruthy();
+      expect(db.countDocuments('rules', { _id: allowed._id })).toBe(1);
+    } finally {
+      db.cleanup({ boardIds: [privateTarget.boardId, writableTarget.boardId] });
+    }
+  });
+
+  test('#6630: a current-date action stores its description only on the Action', async ({ boardPage, board }) => {
+    await openRulesPage(boardPage, board);
+
+    await boardPage.locator('#ruleTitle').fill('Set current due date');
+    await boardPage.locator('.js-goto-trigger').click();
+    await boardPage.locator('.js-add-create-trigger.js-goto-action').first().click();
+    await boardPage.locator('.js-set-card-actions').click();
+    await boardPage.locator('#setdate-datefield').selectOption('dueAt');
+    await boardPage.locator('.js-set-date-action.js-goto-rules').click();
+
+    await expect(boardPage.locator('.rules-lists-item')).toHaveCount(1, { timeout: 15_000 });
+    await expect.poll(() => db.find('rules', {
+      boardId: board.boardId,
+      title: 'Set current due date',
+    })[0]).toBeTruthy();
+
+    const rule = db.find('rules', {
+      boardId: board.boardId,
+      title: 'Set current due date',
+    })[0];
+    const action = db.find('actions', { _id: rule.actionId })[0];
+    expect(rule).not.toHaveProperty('desc');
+    expect(action.desc).toBeTruthy();
+    expect(action.actionType).toBe('setDate');
+    expect(action.dateField).toBe('dueAt');
+  });
+
+  test('Import / Export dialog offers JSON and CSV export', async ({ boardPage, board }) => {
+    await openRulesPage(boardPage, board);
+    await openRulesMenuEntry(boardPage, 'js-open-rules-import-export');
+    const popup = boardPage.locator('.js-pop-over');
+    await expect(popup).toBeVisible({ timeout: 10_000 });
+    await expect(popup.locator('.js-rules-export-json')).toBeVisible();
+    await expect(popup.locator('.js-rules-export-csv')).toBeVisible();
+  });
+
+  // A Wrike workflow (models/lib/wrikeWorkflow.js): the JSON of Wrike's GET
+  // /workflows becomes the board's lists and the rules that close and reopen
+  // a card as Wrike's status groups do; a second import adds nothing, and the
+  // export writes the board back as a workflow.
+  for (const language of ['co', 'en', 'mt', 'sw']) {
+  test(`Import / Export applies a Wrike workflow as lists and rules, and exports one in ${language}`, async ({ boardPage, board }) => {
+    await boardPage.evaluate(language => Meteor.callAsync('setLanguage', language), language);
+    const strings = require(`../../../imports/i18n/data/${language}.i18n.json`);
+    await openRulesPage(boardPage, board);
+    await openRulesMenuEntry(boardPage, 'js-open-rules-import-export');
+    const popup = boardPage.locator('.js-pop-over');
+    await expect(popup.locator('.js-rules-import-wrike')).toHaveText(strings['r-import-wrike-workflow'], { timeout: 10_000 });
+
+    await popup.locator('.js-rules-import-text').fill('{ not json');
+    await popup.locator('.js-rules-import-wrike').click();
+    await expect(popup.locator('.rules-ie-message')).toContainText('not JSON');
+
+    const workflow = { kind: 'workflows', data: [
+      { name: 'Default Workflow', standard: true, hidden: false, customStatuses: [{ name: 'Active', group: 'Active', color: 'Blue' }] },
+      { name: 'Delivery', standard: false, hidden: false, customStatuses: [
+        { name: 'Queued', group: 'Active', color: 'Blue' },
+        { name: 'Building', group: 'Active', color: 'Orange' },
+        { name: 'Shipped', group: 'Completed', color: 'Green' },
+        { name: 'Dropped', group: 'Cancelled', color: 'Red' },
+        { name: 'Retired', group: 'Active', color: 'Gray', hidden: true },
+      ] },
+    ] };
+    await popup.locator('.js-rules-import-text').fill(JSON.stringify(workflow));
+    await popup.locator('.js-rules-import-wrike').click();
+    await expect(popup.locator('.rules-ie-message')).toContainText('Delivery', { timeout: 15_000 });
+    const added = () => db.find('lists', { boardId: board.boardId, archived: false })
+      .filter(list => ['Queued', 'Building', 'Shipped', 'Dropped', 'Retired'].includes(list.title))
+      .sort((a, b) => a.sort - b.sort);
+    expect(added().map(list => list.title)).toEqual(['Queued', 'Building', 'Shipped', 'Dropped']);
+    expect(added().find(list => list.title === 'Building').color).toBe('orange');
+    const moveRules = () => db.find('rules', { boardId: board.boardId }).map(rule => {
+      const trigger = db.findOne('triggers', { _id: rule.triggerId });
+      const action = db.findOne('actions', { _id: rule.actionId });
+      return `${trigger.activityType} ${trigger.listName} ${action.actionType}`;
+    }).sort();
+    expect(moveRules()).toEqual([
+      'moveCard Building markCardIncomplete', 'moveCard Dropped markCardComplete',
+      'moveCard Queued markCardIncomplete', 'moveCard Shipped markCardComplete',
+    ]);
+
+    await popup.locator('.js-rules-import-wrike').click();
+    await expect(popup.locator('.rules-ie-message')).toContainText(strings['r-import-wrike-workflow-done'].replace('__name__', 'Delivery').replace('__lists__', '0').replace('__rules__', '0').split('__skipped__')[0], { timeout: 15_000 });
+    expect(added()).toHaveLength(4);
+    expect(moveRules()).toHaveLength(4);
+
+    const [download] = await Promise.all([
+      boardPage.waitForEvent('download'),
+      popup.locator('.js-rules-export-wrike').click(),
+    ]);
+    expect(download.suggestedFilename()).toBe('wrike-workflow.json');
+    const exported = JSON.parse(require('node:fs').readFileSync(await download.path(), 'utf8'));
+    expect(exported.kind).toBe('workflows');
+    const statuses = exported.data[0].customStatuses;
+    expect(statuses.find(status => status.name === 'Shipped').group).toBe('Completed');
+    expect(statuses.find(status => status.name === 'Dropped').group).toBe('Cancelled');
+    expect(statuses.find(status => status.name === 'Building')).toMatchObject({ group: 'Active', color: 'Orange' });
+  });
+
+  }
+
+  test('a board button rule renders a runnable button in the board header', async ({ boardPage, board }) => {
+    await openRulesPage(boardPage, board);
+
+    // Name the rule, go to the trigger step, choose the "Buttons" trigger tab.
+    await boardPage.locator('#ruleTitle').fill('My board button');
+    await boardPage.locator('.js-goto-trigger').click();
+    await boardPage.locator('.js-set-button-triggers').click();
+
+    // Configure a board button and continue to the action step.
+    await boardPage.locator('#button-label').fill('Do the thing');
+    await boardPage.locator('#button-type').selectOption('board');
+    await boardPage.locator('.js-add-button-trigger.js-goto-action').click();
+
+    // Pick any board action to complete the rule.
+    await boardPage.locator('.js-add-gen-move-action.js-goto-rules').first().click();
+    await expect(boardPage.locator('.rules-lists-item')).toHaveCount(1, { timeout: 15_000 });
+
+    // Back on the board, the board button appears in the header and is clickable.
+    await navigateInApp(boardPage, `/b/${board.boardId}/${board.slug}`);
+    const btn = boardPage.locator('.js-run-board-button');
+    await expect(btn).toBeVisible({ timeout: 20_000 });
+    await expect(btn).toContainText('Do the thing');
+    // Clicking runs the rule via the rules.runButton method without error.
+    await btn.click();
+  });
+
+  test('can select all rules and switch to the workflow view', async ({ boardPage, board }) => {
+    await openRulesPage(boardPage, board);
+
+    // Create a rule first so there is something to select / visualise.
+    await boardPage.locator('#ruleTitle').fill('Rule A');
+    await boardPage.locator('.js-goto-trigger').click();
+    await boardPage.locator('.js-add-create-trigger.js-goto-action').first().click();
+    await boardPage.locator('.js-add-gen-move-action.js-goto-rules').first().click();
+    await expect(boardPage.locator('.rules-lists-item')).toHaveCount(1, { timeout: 15_000 });
+
+    // Select all -> the rule checkbox becomes checked.
+    await boardPage.locator('.js-rules-select-all').click();
+    await expect(boardPage.locator('.js-rule-select').first()).toBeChecked();
+
+    // Toggle the visual workflow view.
+    await openRulesMenuEntry(boardPage, 'js-open-rules-workflow-view');
+    await expect(boardPage.locator('.rules-workflow')).toBeVisible({ timeout: 10_000 });
+    await expect(boardPage.locator('.workflow-rule')).toHaveCount(1);
+  });
+});
+
+
+for (const language of ['eu', 'th', 'en']) {
+  test(`${language} named-member rule trigger uses its own verb composition`, async ({ page, user, board }) => {
+    db.updateOne('users', { _id: user.id }, { $set: { 'profile.language': language } });
+    await loginWithToken(page, user.id, user.token);
+    await openRulesPage(page, board);
+    await page.locator('#ruleTitle').fill('Member grammar regression');
+    await page.locator('.js-goto-trigger').click();
+    await page.locator('.js-set-card-triggers').click();
+    await page.locator('#spec-member').fill('Ana');
+    const content = page.locator('#spec-member').locator('..').locator('..');
+    const fragments = await content.locator('.trigger-text').allTextContents();
+    if (language === 'eu') {
+      expect(fragments.map(text => text.trim())).not.toContain('es');
+      expect(fragments.map(text => text.trim())).not.toContain('da');
+      await expect(content.locator('#spec-member-action option[value="added"]')).toHaveText('Gehitzen denean hona:');
+    } else if (language === 'th') {
+      expect(fragments.map(text => text.trim())).not.toContain('คือ');
+      await expect(content.locator('#spec-member-action option[value="added"]')).toHaveText('ถูกเพิ่มใน');
+      await expect(content.locator('#spec-member-action option[value="removed"]')).toHaveText('ถูกนำออกจาก');
+    } else {
+      expect(fragments.map(text => text.trim())).toContain('is');
+    }
+    await content.locator('#spec-member-action').selectOption('added');
+    await content.locator('..').locator('.js-add-spec-member-trigger').click();
+    await page.locator('.js-add-gen-move-action.js-goto-rules').first().click();
+    await expect(page.locator('.rules-lists-item')).toHaveCount(1, { timeout: 15000 });
+  });
+}
+
+
+test('Galician attachment rule actions agree with the attachment noun', async ({ page, user, board }) => {
+  db.updateOne('users', { _id: user.id }, { $set: { 'profile.language': 'gl' } });
+  await loginWithToken(page, user.id, user.token);
+  await openRulesPage(page, board);
+  await page.locator('#ruleTitle').fill('Attachment agreement regression');
+  await page.locator('.js-goto-trigger').click();
+  await page.locator('.js-set-card-triggers').click();
+  const action = page.locator('#attach-action');
+  await expect(action.locator('option[value="added"]')).toHaveText('Engadido a');
+  await expect(action.locator('option[value="removed"]')).toHaveText('Quitado de');
+  await expect(action).not.toContainText('Engadida a');
+  await expect(page.locator('#gen-member-action option[value="added"]')).toHaveText('Engadida a');
+  await action.selectOption('added');
+  await page.locator('.js-add-attachment-trigger').click();
+  await page.locator('.js-add-gen-move-action.js-goto-rules').first().click();
+  await expect(page.locator('.rules-lists-item')).toHaveCount(1, { timeout: 15000 });
+});

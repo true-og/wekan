@@ -1,3 +1,4 @@
+import { formatDateForDisplay } from '/client/lib/dateDisplay';
 import { ReactiveCache } from '/imports/reactiveCache';
 import {
   DEFAULT_ASSETLINKS,
@@ -29,6 +30,27 @@ import {
   calendar,
 } from '/imports/lib/dateUtils';
 import { Utils } from '/client/lib/utils';
+import { isHexColor, contrastText } from '/models/lib/contrastColor';
+
+// #5514: a color (label / list / swimlane / card) may be either a named palette
+// color rendered via a CSS class (e.g. `card-label-green`) or a custom
+// '#rrggbb' hex chosen from the color wheel. For a hex value there is no CSS
+// class, so we emit an inline `background-color` plus an automatically readable
+// text `color` (contrastText). These helpers let templates keep the class path
+// for named colors and switch to inline styles for hex.
+
+// Class for a label chip: `card-label-<name>` for named colors, empty for hex.
+Blaze.registerHelper('labelColorClass', color =>
+  isHexColor(color) ? '' : `card-label-${color}`,
+);
+
+// Inline style for a label chip: background + readable text for a hex color,
+// empty for a named color (its CSS class already sets both).
+Blaze.registerHelper('labelColorStyle', color =>
+  isHexColor(color)
+    ? `background-color:${color};color:${contrastText(color)};`
+    : '',
+);
 
 Blaze.registerHelper('currentBoard', () => {
   const ret = Utils.getCurrentBoard();
@@ -87,6 +109,26 @@ Blaze.registerHelper('currentUser', () => {
   return ret;
 });
 
+// Admin Panel / Features / Security master switches. Templates use these to hide
+// the import / export menu options when an admin has disabled all import / export.
+Blaze.registerHelper('importDisabled', () =>
+  !!(ReactiveCache.getCurrentSetting() || {}).disableAllImport,
+);
+
+Blaze.registerHelper('exportDisabled', () =>
+  !!(ReactiveCache.getCurrentSetting() || {}).disableAllExport,
+);
+
+// Admin Panel / Features / Notifications (#5820). Templates use these to hide
+// the activity feed and the watch controls when an admin has disabled them.
+Blaze.registerHelper('activitiesDisabled', () =>
+  !!(ReactiveCache.getCurrentSetting() || {}).disableActivities,
+);
+
+Blaze.registerHelper('watchDisabled', () =>
+  !!(ReactiveCache.getCurrentSetting() || {}).disableWatch,
+);
+
 Blaze.registerHelper('getUser', (userId) => ReactiveCache.getUser(userId));
 
 Blaze.registerHelper('concat', (...args) => args.slice(0, -1).join(''));
@@ -106,12 +148,32 @@ Blaze.registerHelper('isTouchScreenOrShowDesktopDragHandles', () =>
 Blaze.registerHelper('displayDate', (...args) => {
   args.pop(); // hash
   const [date, formatStr] = args;
-  return format(new Date(date), formatStr ?? 'LLLL');
+  return formatDateForDisplay(date, true, value => format(value, formatStr ?? 'LLLL'));
 });
 
-Blaze.registerHelper('canModifyCard', () => Utils.canModifyCard());
+Blaze.registerHelper('canModifyCard', function canModifyCard() {
+  if (!Utils.canModifyCard(this)) return false;
+  // #3143: a read-only custom field is shown to every member, but only a board
+  // admin edits it; the server refuses anybody else (adminOnlyFieldWrites.js).
+  if (this && this.definition && this.definition.readOnly) {
+    const user = ReactiveCache.getCurrentUser();
+    return !!(user && typeof user.isBoardAdmin === 'function' && user.isBoardAdmin());
+  }
+  return true;
+});
 
 Blaze.registerHelper('canMoveCard', () => Utils.canMoveCard());
+
+// May the current member comment? The same capability the server's comment
+// and reaction rules decide with (models/lib/boardRoleCapabilities.js), so a
+// No comments, read-only or custom role is not offered what it cannot do.
+// #4527: on a card, its list may allow or refuse commenting for the role.
+Blaze.registerHelper('canComment', () => Utils.currentUserCanInList('comment'));
+
+// #3307: a Worker cannot edit/delete a checklist item, but may check it.
+Blaze.registerHelper('canCheckChecklistItem', function canCheckChecklistItem() {
+  return Utils.canCheckChecklistItem(this && this.card);
+});
 
 Blaze.registerHelper('canModifyBoard', () => Utils.canModifyBoard());
 

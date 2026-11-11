@@ -1,19 +1,98 @@
 import { Meteor } from 'meteor/meteor';
+import { Random } from 'meteor/random';
 import { Mongo } from 'meteor/mongo';
 import { ReactiveCache } from '/imports/reactiveCache';
 import { LIST_COLORS } from '/models/metadata/colors';
+import { isHexColor, contrastText } from '/models/lib/contrastColor';
 import PositionHistory from './positionHistory';
 import Boards from '/models/boards';
 import Cards from '/models/cards';
+import {
+  listCardsSelector,
+  otherSwimlaneIdsForFirstActive,
+} from '/models/lib/swimlaneFilter';
+import { planListCopy, copiedCardSwimlaneId } from './lib/listCopyPlan';
+import { planListMove } from './lib/listMovePlan';
 const { SimpleSchema } = require('/imports/simpleSchema');
 
 const Lists = new Mongo.Collection('lists');
 
+// Pure, dependency-free helper for scoping a set of cards to a list and
+// (optionally) a swimlane (#5623). Defined here (an isomorphic model file) so
+// client and server share identical logic; re-exported from
+// server/lib/cardScope.js for unit testing.
+//
+// - When `swimlaneId` is undefined (no swimlane context), every card in the
+//   list is returned (preserves the historical "select all in list" behavior).
+// - When `swimlaneId` is provided (a NON-first swimlane), a card matches only
+//   when its `swimlaneId` equals the given value. Shared / pre-migration cards
+//   (swimlaneId null / '' / missing) are NOT surfaced here — they surface once,
+//   in the FIRST swimlane (the otherSwimlaneIds branch), so a card is never
+//   selected in more than one swimlane (mirrors swimlaneMembershipSelector; the
+//   "doubled cards" fix).
+// - #6443: when `otherSwimlaneIds` is provided (the board's OTHER swimlane ids,
+//   i.e. this is the FIRST swimlane), a card also matches when its swimlaneId is
+//   "orphaned" — a non-empty value that is not one of the board's existing
+//   swimlanes — so cards left pointing at a deleted swimlane stay visible. This
+//   mirrors swimlaneMembershipSelector's `$nin` branch: match everything not
+//   owned by another existing swimlane.
+export function filterCardsByListAndSwimlane(cards, listId, swimlaneId, otherSwimlaneIds) {
+  if (!Array.isArray(cards)) {
+    return [];
+  }
+  const surfaceOrphaned = Array.isArray(otherSwimlaneIds);
+  return cards.filter(card => {
+    if (!card || card.listId !== listId) {
+      return false;
+    }
+    if (swimlaneId === undefined) {
+      return true;
+    }
+    const cardSwimlaneId = card.swimlaneId;
+    if (surfaceOrphaned) {
+      // First swimlane: match unless the card belongs to another existing
+      // swimlane (own id, null/'', missing, or orphaned all pass).
+      return !otherSwimlaneIds.includes(cardSwimlaneId);
+    }
+    // NON-first swimlane: ONLY its own cards — shared cards surface once, in the
+    // first swimlane above.
+    return cardSwimlaneId === swimlaneId;
+  });
+}
+
+// Pure, dependency-free helper for list / swimlane colors (#5382). Defined here
+// (an isomorphic model file) so client and server share identical logic;
+// re-exported from server/lib/listColors.js for unit testing.
+//
+// `ALLOWED_LIST_COLORS` is the single canonical list of colors allowed for
+// lists and swimlanes (the same `LIST_COLORS` the schema allowedValues uses,
+// which includes `silver`). `normalizeListColor` returns the color when allowed
+// and '' (None) otherwise, so an offered-but-unsupported color is normalized
+// rather than silently saved as None or rejected by the schema.
+export const ALLOWED_LIST_COLORS = [...LIST_COLORS];
+
+const ALLOWED_LIST_COLOR_SET = new Set(ALLOWED_LIST_COLORS);
+
+export function normalizeListColor(color) {
+  if (typeof color !== 'string') {
+    return '';
+  }
+  if (ALLOWED_LIST_COLOR_SET.has(color)) {
+    return color;
+  }
+  // #5514: also accept a custom '#rrggbb' hex chosen from the color wheel, so
+  // lists / swimlanes can store an arbitrary color alongside the named palette.
+  return isHexColor(color) ? color : '';
+}
+
 /**
- * A list (column) in the Wekan board.
+ * A list (column) in the WeKan board.
  */
 Lists.attachSchema(
   new SimpleSchema({
+    // Scrum metadata is optional and hidden by default; only validated methods write it.
+    scrum: { type: Object, optional: true, blackbox: true },
+    scrumRevision: { type: Number, optional: true, min: 0 },
     title: {
       /**
        * the title of the list
@@ -46,6 +125,28 @@ Lists.attachSchema(
        * latest archiving date
        */
       type: Date,
+      optional: true,
+    },
+    // Soft delete (docs/Features/Undo/Undo.md): a deleted list is MARKED, never
+    // destroyed, so it can be restored/undone (#1023). `deletedAt: null` (or the
+    // field being absent) means the list is live; a Date means soft-deleted.
+    // deleteBatchId groups a list with the cards deleted alongside it, so restore
+    // brings back exactly that set. Distinct from `archived` (a visible "set aside"
+    // state with its own Archive UI).
+    deletedAt: {
+      // Absent (the default on insert) OR null both mean "live" — the
+      // `{ deletedAt: null }` render-path filter matches both, so no defaultValue
+      // is needed and none is set (a null default on a Date field would trip
+      // SimpleSchema type validation on every insert).
+      type: Date,
+      optional: true,
+    },
+    deletedBy: {
+      type: String,
+      optional: true,
+    },
+    deleteBatchId: {
+      type: String,
       optional: true,
     },
     boardId: {
@@ -144,6 +245,14 @@ Lists.attachSchema(
       type: Boolean,
       defaultValue: false,
     },
+    cardsUseListColor: {
+      /**
+       * #4756: cards without a colour of their own are shown in this list's
+       * colour (models/lib/cardDisplayColor.js); nothing is written to them.
+       */
+      type: Boolean,
+      optional: true,
+    },
     color: {
       /**
        * the color of the list
@@ -151,7 +260,14 @@ Lists.attachSchema(
       type: String,
       optional: true,
       // silver is the default
-      allowedValues: LIST_COLORS,
+      // #5514: accept a named palette color OR a custom '#rrggbb' hex chosen
+      // from the color wheel (instead of a fixed allowedValues enum).
+      custom() {
+        const v = this.value;
+        if (v === undefined || v === null || v === '') return undefined;
+        if (LIST_COLORS.includes(v) || isHexColor(v)) return undefined;
+        return 'notAllowed';
+      },
     },
     type: {
       /**
@@ -160,14 +276,28 @@ Lists.attachSchema(
       type: String,
       defaultValue: 'list',
     },
+    linkedBoardId: {
+      /**
+       * #2809: a linked whole list mirrors a list of this other board
+       * (models/lib/linkedList.js).
+       */
+      type: String,
+      optional: true,
+    },
+    linkedListId: {
+      /** #2809: the mirrored list. */
+      type: String,
+      optional: true,
+    },
     width: {
       /**
        * The width of the list in pixels (100-1000).
-       * Default width is 272 pixels.
+       * #6465: default width is 220 pixels (was 272) so more lists fit on
+       * screen; kept in sync with DEFAULT_LIST_WIDTH in models/lib/listWidth.js.
        */
       type: Number,
       optional: true,
-      defaultValue: 272,
+      defaultValue: 220,
       custom() {
         const w = this.value;
         if (w < 100 || w > 1000) {
@@ -175,119 +305,322 @@ Lists.attachSchema(
         }
       },
     },
+    roleExceptions: {
+      /**
+       * #4527: what each role may do in this list, over the board's own rule:
+       * { <role>: { write?: Boolean, comment?: Boolean } }
+       * (models/lib/listPermissions.js). Only the lists.setRoleExceptions
+       * method writes it; a direct client write is refused.
+       */
+      type: Object,
+      optional: true,
+      blackbox: true,
+    },
     // NOTE: collapsed state is per-user only, stored in user profile.collapsedLists
     // and localStorage for non-logged-in users
     // NOTE: width is per-board (shared with all users), stored in lists.width
+    //
+    // List sync (docs/Features/Board-Sidebar/Board-Settings/Import-Export/Sync.md): marks this list as kept up
+    // to date from an external tracker by the periodic job in
+    // server/listSync.js, which reuses the SAME parsers models/lib/externalParsers.js
+    // already has for one-time import (parseJira here, parseGithub/parseGitlab/
+    // parseGitea for the others) rather than a second fetch/parse implementation.
+    // The credential itself is NEVER stored here - `syncSource` is published to
+    // the client like the rest of the list - it lives server-only in
+    // models/listSyncCredentials.js, a collection with no publication at all.
+    // Selects an immutable private credential version together with syncSource.
+    // Retained across clears so a delayed save cannot match a previous state.
+    syncRevision: { type: String, optional: true },
+    // Regenerated on every server insertion, including same-ID recreation.
+    syncCredentialIncarnation: {
+      type: String,
+      optional: true,
+      autoValue() {
+        // Schema insertion also covers importers using Lists.direct (no hooks).
+        if (!Meteor.isServer) return;
+        if (this.isInsert) return Random.id();
+        if (this.isUpsert) return { $setOnInsert: Random.id() };
+      },
+    },
+    // Server-maintained fence for retiring unselected credential versions.
+    syncCredentialGeneration: { type: Number, optional: true, min: 0, max: Number.MAX_SAFE_INTEGER },
+    // Changes on every cleanup, including a damaged numeric counter reset.
+    syncCredentialFence: { type: String, optional: true },
+    syncSource: {
+      type: Object,
+      optional: true,
+    },
+    'syncSource.type': {
+      /**
+       * which parser/fetcher to use: 'jira' | 'github' | 'gitlab' | 'gitea'
+       */
+      type: String,
+      optional: true,
+    },
+    'syncSource.url': {
+      /**
+       * base API URL of the external tracker, e.g. https://org.atlassian.net
+       */
+      type: String,
+      optional: true,
+    },
+    'syncSource.projectKey': {
+      /**
+       * Jira project key, or "owner/repo" for GitHub/Gitea, or numeric project
+       * id for GitLab
+       */
+      type: String,
+      optional: true,
+    },
+    'syncSource.timeMappingIdentities': { type: Object, optional: true, blackbox: true },
+    'syncSource.estimateCustomFieldId': { type: String, optional: true },
+    'syncSource.estimateMappingIdentity': { type: String, optional: true },
+    // GitLab's attribute the estimate comes from (models/lib/listSyncEstimate.js).
+    'syncSource.estimateSourceField': { type: String, optional: true, allowedValues: ['weight', 'time_estimate'] },
+    'syncSource.fields': { type: Array, optional: true },
+    'syncSource.createCards': { type: Boolean, optional: true },
+    'syncSource.archiveCards': { type: Boolean, optional: true },
+    // Comments, labels, state and files of GitHub / GitLab / Gitea / Forgejo issues.
+    'syncSource.issueDetails': { type: Boolean, optional: true },
+    // #2698: WeKan's changes written back to GitLab, and since when
+    // (server/lib/listSyncWriteBack.js); nothing older than that is written.
+    'syncSource.writeBack': { type: Boolean, optional: true },
+    'syncSource.writeBackSince': { type: Date, optional: true },
+    // `sprint` and `releases`: the card's Scrum planning (models/lib/listSyncPlanning.js).
+    'syncSource.fields.$': { type: String, allowedValues: ['title', 'description', 'spentTime', 'estimate', 'originalEstimate', 'remainingEstimate', 'sprint', 'releases'] },
+    'syncSource.enabled': {
+      type: Boolean,
+      optional: true,
+      defaultValue: true,
+    },
+    'syncSource.lastSyncedAt': {
+      type: Date,
+      optional: true,
+    },
+    'syncSource.lastSyncError': {
+      /**
+       * short message from the last failed sync attempt, cleared on success -
+       * shown in the list's sync settings so a broken credential is visible
+       * without needing Admin Panel -> Problems.
+       */
+      type: String,
+      optional: true,
+    },
+    syncWriteBackError: {
+      /**
+       * #2698: why the last write-back to GitLab failed, cleared when one
+       * succeeds. Beside syncSource, because a run's list writes match
+       * syncSource as a whole.
+       */
+      type: String,
+      optional: true,
+    },
   }),
 );
 
 Lists.helpers({
-  async copy(boardId, swimlaneId) {
+  async copy(boardId, swimlaneId, cardIdMap = null) {
+    // What this does is decided in models/lib/listCopyPlan.js, where it can be
+    // unit-tested - the copy-side twin of List.move's planner. Two faults lived
+    // in these lines, and both are described there:
+    //
+    // - the cards were selected by `swimlaneId: this.swimlaneId || null`, so a
+    //   board-wide list (an empty or missing swimlaneId, which is every list on
+    //   a board predating per-swimlane lists) asked for cards with NO swimlane
+    //   while its cards carry real ones - the selector matched nothing and the
+    //   copy came out EMPTY;
+    // - the target board was searched for a same-titled list to reuse without
+    //   first asking whether that board IS this list's own board. On a
+    //   same-board copy the search finds THIS list, so the "copy" wrote the
+    //   cards back into the source list and returned the source list's id.
     const oldId = this._id;
-    const oldSwimlaneId = this.swimlaneId || null;
-    this.boardId = boardId;
-    this.swimlaneId = swimlaneId;
+    const sameBoard = boardId === this.boardId;
+    const existing = sameBoard
+      ? null
+      : await ReactiveCache.getList({
+        boardId,
+        title: this.title,
+        archived: false,
+      });
 
-    let _id = null;
-    const existingListWithSameName = await ReactiveCache.getList({
-      boardId,
-      title: this.title,
-      archived: false,
+    const plan = planListCopy({
+      listId: oldId,
+      listBoardId: this.boardId,
+      targetBoardId: boardId,
+      targetSwimlaneId: swimlaneId,
+      existingListId: existing ? existing._id : null,
     });
-    if (existingListWithSameName) {
-      _id = existingListWithSameName._id;
-    } else {
-      delete this._id;
-      this.swimlaneId = swimlaneId; // Set the target swimlane for the copied list
-      _id = await Lists.insertAsync(this);
+
+    let _id = plan.listId;
+    if (plan.action === 'create') {
+      const { copiedScrumMetadata } = require('./lib/scrumCopy');
+      const copy = { ...this, boardId, swimlaneId: plan.swimlaneId };
+      delete copy._id;
+      delete copy.scrum;
+      delete copy.scrumRevision;
+      Object.assign(copy, copiedScrumMetadata(this, boardId));
+      _id = await Lists.insertAsync(copy);
     }
 
-    // Copy all cards in list
-    const cards = await ReactiveCache.getCards({
-      swimlaneId: oldSwimlaneId,
-      listId: oldId,
-      archived: false,
-    });
+    // Copy all cards in list. Every card of the source list travels, whatever
+    // swimlane each one is in - a list is the unit of a copy, exactly as in
+    // List.move - and each one lands in the swimlane the plan gives it: the
+    // chosen one, or its own when a same-board copy named no swimlane.
+    const cards = await ReactiveCache.getCards(plan.cardSelector);
     for (const card of cards) {
-      await card.copy(boardId, swimlaneId, _id);
+      await card.copy(boardId, copiedCardSwimlaneId(plan, card), _id, cardIdMap);
     }
 
     return _id;
   },
 
   async move(boardId, swimlaneId) {
-    const boardList = await ReactiveCache.getList({
-      boardId,
-      title: this.title,
-      archived: false,
+    // #6670: what this does is decided in models/lib/listMovePlan.js, where it
+    // can be unit-tested. The short version: a move within the SAME board is a
+    // re-bind of this list to the chosen swimlane. It used to search the target
+    // board for "a list with this title" to merge into - which on the same board
+    // finds THIS list - and the merge branch was the one branch that never wrote
+    // a swimlaneId, so choosing a swimlane for a list silently did nothing and
+    // the list stayed board-wide under every swimlane.
+    const targetSwimlaneId = typeof swimlaneId === 'string' ? swimlaneId : '';
+    const sameBoard = boardId === this.boardId;
+    const existing = sameBoard
+      ? null
+      : await ReactiveCache.getList({
+        boardId,
+        title: this.title,
+        archived: false,
+      });
+
+    const plan = planListMove({
+      listId: this._id,
+      listBoardId: this.boardId,
+      listSwimlaneId: this.swimlaneId,
+      targetBoardId: boardId,
+      targetSwimlaneId,
+      existingListId: existing ? existing._id : null,
     });
-    let listId;
-    if (boardList) {
-      listId = boardList._id;
-      for (const card of await this.cards()) {
-        await card.move(boardId, this._id, boardList._id);
+
+    let listId = plan.listId;
+    if (plan.action === 'create') {
+      // A list with no usable title cannot be inserted: `title` is required by
+      // the schema, so the insert fails validation - and collection2's own error
+      // formatter then reads a property of the undefined field and throws
+      //   ValidationError: Failed validation
+      //   Cannot read properties of undefined (reading 'title')
+      // which is what an admin actually saw in Admin Panel / Problems /
+      // Database problems: an opaque crash naming neither the list nor the
+      // real problem. Say what is wrong instead, and say it before the insert.
+      if (typeof this.title !== 'string' || this.title.trim().length === 0) {
+        throw new Meteor.Error(
+          'list-has-no-title',
+          'This list has no title, so it cannot be moved to another board. ' +
+            'Give it a title first.',
+        );
       }
-    } else {
-      console.log('list.title:', this.title);
-      console.log('boardList:', boardList);
+      const { copiedScrumMetadata } = require('./lib/scrumCopy');
       listId = await Lists.insertAsync({
+        ...copiedScrumMetadata(this, boardId),
         title: this.title,
         boardId,
         type: this.type,
         archived: false,
         wipLimit: this.wipLimit,
-        swimlaneId: swimlaneId, // Set the target swimlane for the moved list
+        swimlaneId: plan.swimlaneId, // Set the target swimlane for the moved list
       });
+    } else if (plan.rebind) {
+      await Lists.updateAsync(this._id, { $set: { swimlaneId: plan.swimlaneId } });
+      this.swimlaneId = plan.swimlaneId;
     }
 
-    for (const card of await this.cards(swimlaneId)) {
-      await card.move(boardId, swimlaneId, listId);
+    // Every card in the list travels with it, into the chosen swimlane.
+    //
+    // Two bugs used to live in these few lines. The merge branch called
+    // `card.move(boardId, this._id, boardList._id)` - Card.move's second
+    // argument is a swimlaneId, so this set every card's swimlaneId to a LIST
+    // id, i.e. to a swimlane that does not exist, and the cards became the
+    // "orphaned cards" the board-open repair then has to rescue. And the second
+    // loop selected `this.cards(swimlaneId)`, filtering the SOURCE list's cards
+    // by a swimlaneId belonging to the TARGET board, which on a cross-board move
+    // matches nothing and left the cards behind.
+    for (const card of await this.cards()) {
+      await card.move(boardId, plan.swimlaneId, listId);
     }
+  },
+
+  // #6443: the _ids of the board's OTHER non-archived swimlanes when `swimlaneId`
+  // is the board's FIRST swimlane, otherwise undefined. Passed to the card
+  // selector so orphaned cards (swimlaneId pointing at a deleted swimlane) are
+  // surfaced in the first swimlane — mirroring Swimlanes.orphanedSwimlaneLists.
+  orphanedCardsSwimlaneIds(swimlaneId) {
+    if (!swimlaneId) {
+      return undefined;
+    }
+    // Only the first swimlane surfaces orphaned cards.
+    const pick = swimlanes =>
+      otherSwimlaneIdsForFirstActive(swimlanes, swimlaneId);
+    const swimlanes = ReactiveCache.getSwimlanes(
+      // Include archived swimlanes in the exclusion list. A card on one still
+      // has a valid home and must not surface as an orphan in the first active
+      // swimlane (#6659).
+      { boardId: this.boardId },
+      { sort: ['sort'] },
+    );
+    // On the SERVER ReactiveCache.getSwimlanes returns a Promise; reading
+    // .length off it made this always return undefined there (the orphan
+    // fallback silently never applied server-side). Resolve it instead; the
+    // client path stays synchronous.
+    if (swimlanes && typeof swimlanes.then === 'function') {
+      return swimlanes.then(pick);
+    }
+    return pick(swimlanes);
   },
 
   cards(swimlaneId) {
-    const selector = {
-      listId: this._id,
-      archived: false,
+    // #6441: express the swimlane-membership fallback as a single `swimlaneId:
+    // { $in: [...] }` clause (via the shared, unit-tested helper) instead of a
+    // bare top-level `$or`, so it never competes with the board Filter's own
+    // top-level `$or` when the two selectors are combined.
+    // #6443: also surface orphaned cards in the first swimlane.
+    const query = (orphanedIds) => {
+      const selector = listCardsSelector(this._id, swimlaneId, orphanedIds);
+      const filterSelector =
+        typeof Filter !== 'undefined' && typeof Filter.mongoSelector === 'function'
+          ? Filter.mongoSelector(selector)
+          : selector;
+      return ReactiveCache.getCards(filterSelector, { sort: ['sort'] });
     };
-    if (swimlaneId) {
-      // Fallback: also surface cards with no swimlaneId (null/empty) so that
-      // pre-migration / orphaned cards are always visible in every swimlane
-      // without requiring a database migration.
-      selector.$or = [
-        { swimlaneId },
-        { swimlaneId: null },  // null covers null AND missing field
-        { swimlaneId: '' },    // empty string from shared-lists era
-      ];
+    const orphaned = this.orphanedCardsSwimlaneIds(swimlaneId);
+    if (orphaned && typeof orphaned.then === 'function') {
+      return orphaned.then(query); // server (async ReactiveCache)
     }
-    const filterSelector =
-      typeof Filter !== 'undefined' && typeof Filter.mongoSelector === 'function'
-        ? Filter.mongoSelector(selector)
-        : selector;
-    const ret = ReactiveCache.getCards(filterSelector, { sort: ['sort'] });
-    return ret;
+    return query(orphaned);
   },
 
   cardsUnfiltered(swimlaneId) {
-    const selector = {
-      listId: this._id,
-      archived: false,
-    };
-    if (swimlaneId) {
-      // Same fallback as cards(): include orphaned cards with no swimlaneId.
-      selector.$or = [
-        { swimlaneId },
-        { swimlaneId: null },
-        { swimlaneId: '' },
-      ];
+    // Same swimlane-membership fallback as cards() (#6441/#6443), without the Filter.
+    const query = (orphanedIds) =>
+      ReactiveCache.getCards(listCardsSelector(this._id, swimlaneId, orphanedIds), {
+        sort: ['sort'],
+      });
+    const orphaned = this.orphanedCardsSwimlaneIds(swimlaneId);
+    if (orphaned && typeof orphaned.then === 'function') {
+      return orphaned.then(query); // server (async ReactiveCache)
     }
-    const ret = ReactiveCache.getCards(selector, { sort: ['sort'] });
-    return ret;
+    return query(orphaned);
   },
 
-  allCards() {
+  allCards(swimlaneId) {
     const ret = ReactiveCache.getCards({ listId: this._id });
-    return ret;
+    // When a swimlane context is given, scope the result to that swimlane
+    // (plus orphaned cards) so "select all cards" stays contained within its
+    // own swimlane. Without a swimlaneId, keep the historical list-wide result.
+    return filterCardsByListAndSwimlane(
+      ret,
+      this._id,
+      swimlaneId,
+      this.orphanedCardsSwimlaneIds(swimlaneId),
+    );
   },
 
   board() {
@@ -295,7 +628,22 @@ Lists.helpers({
   },
 
   getWipLimit(option) {
-    const list = ReactiveCache.getList(this._id);
+    // On the SERVER, ReactiveCache.getList() is async - it returns a PROMISE, and
+    // a promise has no `wipLimit`. So this helper read `undefined` and answered 0
+    // for every option, which is what broke the WIP limit popup (#6465):
+    //
+    //   * `enableWipLimit` asked for the value, always got 0, and so reset the
+    //     limit to 1 on EVERY click - "the counter always falls back to 1";
+    //   * it then toggled `!enabled`, and `enabled` was always 0, so every click
+    //     turned the limit ON - "the checkbox can not be unchecked".
+    //
+    // The document is `this`, so the server needs no lookup at all; a toggle also
+    // WANTS the state as it was when the click happened, not after its own write.
+    // On the client the lookup stays: it makes the popup's helpers reactive, so
+    // the tick and the number follow the change (the popup's data context is the
+    // list document captured when it opened, which does not update by itself).
+    const list = Meteor.isServer ? this : (ReactiveCache.getList(this._id) || this);
+
     if (!list || !list.wipLimit) {
       // Necessary check to avoid exceptions for the case where the doc doesn't have the wipLimit field yet set
       return 0;
@@ -307,7 +655,18 @@ Lists.helpers({
   },
 
   colorClass() {
-    if (this.color) return `list-header-${this.color}`;
+    // #5514: a custom '#rrggbb' hex has no CSS class; it is applied inline via
+    // colorStyle(). Named palette colors keep their `list-header-<name>` class.
+    if (this.color && !isHexColor(this.color)) return `list-header-${this.color}`;
+    return '';
+  },
+
+  colorStyle() {
+    // #5514: for a custom hex color, set the background inline plus an
+    // automatically readable text color. Empty for named colors.
+    if (isHexColor(this.color)) {
+      return `background-color:${this.color} !important;color:${contrastText(this.color)} !important;`;
+    }
     return '';
   },
 
@@ -340,13 +699,21 @@ Lists.helpers({
     return this.collapsed === true;
   },
 
-  absoluteUrl() {
-    const card = ReactiveCache.getCard({ listId: this._id });
-    return card && card.absoluteUrl();
+  // The list's OWN address, not a card's. This used to answer with the URL of
+  // whichever card the cache returned first for this list, so "link to this
+  // list" went to a card - and to nothing at all when the list was empty.
+  // models/lib/boardItemUrl.js
+  originRelativeUrl(board) {
+    const { buildListRelativeUrl } = require('./lib/boardItemUrl');
+    return buildListRelativeUrl(this, board || this.board());
   },
-  originRelativeUrl() {
-    const card = ReactiveCache.getCard({ listId: this._id });
-    return card && card.originRelativeUrl();
+  absoluteUrl(board) {
+    // Built from the relative path rather than FlowRouter.url(): FlowRouter is
+    // client-only and answers with a generic link on the server.
+    // Meteor.absoluteUrl() works on both sides and expects no leading slash.
+    const relativeUrl = this.originRelativeUrl(board);
+    if (!relativeUrl) return undefined;
+    return Meteor.absoluteUrl(relativeUrl.replace(/^\//, ''));
   },
   async remove() {
     return await Lists.removeAsync({ _id: this._id });
@@ -368,6 +735,9 @@ Lists.helpers({
     return await Lists.updateAsync(this._id, { $set: { collapsed: !!enable } });
   },
 
+  // #6765: the list's cards are archived with it, and restored with it, by the
+  // server (the Lists.after.update hook in server/models/lists.js), for every
+  // kind of list and every way a list is archived.
   async archive() {
     if (this.isTemplateList()) {
       for (const card of await this.cards()) {
@@ -398,8 +768,18 @@ Lists.helpers({
     return await Lists.updateAsync(this._id, { $set: { 'wipLimit.value': limit } });
   },
 
+  // #4756: show cards without a colour of their own in this list's colour.
+  async setCardsUseListColor(enabled) {
+    return await Lists.updateAsync(this._id, { $set: { cardsUseListColor: enabled === true } });
+  },
+
   async setColor(newColor) {
-    return await Lists.updateAsync(this._id, { $set: { color: newColor } });
+    // Normalize so an offered-but-unsupported color (or a removal) becomes None
+    // instead of being silently saved as the wrong color or rejected (#5382).
+    // normalizeListColor returns '' for None; store null so the optional,
+    // allowedValues-constrained schema field accepts it (as cards do).
+    const color = normalizeListColor(newColor) || null;
+    return await Lists.updateAsync(this._id, { $set: { color } });
   },
 });
 
@@ -410,8 +790,10 @@ Lists.userArchivedLists = async userId => {
   })
 };
 
-Lists.userArchivedListIds = async () => {
-  const lists = await Lists.userArchivedLists();
+// See Swimlanes.userArchivedSwimlaneIds: the userId has to reach the finder, or
+// this answers with the archived lists of nobody (#6537).
+Lists.userArchivedListIds = async userId => {
+  const lists = await Lists.userArchivedLists(userId);
   return lists.map(list => { return list._id; });
 };
 
@@ -515,3 +897,16 @@ Lists.helpers({
 });
 
 export default Lists;
+
+// Prevent direct DDP writes bypassing Scrum reference and lifecycle validation.
+if (Meteor.isServer) {
+  Lists.deny({
+    insert(userId, doc) { return doc.scrum !== undefined || doc.scrumRevision !== undefined || doc.syncCredentialGeneration !== undefined || doc.syncCredentialFence !== undefined; },
+    update(userId, doc, fields) {
+      return fields.some(field => field === 'scrum' || field.startsWith('scrum.') || field === 'scrumRevision' ||
+        field === 'syncCredentialGeneration' || field.startsWith('syncCredentialGeneration.') ||
+        field === 'syncCredentialIncarnation' || field.startsWith('syncCredentialIncarnation.') ||
+        field === 'syncCredentialFence' || field.startsWith('syncCredentialFence.'));
+    },
+  });
+}

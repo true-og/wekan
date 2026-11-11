@@ -1,7 +1,39 @@
+import { isSubmitKey } from '/models/lib/editorSubmitKey';
 import { ReactiveCache } from '/imports/reactiveCache';
 import { FlowRouter } from 'meteor/ostrio:flow-router-extra';
 import Cards from '/models/cards';
 import { Filter } from '/client/lib/filter';
+import { subtaskStatusLabel } from './subtaskStatusHelpers';
+import {
+  subtaskNavTarget,
+  subtaskBoardNavTarget,
+} from './subtaskViewHelpers';
+import { Utils } from '/client/lib/utils';
+import { errorMessage } from '/client/lib/errorMessage';
+const { cardParentIds, collectAllAncestorIdsSync } = require('/models/lib/cardParents');
+const { isSubtaskDone, subtaskDoneCountLabel, subtaskDoneDenial } = require('/models/lib/subtaskDone');
+const { isAssignedOnlyMember } = require('/models/lib/boardCardScope');
+
+// #4693: what models/lib/subtaskDone.js needs of a subtask on the client. A
+// linked card is completed through its source (Card.getDueComplete), so the
+// flag is read the way the card details read it.
+function subtaskDoneFields(subtask) {
+  if (!subtask) return null;
+  const dueComplete = typeof subtask.getDueComplete === 'function'
+    ? subtask.getDueComplete()
+    : subtask.dueComplete === true;
+  return { archived: subtask.archived === true, dueComplete };
+}
+
+// #4693: "Subtasks (1/3)" - done/total in the section heading
+// (client/components/cards/cardDetails.jade, +cardSectionHeader count=...).
+// Only the subtasks this viewer has - minimongo holds what the board
+// publication let them read - are counted.
+Template.registerHelper('subtaskDoneCount', function subtaskDoneCount() {
+  const card = this;
+  if (!card || typeof card.allSubtasks !== 'function') return null;
+  return subtaskDoneCountLabel((card.allSubtasks() || []).map(subtaskDoneFields));
+});
 
 Template.subtasks.events({
   'click .js-open-subtask-details-menu'(event) {
@@ -16,70 +48,55 @@ Template.subtasks.events({
     event.preventDefault();
     const textarea = tpl.find('textarea.js-add-subtask-item');
     const title = textarea.value.trim();
-    const cardId = Template.currentData().cardId;
-    const card = ReactiveCache.getCard(cardId);
-    const sortIndex = -1;
-    const crtBoard = ReactiveCache.getBoard(card.boardId);
-    const targetBoard = await crtBoard.getDefaultSubtasksBoardAsync();
-    if (!targetBoard) {
-      return;
-    }
-
-    const targetList = await targetBoard.getDefaultSubtasksListAsync();
-    if (!targetList) {
-      return;
-    }
-    const listId = targetList._id;
-
-    //Get the full swimlane data for the parent task.
-    const parentSwimlane = ReactiveCache.getSwimlane({
-      boardId: crtBoard._id,
-      _id: card.swimlaneId,
-    });
-    //find the swimlane of the same name in the target board.
-    const targetSwimlane = parentSwimlane
-      ? ReactiveCache.getSwimlane({
-          boardId: targetBoard._id,
-          title: parentSwimlane.title,
-        })
-      : undefined;
-    //If no swimlane with a matching title exists in the target board, fall back to the default swimlane.
-    const swimlaneId =
-      targetSwimlane === undefined
-        ? targetBoard.getDefaultSwimline()._id
-        : targetSwimlane._id;
-
-    const nextCardNumber = await targetBoard.getNextCardNumber();
+    const contextCard = ReactiveCache.getCard(this.cardId);
+    const cardId = contextCard?.getRealId ? contextCard.getRealId() : this.cardId;
+    // #2184: optional one-time copy of the parent card's CURRENT labels onto
+    // the new subtask, at creation time only -- not an ongoing sync.
+    const inheritLabelsCheckbox = tpl.find(
+      'input.js-add-subtask-inherit-labels',
+    );
+    const inheritLabels = !!(inheritLabelsCheckbox && inheritLabelsCheckbox.checked);
 
     if (title) {
-      const _id = await Cards.insertAsync({
-        title,
-        parentId: cardId,
-        members: [],
-        labelIds: [],
-        customFields: [],
-        listId,
-        boardId: targetBoard._id,
-        sort: sortIndex,
-        swimlaneId,
-        type: 'cardType-card',
-        cardNumber: nextCardNumber,
-      });
+      // Subtask creation is performed server-side by the `addSubtaskCard` Meteor
+      // method, so the default subtasks board/list/swimlane are resolved (and
+      // lazily created exactly once) on the server. This prevents the client
+      // from creating duplicate subtasks boards / swimlanes / columns
+      // (#3868 / #5788 / #2256) and lets multiple subtasks be created reliably
+      // (#4782), and the method applies the destination board's automatic
+      // custom fields to the new subtask (#4037 / #3562).
+      try {
+        const _id = await Meteor.callAsync(
+          'addSubtaskCard',
+          cardId,
+          title,
+          inheritLabels,
+        );
 
-      // In case the filter is active we need to add the newly inserted card in
-      // the list of exceptions -- cards that are not filtered. Otherwise the
-      // card will disappear instantly.
-      // See https://github.com/wekan/wekan/issues/80
-      Filter.addException(_id);
+        if (!_id) {
+          throw new Error('The server could not create the subtask.');
+        }
+        // In case the filter is active we need to add the newly inserted card in
+        // the list of exceptions -- cards that are not filtered. Otherwise the
+        // card will disappear instantly.
+        // See https://github.com/wekan/wekan/issues/80
+        Filter.addException(_id);
 
-      setTimeout(() => {
-        tpl.$('.add-subtask-item')
-          .last()
-          .click();
-      }, 100);
+        setTimeout(() => {
+          tpl.$('.add-subtask-item')
+            .last()
+            .click();
+        }, 100);
+        textarea.value = '';
+        if (inheritLabelsCheckbox) {
+          inheritLabelsCheckbox.checked = false;
+        }
+        textarea.focus();
+      } catch (error) {
+        alert(errorMessage(error));
+        textarea.focus();
+      }
     }
-    textarea.value = '';
-    textarea.focus();
   },
   'submit .js-edit-subtask-title'(event, tpl) {
     event.preventDefault();
@@ -94,11 +111,16 @@ Template.subtasks.events({
       await subtask.archive();
     }
   },
-  keydown(event) {
-    //If user press enter key inside a form, submit it
-    //Unless the user is also holding down the 'shift' key
-    if (event.keyCode === 13 && !event.shiftKey) {
+  // #3626: add an EXISTING card as a subtask of the current card, picked from
+  // a search popup, instead of only being able to create a brand-new one.
+  'click .js-add-existing-subtask'(event, tpl) {
+    Popup.open('addExistingSubtask').call(this, event);
+  },
+  'keydown textarea'(event) {
+    // Follow the shared editor shortcut, leaving newline keys untouched.
+    if (isSubmitKey(event, { submitOnEnter: !!ReactiveCache.getCurrentUser()?.hasSubmitOnEnter?.() })) {
       event.preventDefault();
+      event.stopPropagation();
       const $form = $(event.currentTarget).closest('form');
       $form.find('button[type=submit]').click();
     }
@@ -107,29 +129,112 @@ Template.subtasks.events({
 
 Template.subtasks.onCreated(function () {
   this.toggleDeleteDialog = new ReactiveVar(false);
+  // #3409: archived subtasks stay in the list, shown as completed, instead of
+  // vanishing. This toggle hides them again for anyone who wants the shorter
+  // list — a client-side ReactiveVar, not a persisted field, because it is a
+  // per-viewing preference of this subtask list, not data about the card.
+  this.hideCompletedSubtasks = new ReactiveVar(false);
 });
 
 Template.subtasks.helpers({
   isBoardAdmin() {
-    return ReactiveCache.getCurrentUser().isBoardAdmin();
+    return ReactiveCache.getCurrentUser()?.isBoardAdmin();
   },
   toggleDeleteDialog() {
     return Template.instance().toggleDeleteDialog;
   },
+  hideCompletedSubtasks() {
+    return Template.instance().hideCompletedSubtasks.get();
+  },
+  // #3409: archived (= completed) subtasks are always fetched — currentCard.subtasks()
+  // used to filter them out entirely — and only hidden here, on the client,
+  // when the toggle above is on. The template's own data context is
+  // {cardId}, not the card itself (see +subtasks(cardId = _id) below), so the
+  // card is looked up the same way the add-subtask handler above does.
+  visibleSubtasks() {
+    const card = ReactiveCache.getCard(this.cardId);
+    const allSubtasks = card && card.allSubtasks ? card.allSubtasks() : [];
+    if (Template.instance().hideCompletedSubtasks.get()) {
+      // #4693: "completed" is archived OR ticked done (isSubtaskDone).
+      return allSubtasks.filter(subtask => !isSubtaskDone(subtaskDoneFields(subtask)));
+    }
+    return allSubtasks;
+  },
+  // #4693: the id the done ticks are made under - the real card for a link.
+  realCardId() {
+    const card = ReactiveCache.getCard(this.cardId);
+    return card && card.getRealId ? card.getRealId() : this.cardId;
+  },
 });
 
-Template.subtaskItemDetail.events({
-  async 'click .js-subtasks-item .check-box-container'() {
-    const item = Template.currentData().item;
-    if (item && item._id) {
-      await item.toggleItem();
+Template.subtasks.events({
+  'click .js-toggle-hide-completed-subtasks'(event, tpl) {
+    event.preventDefault();
+    tpl.hideCompletedSubtasks.set(!tpl.hideCompletedSubtasks.get());
+  },
+});
+
+Template.subtaskDetail.helpers({
+  // #4693: ticked done, or archived (#3409's "completed").
+  subtaskIsDone() {
+    return isSubtaskDone(subtaskDoneFields(this.subtask));
+  },
+  // #4693: the same rule the server's setSubtaskDone applies, so the box is
+  // live only for someone whose tick the server will accept: write access to
+  // the SUBTASK's board (it may be another board than the parent's), and for
+  // an assigned-only member only on a subtask assigned to them.
+  subtaskCanTick() {
+    const subtask = this.subtask;
+    if (!subtask) return false;
+    const userId = Meteor.userId();
+    const board = typeof subtask.board === 'function' ? subtask.board() : null;
+    return subtaskDoneDenial({
+      userId,
+      parentCardId: this.parentCardId,
+      subtask,
+      canEdit: !!board && Utils.canModifyCard(subtask),
+      assignedOnly: isAssignedOnlyMember(board, userId),
+    }) === null;
+  },
+  // #6091: show the subtask's current status, i.e. the list it resides in
+  // (prefixed with the board title when the subtask lives on another board
+  // than the parent card).
+  subtaskStatus() {
+    const subtask = this.subtask;
+    if (!subtask) {
+      return '';
+    }
+    const list = subtask.list && subtask.list();
+    const listTitle = list ? list.title : '';
+    const board = subtask.board && subtask.board();
+    const boardTitle = board ? board.title : '';
+    const parentCard = Utils.getCurrentCard();
+    const sameBoard = !!parentCard && parentCard.boardId === subtask.boardId;
+    return subtaskStatusLabel({ listTitle, boardTitle, sameBoard });
+  },
+});
+
+Template.subtaskDetail.events({
+  // #4693: tick / untick. Server-authoritative: the method checks the
+  // permissions again and records the change in the subtask's History.
+  async 'click .js-toggle-subtask-done'(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    const data = Template.currentData();
+    const subtask = data && data.subtask;
+    if (!subtask || !subtask._id || !data.parentCardId) return;
+    const done = !isSubtaskDone(subtaskDoneFields(subtask));
+    try {
+      await Meteor.callAsync('setSubtaskDone', data.parentCardId, subtask._id, done);
+    } catch (error) {
+      alert(errorMessage(error));
     }
   },
 });
 
 Template.subtaskActionsPopup.helpers({
   isBoardAdmin() {
-    return ReactiveCache.getCurrentUser().isBoardAdmin();
+    return ReactiveCache.getCurrentUser()?.isBoardAdmin();
   },
 });
 
@@ -137,22 +242,36 @@ Template.subtaskActionsPopup.events({
   'click .js-view-subtask'(event) {
     if ($(event.target).hasClass('js-view-subtask')) {
       const subtask = Template.currentData().subtask;
-      const board = subtask.board();
-      FlowRouter.go('card', {
-        boardId: board._id,
-        slug: board.slug,
-        cardId: subtask._id,
-        swimlaneId: subtask.swimlaneId,
-        listId: subtask.listId,
-      });
+      // #3743: open the SUBTASK card itself, not the parent/current card.
+      // subtaskNavTarget derives boardId/slug/cardId from the subtask only.
+      // #1853 / #4762: when the subtask's board (often a DIFFERENT deposit
+      // board) is not in minimongo yet, it falls back to the subtask's own
+      // boardId so the route loads the board — no TypeError, no dead button.
+      // It only returns undefined for a truly broken subtask document.
+      const target = subtaskNavTarget(subtask);
+      if (target) {
+        FlowRouter.go('card', target);
+      } else {
+        // Broken subtask (no card id / board id): warn instead of throwing.
+        console.warn(
+          'Cannot view subtask: missing board/card id on subtask',
+          subtask && subtask._id,
+        );
+      }
     }
   },
   'click .js-go-to-subtask-board'() {
     const subtask = Template.currentData().subtask;
-    const board = subtask.board();
-    if (board) {
+    // #1853: fall back to subtask.boardId when the board doc is not loaded.
+    const target = subtaskBoardNavTarget(subtask);
+    if (target) {
       Popup.close();
-      FlowRouter.go('board', { id: board._id, slug: board.slug });
+      FlowRouter.go('board', target);
+    } else {
+      console.warn(
+        'Cannot go to subtask board: missing board id on subtask',
+        subtask && subtask._id,
+      );
     }
   },
   'click .js-delete-subtask' : Popup.afterConfirm('subtaskDelete', async function () {
@@ -164,11 +283,144 @@ Template.subtaskActionsPopup.events({
   }),
 });
 
+// #3626: "add an existing card as a subtask" popup. Search is scoped to the
+// current card's own board (a card and its subtasks normally live on the
+// dedicated "subtasks" board, but this also covers a card being turned into
+// a subtask on its own board), and picking a result reuses `setParentId` --
+// the exact same method `card.js`/other callers use to (re)parent a card --
+// rather than creating a new card the way `addSubtaskCard` does.
+Template.addExistingSubtaskPopup.onCreated(function () {
+  this.searchTerm = new ReactiveVar('');
+  // #1931: '' is this card's own board; another board's cards come from the
+  // server (crossBoardSubtaskCandidates), which checks write access to both.
+  this.sourceBoardId = new ReactiveVar('');
+  this.remoteCandidates = new ReactiveVar([]);
+  this.autorun(() => {
+    const boardId = this.sourceBoardId.get();
+    const term = this.searchTerm.get();
+    const contextCard = ReactiveCache.getCard(Template.currentData().cardId);
+    if (!boardId || !contextCard || boardId === contextCard.boardId) { this.remoteCandidates.set([]); return; }
+    const parentId = contextCard.getRealId ? contextCard.getRealId() : contextCard._id;
+    Meteor.call('crossBoardSubtaskCandidates', parentId, boardId, term || '', (error, cards) => {
+      this.remoteCandidates.set(error ? [] : cards || []);
+    });
+  });
+});
+
+function isOtherSourceBoard(tpl) {
+  const boardId = tpl.sourceBoardId.get();
+  const contextCard = ReactiveCache.getCard(Template.currentData().cardId);
+  return !!(boardId && contextCard && boardId !== contextCard.boardId);
+}
+
+function existingSubtaskCandidatesFor(tpl) {
+  const contextCard = ReactiveCache.getCard(Template.currentData().cardId);
+  if (!contextCard) {
+    return [];
+  }
+  const cardId = contextCard.getRealId
+    ? contextCard.getRealId()
+    : contextCard._id;
+  const term = (tpl.searchTerm.get() || '').trim();
+  const selector = {
+    archived: false,
+    boardId: contextCard.boardId,
+    _id: { $ne: cardId },
+    // A card already a subtask of this one has nothing to gain from being
+    // picked again - as its primary or (#3626) one of its other parents.
+    parentId: { $ne: cardId },
+    parentIds: { $ne: cardId },
+    type: { $nin: ['template-card', 'cardType-linkedCard', 'cardType-linkedBoard'] },
+  };
+  if (term) {
+    selector.title = { $regex: term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' };
+  }
+  const cards = ReactiveCache.getCards(selector, { sort: { sort: 1 }, limit: 50 });
+  // Never offer a card that is already an ANCESTOR of this one, through any
+  // of its parents (#3626) - making it a subtask here would close a loop,
+  // which addParent refuses anyway (#3328), so filter it out up front instead
+  // of letting the user pick it and see an error.
+  const ancestors = new Set(collectAllAncestorIdsSync(cardParentIds(contextCard), id => ReactiveCache.getCard(id)));
+  return (cards || []).filter(card => !ancestors.has(card._id));
+}
+
+Template.addExistingSubtaskPopup.helpers({
+  existingSubtaskCandidates() {
+    const tpl = Template.instance();
+    return isOtherSourceBoard(tpl) ? tpl.remoteCandidates.get() : existingSubtaskCandidatesFor(tpl);
+  },
+  noExistingSubtaskCandidates() {
+    const tpl = Template.instance();
+    return (isOtherSourceBoard(tpl) ? tpl.remoteCandidates.get() : existingSubtaskCandidatesFor(tpl)).length === 0;
+  },
+  // This card's board first, then the other boards the member may write.
+  subtaskSourceBoards() {
+    const user = ReactiveCache.getCurrentUser();
+    const contextCard = ReactiveCache.getCard(Template.currentData().cardId);
+    if (!user || !contextCard) return [];
+    const writable = ReactiveCache.getBoards({ archived: false, type: 'board', members: { $elemMatch: {
+      userId: user._id, isActive: true, isReadOnly: { $ne: true }, isCommentOnly: { $ne: true },
+      isNoComments: { $ne: true }, isReadAssignedOnly: { $ne: true }, isWorker: { $ne: true } } } }, { sort: { title: 1 } });
+    const own = writable.find(b => b._id === contextCard.boardId) || ReactiveCache.getBoard(contextCard.boardId);
+    return [own, ...writable.filter(b => b._id !== contextCard.boardId)].filter(Boolean);
+  },
+  isSourceBoard() {
+    const tpl = Template.instance();
+    const contextCard = ReactiveCache.getCard(tpl.data.cardId);
+    return (tpl.sourceBoardId.get() || (contextCard && contextCard.boardId)) === this._id;
+  },
+});
+
+Template.addExistingSubtaskPopup.events({
+  'keyup .js-add-existing-subtask-search'(event, tpl) {
+    tpl.searchTerm.set(event.target.value);
+  },
+  'change .js-add-existing-subtask-board'(event, tpl) {
+    tpl.sourceBoardId.set(event.currentTarget.value);
+  },
+  submit(event) {
+    event.preventDefault();
+  },
+  async 'click .js-select-existing-subtask'(event) {
+    event.preventDefault();
+    const cardId = $(event.currentTarget).data('id');
+    const contextCard = ReactiveCache.getCard(Template.currentData().cardId);
+    // #1931: a card of another board is attached by the server, which checks
+    // write access to both boards and loops through every parent.
+    if (contextCard && isOtherSourceBoard(Template.instance())) {
+      const parentCardId = contextCard.getRealId ? contextCard.getRealId() : contextCard._id;
+      try {
+        await Meteor.callAsync('addCrossBoardSubtask', parentCardId, String(cardId));
+      } catch (error) {
+        alert(errorMessage(error));
+      }
+      Popup.close();
+      return;
+    }
+    const targetCard = ReactiveCache.getCard(cardId);
+    if (!contextCard || !targetCard) {
+      Popup.close();
+      return;
+    }
+    const parentId = contextCard.getRealId
+      ? contextCard.getRealId()
+      : contextCard._id;
+    try {
+      // #3626: the card keeps the parents it has and becomes this one's
+      // subtask too - "A must be done before B and C", so A is under both.
+      await targetCard.addParent(parentId);
+    } catch (error) {
+      alert(errorMessage(error));
+    }
+    Popup.close();
+  },
+});
+
 Template.editSubtaskItemForm.helpers({
   user() {
     return ReactiveCache.getUser(this.userId);
   },
   isBoardAdmin() {
-    return ReactiveCache.getCurrentUser().isBoardAdmin();
+    return ReactiveCache.getCurrentUser()?.isBoardAdmin();
   },
 });

@@ -1,11 +1,26 @@
 import { Meteor } from 'meteor/meteor';
 import { WebApp } from 'meteor/webapp';
+import { DDP } from 'meteor/ddp';
 import { check } from 'meteor/check';
 import { Random } from 'meteor/random';
 import { Authentication } from '/server/authentication';
 import { sendJsonResult } from '/server/apiMiddleware';
 import { allowIsBoardAdmin, boardMemberRoleToFlags } from '/server/lib/utils';
+import { reconcileBoardTeamMembers } from '/models/lib/reconcileBoardTeamMembers';
+import {
+  isInvitedToBoard,
+  planQuitBoard,
+  planAcceptInvite,
+} from '/models/lib/boardInvites';
+import { buildBoardLabel } from '/models/lib/restLabel';
+import { isCsvMappingShape } from '/models/lib/csvImportMapping';
+import { isAttachmentAuthShape } from '/models/lib/importAttachmentAuth';
+import { LABEL_COLORS } from '/models/metadata/colors';
+import { filterUserBoards } from '/server/lib/boardListFilter';
 import { ReactiveCache } from '/imports/reactiveCache';
+import Actions from '/models/actions';
+import Attachments from '/models/attachments';
+import { liveAttachments } from '/models/lib/attachmentSoftDelete';
 import Activities from '/models/activities';
 import Boards from '/models/boards';
 import Cards from '/models/cards';
@@ -14,11 +29,17 @@ import Lists from '/models/lists';
 import Rules from '/models/rules';
 import Swimlanes from '/models/swimlanes';
 import TableVisibilityModeSettings from '/models/tableVisibilityModeSettings';
+import { assertMayCreateBoard } from '/server/lib/boardCreationGuard';
 import Triggers from '/models/triggers';
 import Users from '/models/users';
 import { ensureIndex } from '/server/lib/mongoStartup';
+import { getFeatureFlags } from '/models/lib/featureFlags';
+import RecoveryEvents from '/models/recoveryEvents';
+import { recordRecoveryAudit } from '/server/lib/recoveryAudit';
+import { publicErrorData } from '/server/lib/apiResponseHelpers';
 
 const getTAPi18n = () => require('/imports/i18n').TAPi18n;
+const { readableWithoutMembership, withoutMembershipSelectors, isOpenPermission } = require('/models/lib/boardPermission');
 
 function getTranslatedString(key, fallback, options) {
   const i18n = getTAPi18n && getTAPi18n();
@@ -38,8 +59,60 @@ async function boardRemover(doc) {
     Rules,
     Activities,
     Triggers,
+    // #4266: also remove the board's rule Actions, which were previously left
+    // orphaned when a board was deleted (Rules and Triggers were removed but
+    // Actions were not).
+    Actions,
   ]) {
     await element.removeAsync({ boardId: doc._id });
+  }
+
+  // History.md §12.4: THE one hard delete of attachments. Every attachment of
+  // the board - live and soft-deleted alike, card attachments and board
+  // backgrounds - and its file in the storage backend go with the board. In
+  // ordinary use a board only gets here through permanentlyDeleteArchivedBoards
+  // (Global Admin, Admin Panel / Problems / Delete enabled, archived board).
+  // tests/attachmentSoftDeleteNoHardDelete.test.cjs allows this call here and
+  // nowhere else.
+  await Attachments.removeAsync({ 'meta.boardId': doc._id });
+
+  // #2339/#5850: when a Template Container board is deleted, clear it from the
+  // profile of any user pointing at it so no save/insert-from-template path is
+  // left referencing a dead board. ensureTemplatesBoard / the "Add Template
+  // Container" button can then create a fresh one on demand.
+  if (doc.type === 'template-container') {
+    // Clear the pointers so no save/insert-from-template path references a dead
+    // board. The schema marks these fields optional:true so this $unset does not
+    // trip SimpleSchema's required check.
+    await Users.updateAsync(
+      { 'profile.templatesBoardId': doc._id },
+      {
+        $unset: {
+          'profile.templatesBoardId': '',
+          'profile.cardTemplatesSwimlaneId': '',
+          'profile.listTemplatesSwimlaneId': '',
+          'profile.boardTemplatesSwimlaneId': '',
+        },
+      },
+      { multi: true },
+    );
+  }
+
+  // #4205: when an individual board template (type 'template-board', the
+  // board a "Board Templates" linked card points at) is deleted, clear it as
+  // anyone's default board template so board creation falls back to its
+  // normal blank-board behavior instead of failing against a dead board id.
+  if (doc.type === 'template-board') {
+    await Users.updateAsync(
+      { 'profile.defaultBoardTemplateBoardId': doc._id },
+      {
+        $unset: {
+          'profile.defaultBoardTemplateId': '',
+          'profile.defaultBoardTemplateBoardId': '',
+        },
+      },
+      { multi: true },
+    );
   }
 }
 
@@ -61,6 +134,16 @@ const foreachRemovedMember = (doc, modifier, callback) => {
 };
 
 Meteor.methods({
+  async setBoardDateFormat(boardId, dateFormat, override) {
+    check(boardId, String);
+    check(dateFormat, String);
+    check(override, Boolean);
+    const board = await ReactiveCache.getBoard(boardId);
+    if (!this.userId || !board || !allowIsBoardAdmin(this.userId, board)) {
+      throw new Meteor.Error('not-authorized');
+    }
+    return Boards.updateAsync(boardId, { $set: { dateFormat, dateFormatOverride: override } });
+  },
   async createBoardWithInitialSwimlanes(payload) {
     check(
       payload,
@@ -77,7 +160,7 @@ Meteor.methods({
     const {
       title,
       slug,
-      permission = 'private',
+      permission: requestedPermission = 'private',
       type = 'board',
       migrationVersion = 1,
       swimlanes = [],
@@ -88,10 +171,34 @@ Meteor.methods({
       check(swimlane.title, String);
       check(swimlane.sort, Match.Maybe(Number));
       check(swimlane.type, Match.Maybe(String));
+      // #2339/#5850: 'card' | 'list' | 'board' marks which template-container
+      // swimlane this is, so the user's profile pointers can be wired below.
+      check(swimlane.role, Match.Maybe(String));
     }
 
     if (!this.userId) {
       throw new Meteor.Error('not-authorized');
+    }
+
+    // #4475: an admin can restrict board creation to admins only. One check,
+    // shared with every other path that creates a board (CreateBleed,
+    // server/lib/boardCreationGuard.js).
+    await assertMayCreateBoard(this.userId, { source: 'createBoardWithInitialSwimlanes', type });
+
+    // Apply the instance visibility policy on this server-side insert too.
+    // Collection allow/deny does not run for insertAsync inside a method.
+    const privateOnly = await TableVisibilityModeSettings.findOneAsync(
+      'tableVisibilityMode-allowPrivateOnly',
+    );
+    const permission = privateOnly?.booleanValue ? 'private' : requestedPermission;
+    if (privateOnly?.booleanValue && isOpenPermission(requestedPermission)) {
+      try {
+        require('/server/lib/securityLog').record({
+          key: 'authz.board-visibility', action: 'blocked',
+          source: 'createBoardWithInitialSwimlanes',
+          detail: 'Public board creation overridden by private-only policy.',
+        });
+      } catch (e) { /* logging must never break the guard */ }
     }
 
     const boardId = await Boards.insertAsync({
@@ -112,13 +219,39 @@ Meteor.methods({
       ],
     });
 
+    // #2339/#5850: when the user creates a Template Container board (via the
+    // "Add Template Container" button on All Boards / Templates), register it
+    // and its three swimlanes as the user's active templates board so that
+    // adding Card/List/Swimlane/Board templates to it actually works -- the
+    // swimlane.isCardTemplatesSwimlane()/... helpers compare against these
+    // profile pointers. Without this the container would look right but stay
+    // inert. We point the profile at this newly-created container (the most
+    // recently created one becomes the active one).
+    const templateRolePointers = {
+      card: 'profile.cardTemplatesSwimlaneId',
+      list: 'profile.listTemplatesSwimlaneId',
+      board: 'profile.boardTemplatesSwimlaneId',
+    };
+    const isTemplateContainer = type === 'template-container';
+    const profilePointerSet = {};
+    if (isTemplateContainer) {
+      profilePointerSet['profile.templatesBoardId'] = boardId;
+    }
+
     for (const swimlane of swimlanes) {
-      await Swimlanes.insertAsync({
+      const swimlaneId = await Swimlanes.insertAsync({
         title: swimlane.title,
         boardId,
         sort: swimlane.sort,
         type: swimlane.type,
       });
+      if (isTemplateContainer && templateRolePointers[swimlane.role]) {
+        profilePointerSet[templateRolePointers[swimlane.role]] = swimlaneId;
+      }
+    }
+
+    if (Object.keys(profilePointerSet).length) {
+      await Users.updateAsync(this.userId, { $set: profilePointerSet });
     }
 
     return boardId;
@@ -136,26 +269,86 @@ Meteor.methods({
 
   async quitBoard(boardId) {
     check(boardId, String);
+    if (!this.userId) throw new Meteor.Error('error-notAuthorized');
     const board = await ReactiveCache.getBoard(boardId);
     if (!board) {
       throw new Meteor.Error('error-board-doesNotExist');
     }
 
     const userId = this.userId;
-    const index = board.memberIndex(userId);
-    if (index < 0) {
-      throw new Meteor.Error('error-board-notAMember');
+    const user = await ReactiveCache.getUser(userId);
+    // #4730: quitting (or declining an invitation to) a board must also clear
+    // the pending invitation, otherwise a follow-up acceptInvite call — the
+    // decline flow on the All Boards page issues one — re-activates the
+    // membership and the declined board stays in the personal overview. A user
+    // holding only a stale invitation (no member entry, e.g. after an admin
+    // removed them) may also quit: their invitation is cleared instead of
+    // throwing error-board-notAMember, so the board can always be removed
+    // from the personal overview.
+    // #4265: a board reached through a team, organization or e-mail domain is
+    // hidden for this user instead (models/lib/boardInvites.js).
+    const { reachesBoardOtherwise, hiddenBoardsAfter } = require('/models/lib/boardInvites');
+    const reachableOtherwise = !!user && reachesBoardOtherwise(board, {
+      teamIds: typeof user.teamIds === 'function' ? user.teamIds() : [],
+      orgIds: typeof user.orgIds === 'function' ? user.orgIds() : [],
+      emailDomains: typeof user.emailDomains === 'function' ? user.emailDomains() : [],
+    });
+    const plan = planQuitBoard({
+      isMember: board.memberIndex(userId) >= 0,
+      isInvited: isInvitedToBoard(user && user.profile, boardId),
+      reachableOtherwise,
+    });
+    if (!plan.ok) {
+      throw new Meteor.Error(plan.error);
     }
 
-    await board.removeMember(userId);
+    if (plan.pullInvite) {
+      await Users.updateAsync(userId, {
+        $pull: { 'profile.invitedBoards': boardId },
+      });
+    }
+    if (plan.removeMember) {
+      await board.removeMember(userId);
+    }
+    if (plan.hide) {
+      await Users.updateAsync(userId, { $set: {
+        'profile.hiddenBoards': hiddenBoardsAfter(user.profile && user.profile.hiddenBoards, boardId, true) } });
+    }
+    return true;
+  },
+
+  // #4265: bring a hidden board back to All Boards (Member Settings / Hidden
+  // boards). Only the caller's own list changes; access is the board's own.
+  async restoreHiddenBoard(boardId) {
+    check(boardId, String);
+    if (!this.userId) throw new Meteor.Error('error-notAuthorized');
+    const user = await ReactiveCache.getUser(this.userId);
+    const { hiddenBoardsAfter } = require('/models/lib/boardInvites');
+    await Users.updateAsync(this.userId, { $set: {
+      'profile.hiddenBoards': hiddenBoardsAfter(user && user.profile && user.profile.hiddenBoards, boardId, false) } });
     return true;
   },
 
   async acceptInvite(boardId) {
     check(boardId, String);
+    if (!this.userId) throw new Meteor.Error('error-notAuthorized');
     const board = await ReactiveCache.getBoard(boardId);
     if (!board) {
       throw new Meteor.Error('error-board-doesNotExist');
+    }
+
+    // #4730: only a user actually holding an invitation to this board may
+    // (re)activate their member entry. Previously this method set
+    // members.$.isActive = true unconditionally, which (a) re-activated the
+    // membership right after the decline flow's quitBoard call, so a declined
+    // board stayed in the personal overview, and (b) let a member an admin had
+    // removed re-add themselves by calling this method directly.
+    const user = await ReactiveCache.getUser(this.userId);
+    const plan = planAcceptInvite({
+      isInvited: isInvitedToBoard(user && user.profile, boardId),
+    });
+    if (!plan.ok) {
+      return false;
     }
 
     await Meteor.users.updateAsync(this.userId, {
@@ -176,6 +369,7 @@ Meteor.methods({
         },
       },
     );
+    return true;
   },
 
   async myLabelNames() {
@@ -198,28 +392,14 @@ Meteor.methods({
     return [...new Set(boards.map(board => board.title))].sort();
   },
 
-  async setAllBoardsHideActivities() {
-    const currentUser = await ReactiveCache.getCurrentUser();
-    if (!(currentUser || {}).isAdmin) {
-      return false;
-    }
-
-    await Boards.updateAsync(
-      {
-        showActivities: true,
-      },
-      {
-        $set: {
-          showActivities: false,
-        },
-      },
-      {
-        multi: true,
-      },
-    );
-    return true;
-  },
-
+  // setAllBoardsHideActivities() was here. It bulk-set showActivities:false on
+  // EVERY board document, which overwrote each board's own value for good and
+  // still did nothing for boards created afterwards. Hiding activities
+  // everywhere is one global setting now - Admin Panel / Settings / Hide board
+  // activities on all boards, stored as Settings.hideBoardActivitiesOnAllBoards
+  // and read once by the activity feed - so turning it off restores every
+  // board's own setting. The method is removed rather than left callable: it is
+  // unreachable from the UI and its only effect was the destructive write.
   async archiveBoard(boardId) {
     check(boardId, String);
     const board = await ReactiveCache.getBoard(boardId);
@@ -239,6 +419,111 @@ Meteor.methods({
 
     await board.archive();
     return true;
+  },
+
+  // The other direction, and gated the same way. Restoring puts a board back in
+  // front of everyone who can see it, so it is a board-admin action exactly as
+  // archiving is - and the two must agree, or one of them is the way round the
+  // check.
+  //
+  // It exists because a board can now be brought back by DRAGGING it out of the
+  // Archive, one board or a whole multi-selection at a time; the archive page's
+  // own button called `board.restore()` straight from the client, which the
+  // allow rules permit for a board admin but which cannot answer for a list of
+  // boards or say why it refused. docs/Features/All-Boards/Archive.md
+  async restoreBoard(boardId) {
+    check(boardId, String);
+    const board = await ReactiveCache.getBoard(boardId);
+    if (!board) {
+      throw new Meteor.Error('error-board-doesNotExist');
+    }
+
+    const userId = this.userId;
+    const user = await ReactiveCache.getUser(userId);
+    if (!board.hasAdmin(userId) && !(user && user.isAdmin)) {
+      throw new Meteor.Error('error-board-notAdmin');
+    }
+
+    await board.restore();
+    return true;
+  },
+
+  // Permanently remove archived boards selected in All Boards / Archive.
+  // The server enforces every gate even against a forged DDP call: Global
+  // Admin, the explicit permanent-delete setting, and archived boards only.
+  // Validate the whole selection before deleting the first board so one bad id
+  // cannot leave a partially applied bulk action.
+  async permanentlyDeleteArchivedBoards(boardIds) {
+    const attemptedIds = Array.isArray(boardIds)
+      ? [...new Set(boardIds.filter(id => typeof id === 'string'))].slice(0, 200)
+      : [];
+    let attemptedBoards = attemptedIds.map(_id => ({ _id, title: '' }));
+    let user;
+    let username = 'unknown';
+
+    try {
+      // audit-argument-checks must see the method argument before the first
+      // await. Otherwise the asynchronous user lookup can leave the audit
+      // context believing boardIds was never checked and mask the real result
+      // with "Did not check() all arguments".
+      check(boardIds, [String]);
+      user = this.userId && await ReactiveCache.getUser(this.userId);
+      username = user?.username || user?._id || 'unknown';
+      const ids = [...new Set(boardIds)];
+      if (!ids.length || ids.length > 200) {
+        throw new Meteor.Error('invalid-board-selection');
+      }
+
+      const foundBoards = await Boards.find(
+        { _id: { $in: ids } },
+        { fields: { _id: 1, title: 1, archived: 1 } },
+      ).fetchAsync();
+      const foundById = new Map(foundBoards.map(board => [board._id, board]));
+      attemptedBoards = ids.map(_id => foundById.get(_id) || { _id, title: '' });
+
+      if (user?.isAdmin !== true || !getFeatureFlags().enablePermanentDelete) {
+        throw new Meteor.Error('not-authorized', 'Permanent delete is disabled.');
+      }
+      if (foundBoards.length !== ids.length || foundBoards.some(board => !board.archived)) {
+        throw new Meteor.Error(
+          'not-archived',
+          'Only archived boards can be permanently deleted.',
+        );
+      }
+      for (const board of foundBoards) {
+        await Boards.removeAsync(board._id);
+        await recordRecoveryAudit({
+          type: RecoveryEvents.types.BOARD_PERMANENTLY_DELETED,
+          user,
+          connection: this.connection,
+          done: true,
+          deletedData: true,
+          boards: [board],
+          detail: `Global Admin ${username} (${user._id}) permanently deleted board ${board._id} titled ${JSON.stringify(board.title || '')}.`,
+        });
+      }
+      return { deleted: foundBoards.length };
+    } catch (error) {
+      // A malformed argument still belongs in Recovery. Resolve the actor here
+      // only when validation failed before the ordinary lookup above.
+      if (!user && this.userId) {
+        try {
+          user = await ReactiveCache.getUser(this.userId);
+          username = user?.username || user?._id || 'unknown';
+        } catch {
+          // Best effort: the original deletion error is the one returned.
+        }
+      }
+      await recordRecoveryAudit({
+        type: RecoveryEvents.types.BOARD_PERMANENTLY_DELETED,
+        user,
+        connection: this.connection,
+        done: false,
+        boards: attemptedBoards,
+        detail: `User ${username} (${user?._id || 'not logged in'}) failed to permanently delete boards ${attemptedBoards.map(board => `${board._id} titled ${JSON.stringify(board.title || '')}`).join(', ') || '(none)'}: ${error.reason || error.message || 'unknown error'}.`,
+      });
+      throw error;
+    }
   },
 
   async setBoardOrgs(boardOrgsArray, currBoardId) {
@@ -262,6 +547,13 @@ Meteor.methods({
       check(org.orgId, String);
       check(org.orgDisplayName, String);
       check(org.isActive, Boolean);
+    }
+    // #5141: only organizations the board admin belongs to may be added.
+    const orgUser = await Meteor.users.findOneAsync(userId, { fields: { orgs: 1, isAdmin: 1 } });
+    const { forbiddenNewGroupIds } = require('/models/lib/boardGroupLinks');
+    if (forbiddenNewGroupIds({ previous: board.orgs, next: boardOrgsArray, key: 'orgId',
+      ownIds: ((orgUser && orgUser.orgs) || []).map(o => o && o.orgId), isSiteAdmin: !!(orgUser && orgUser.isAdmin) }).length) {
+      throw new Meteor.Error('not-authorized', 'You can add only organizations you belong to.');
     }
 
     await Boards.updateAsync(currBoardId, {
@@ -294,6 +586,13 @@ Meteor.methods({
       check(team.teamDisplayName, String);
       check(team.isActive, Boolean);
     }
+    // #5141: only teams the board admin belongs to may be added.
+    const teamUser = await Meteor.users.findOneAsync(userId, { fields: { teams: 1, isAdmin: 1 } });
+    const { forbiddenNewGroupIds } = require('/models/lib/boardGroupLinks');
+    if (forbiddenNewGroupIds({ previous: board.teams, next: boardTeamsArray, key: 'teamId',
+      ownIds: ((teamUser && teamUser.teams) || []).map(t => t && t.teamId), isSiteAdmin: !!(teamUser && teamUser.isAdmin) }).length) {
+      throw new Meteor.Error('not-authorized', 'You can add only teams you belong to.');
+    }
 
     for (const member of membersArray) {
       check(member.userId, String);
@@ -308,16 +607,175 @@ Meteor.methods({
       if (member.isReadAssignedOnly !== undefined) check(member.isReadAssignedOnly, Boolean);
     }
 
+    // #5730: setBoardTeams used to blindly overwrite board.members with the
+    // client-supplied `membersArray`. When the caller's board document was stale
+    // (e.g. a user had just been added via inviteUserToBoard on the server and
+    // that change had not yet propagated to the caller's client), the overwrite
+    // silently dropped members — and in the worst case the board's own admin —
+    // which made the whole board vanish from that user's board list. Because a
+    // wholesale `$set: { members }` never goes through foreachRemovedMember(),
+    // no removeBoardMember activity was logged and no card/watcher/star cleanup
+    // ran, so "the logs look normal and nothing seems to be out of order".
+    //
+    // Reconcile against the AUTHORITATIVE server-side members instead of trusting
+    // the client snapshot (see reconcileBoardTeamMembers for the full rationale):
+    //  - never drop an active admin (this is what made the board disappear),
+    //  - keep every existing member the client still lists,
+    //  - add the members the client introduces (team-derived users),
+    //  - only remove non-admin members the client explicitly omitted (an
+    //    intentional team-leave), logging + cleaning up each such removal below
+    //    so it is auditable rather than silent.
+    // #4178: a member the team brings carries the board's active teams they
+    // belong to, so leaving those teams takes the membership away again.
+    // Add every member of an assigned active team, since the browser of a non-site-admin cannot see them
+    const assignedTeamIds = boardTeamsArray.filter(t => t.isActive !== false).map(t => t.teamId);
+    if (assignedTeamIds.length > 0) {
+      const teamUsers = await Meteor.users.find({ 'teams.teamId': { $in: assignedTeamIds } }, { fields: { _id: 1 } }).fetchAsync();
+      for (const teamUser of teamUsers) {
+        if (!membersArray.some(m => m.userId === teamUser._id)) {
+          membersArray.push({ userId: teamUser._id, isAdmin: false, isActive: true, isNoComments: false, isCommentOnly: false, isWorker: false });
+        }
+      }
+    }
+    const activeTeamIds = boardTeamsArray.filter(t => t.isActive).map(t => t.teamId);
+    const newIds = membersArray.map(m => m.userId).filter(id => !board.members.some(m => m && m.userId === id));
+    const teamsOfNew = new Map();
+    for (const user of await Meteor.users.find({ _id: { $in: newIds } }, { fields: { teams: 1 } }).fetchAsync()) {
+      teamsOfNew.set(user._id, (user.teams || []).map(t => t && t.teamId).filter(id => activeTeamIds.includes(id)));
+    }
+    const { members: resultMembers, removedMemberIds } =
+      reconcileBoardTeamMembers(board.members, membersArray, id => (teamsOfNew.get(id) || []).map(t => `team:${t}`));
+
     await Boards.updateAsync(currBoardId, {
       $set: {
-        members: membersArray,
+        members: resultMembers,
         teams: boardTeamsArray,
       },
     });
+
+    // Run the same cleanup + audit trail that a normal member removal performs,
+    // so team-leave removals are not silent (see comment above).
+    for (const memberId of removedMemberIds) {
+      await Cards.updateAsync(
+        { boardId: currBoardId },
+        { $pull: { members: memberId, watchers: memberId } },
+        { multi: true },
+      );
+      await Lists.updateAsync(
+        { boardId: currBoardId },
+        { $pull: { watchers: memberId } },
+        { multi: true },
+      );
+      // #3249: a star stays while the board remains readable to them.
+      if (!readableWithoutMembership(board.permission, true)) {
+        await Users.updateAsync(memberId, {
+          $pull: { 'profile.starredBoards': currBoardId },
+        });
+      }
+      await Activities.insertAsync({
+        userId,
+        memberId,
+        type: 'member',
+        activityType: 'removeBoardMember',
+        boardId: currBoardId,
+      });
+    }
+  },
+
+  async setBoardDomains(boardDomainsArray, currBoardId) {
+    check(boardDomainsArray, Array);
+    check(currBoardId, String);
+
+    const userId = this.userId;
+    if (!userId) {
+      throw new Meteor.Error('not-authorized', 'You must be logged in to perform this action.');
+    }
+
+    const board = await ReactiveCache.getBoard(currBoardId);
+    if (!board) {
+      throw new Meteor.Error('board-not-found', 'Board not found.');
+    }
+    if (!allowIsBoardAdmin(userId, board)) {
+      throw new Meteor.Error('not-authorized', 'You must be a board admin to perform this action.');
+    }
+
+    // #5850: domains are free-form, so normalise and validate each entry before
+    // storing. Every domain must be a non-empty, trimmed, lowercased string that
+    // looks like a domain (contains a '.' and no '@' or whitespace).
+    const normalizedDomains = [];
+    const seen = new Set();
+    for (const entry of boardDomainsArray) {
+      check(entry, Object);
+      check(entry.domain, String);
+      check(entry.isActive, Boolean);
+
+      const domain = entry.domain.trim().toLowerCase();
+      if (
+        domain.length === 0 ||
+        domain.indexOf('.') < 0 ||
+        domain.indexOf('@') >= 0 ||
+        /\s/.test(domain)
+      ) {
+        throw new Meteor.Error('invalid-domain', `Invalid domain: ${entry.domain}`);
+      }
+      if (seen.has(domain)) {
+        continue;
+      }
+      seen.add(domain);
+      normalizedDomains.push({ domain, isActive: entry.isActive });
+    }
+
+    await Boards.updateAsync(currBoardId, {
+      $set: {
+        domains: normalizedDomains,
+      },
+    });
+  },
+
+  // #5850: add a single email domain to a board, leaving any existing domains in
+  // place. Mirrors the array-based setBoardDomains above and reuses it so the
+  // same auth check and validation apply.
+  async addBoardDomain(domain, currBoardId) {
+    check(domain, String);
+    check(currBoardId, String);
+
+    const board = await ReactiveCache.getBoard(currBoardId);
+    const domains = (board && board.domains) ? board.domains.slice() : [];
+    const normalized = domain.trim().toLowerCase();
+    if (!domains.some(d => d.domain === normalized)) {
+      domains.push({ domain: normalized, isActive: true });
+    }
+    return Meteor.callAsync('setBoardDomains', domains, currBoardId);
+  },
+
+  // #5850: remove a single email domain from a board.
+  async removeBoardDomain(domain, currBoardId) {
+    check(domain, String);
+    check(currBoardId, String);
+
+    const board = await ReactiveCache.getBoard(currBoardId);
+    const domains = (board && board.domains) ? board.domains : [];
+    const normalized = domain.trim().toLowerCase();
+    const filtered = domains.filter(d => d.domain !== normalized);
+    return Meteor.callAsync('setBoardDomains', filtered, currBoardId);
   },
 });
 
 Boards.before.insert(async (userId, doc) => {
+  // Trusted copies, imports and lazy helper creation bypass collection allow
+  // rules too. Enforce the instance policy at the shared insertion boundary.
+  if (isOpenPermission(doc.permission)) {
+    const privateOnly = await TableVisibilityModeSettings.findOneAsync('tableVisibilityMode-allowPrivateOnly');
+    if (privateOnly?.booleanValue) {
+      doc.permission = 'private';
+      try {
+        require('/server/lib/securityLog').record({
+          key: 'authz.board-visibility', action: 'blocked', source: 'board:insert-policy',
+          detail: 'Public or instance-wide board insertion overridden by private-only policy.',
+        });
+      } catch (e) { /* logging must never break the guard */ }
+    }
+  }
   const lastBoard = await ReactiveCache.getBoard(
     { sort: { $exists: true } },
     { sort: { sort: -1 } },
@@ -337,6 +795,20 @@ Meteor.startup(async () => {
     { unique: true },
   );
   await ensureIndex(Boards, { 'members.userId': 1 });
+  // The Boards report pages by the boards' own order, and the archive pages the
+  // archived ones of a member - both counted with the same selector, so both are
+  // index-backed rather than a scan + in-memory sort.
+  await ensureIndex(Boards, { sort: 1 });
+  await ensureIndex(Boards, { archived: 1, 'members.userId': 1 });
+  // All Boards always filters these two scalar fields and sorts by `sort`.
+  // Keep that common prefix index-backed. The relationship branches use
+  // document-form $elemMatch; FerretDB v1 pushes those through json_each, so
+  // simple dotted org/team/domain indexes cannot accelerate them.
+  await ensureIndex(Boards, { archived: 1, type: 1, sort: 1 });
+  // The daily due-date reminder looks up the few boards with their own
+  // reminder days (Board Settings / Notifications). A sparse index holds only
+  // those boards, so the lookup no longer reads every board.
+  await ensureIndex(Boards, { dueReminderDays: 1 }, { sparse: true });
 });
 
 Boards.after.insert(async (userId, doc) => {
@@ -383,6 +855,8 @@ Boards.before.update((userId, doc, fieldNames, modifier) => {
       {
         $pull: {
           members: memberId,
+          requesters: memberId,
+          assigners: memberId,
           watchers: memberId,
         },
       },
@@ -402,7 +876,8 @@ Boards.before.update((userId, doc, fieldNames, modifier) => {
     const board = Boards._transform(doc);
     await board.setWatcher(memberId, false);
 
-    if (!board.isPublic()) {
+    // #3249: a star stays while the board remains readable to them.
+    if (!readableWithoutMembership(board.permission, true)) {
       await Users.updateAsync(memberId, {
         $pull: {
           'profile.starredBoards': boardId,
@@ -473,50 +948,81 @@ WebApp.handlers.get('/api/users/:userId/boards', async function(req, res) {
     const paramUserId = req.params.userId;
     await Authentication.checkAdminOrCondition(req.userId, req.userId === paramUserId);
 
+    // GHSA-r8r3-23vr-8jh6: a membership counts only while it is ACTIVE. The
+    // dotted `'members.userId'` match ignored `isActive`, and removing a member
+    // does not delete their entry - it sets `isActive: false` and `isAdmin:
+    // false` and keeps it - so a removed member's own board listing went on
+    // showing the board's id and title for as long as the board existed.
+    // Reading the board itself was already refused, which bounded this to the
+    // id and the title; the id is the part that matters, since it is what the
+    // rest of the API is addressed by. `$elemMatch` is what the same revoke
+    // means everywhere else (models/lib/boardVisibilitySelectors.js).
     const boards = await ReactiveCache.getBoards(
       {
         archived: false,
-        'members.userId': paramUserId,
+        members: { $elemMatch: { userId: paramUserId, isActive: true } },
       },
       {
         sort: { sort: 1 },
       },
     );
-    const data = boards.map(board => ({
+    // A caller whose membership was REVOKED still has an entry, so the boards
+    // this listing now withholds are countable - and a removed member coming
+    // back to look is the attempt worth showing in Admin Panel / Problems.
+    // Counted, not named: the point is that somebody is still asking, and the
+    // board titles are the thing being withheld.
+    try {
+      const revoked = await ReactiveCache.getBoards(
+        {
+          archived: false,
+          members: { $elemMatch: { userId: paramUserId, isActive: false } },
+        },
+        { fields: { _id: 1 } },
+      );
+      if (revoked && revoked.length) {
+        require('/server/lib/securityLog').record({
+          key: 'authz.board-list', action: 'blocked',
+          source: 'GET /api/users/:userId/boards',
+          userId: req.userId,
+          detail: `withheld ${revoked.length} board(s) whose membership is revoked`,
+        });
+      }
+    } catch (e) { /* logging must never break the guard */ }
+    // #5582: hide internal helper boards (caret-wrapped titles like `^Subtasks^`
+    // and non-`board` types such as `list`/`template`) from the REST API, the
+    // same way the UI board list does.
+    const data = filterUserBoards(boards).map(board => ({
       _id: board._id,
       title: board.title,
     }));
 
     sendJsonResult(res, { code: 200, data });
   } catch (error) {
-    sendJsonResult(res, {
-      code: 200,
-      data: error,
-    });
+    sendJsonResult(res, publicErrorData(error));
   }
 });
 
 WebApp.handlers.get('/api/boards', async function(req, res) {
   try {
     await Authentication.checkUserId(req.userId);
+    // #3249: the caller is authenticated, so 'instance' boards are listed too.
     const boards = await ReactiveCache.getBoards(
-      { permission: 'public' },
+      { $or: withoutMembershipSelectors(true) },
       {
         sort: { sort: 1 },
       },
     );
     sendJsonResult(res, {
       code: 200,
-      data: boards.map(doc => ({
+      // #5582: exclude internal helper boards (caret-wrapped titles / non-board
+      // types) from the public boards listing.
+      data: filterUserBoards(boards).map(doc => ({
         _id: doc._id,
         title: doc.title,
       })),
     });
   } catch (error) {
-    sendJsonResult(res, {
-      code: 200,
-      data: error,
-    });
+    sendJsonResult(res, publicErrorData(error));
   }
 });
 
@@ -525,18 +1031,17 @@ WebApp.handlers.get('/api/boards_count', async function(req, res) {
     await Authentication.checkUserId(req.userId);
     const privateBoards = await ReactiveCache.getBoards({ permission: 'private' });
     const publicBoards = await ReactiveCache.getBoards({ permission: 'public' });
+    const instanceBoards = await ReactiveCache.getBoards({ permission: 'instance' });
     sendJsonResult(res, {
       code: 200,
       data: {
         private: privateBoards.length,
         public: publicBoards.length,
+        instance: instanceBoards.length,
       },
     });
   } catch (error) {
-    sendJsonResult(res, {
-      code: 200,
-      data: error,
-    });
+    sendJsonResult(res, publicErrorData(error));
   }
 });
 
@@ -551,16 +1056,15 @@ WebApp.handlers.get('/api/boards/:boardId', async function(req, res) {
       data: board,
     });
   } catch (error) {
-    sendJsonResult(res, {
-      code: 200,
-      data: error,
-    });
+    sendJsonResult(res, publicErrorData(error));
   }
 });
 
 WebApp.handlers.post('/api/boards', async function(req, res) {
   try {
     Authentication.checkLoggedIn(req.userId);
+    // CreateBleed: "Only admins can create boards" holds for the API too.
+    await assertMayCreateBoard(req.userId, { source: 'rest:POST /api/boards', type: 'board' });
     const allowPrivateOnly =
       (await TableVisibilityModeSettings.findOneAsync('tableVisibilityMode-allowPrivateOnly'))?.booleanValue;
     const permission = allowPrivateOnly ? 'private' : (req.body.permission || 'private');
@@ -568,12 +1072,15 @@ WebApp.handlers.post('/api/boards', async function(req, res) {
       title: req.body.title,
       members: [
         {
-          userId: req.body.owner,
-          isAdmin: req.body.isAdmin || true,
-          isActive: req.body.isActive || true,
-          isNoComments: req.body.isNoComments || false,
-          isCommentOnly: req.body.isCommentOnly || false,
-          isWorker: req.body.isWorker || false,
+          // The authenticated caller is always the initial owner. An `owner`
+          // field in the body must not let one user inject boards into another
+          // user's account.
+          userId: req.userId,
+          isAdmin: true,
+          isActive: true,
+          isNoComments: false,
+          isCommentOnly: false,
+          isWorker: false,
         },
       ],
       permission,
@@ -592,17 +1099,121 @@ WebApp.handlers.post('/api/boards', async function(req, res) {
       },
     });
   } catch (error) {
-    sendJsonResult(res, {
-      code: 200,
-      data: error,
-    });
+    sendJsonResult(res, publicErrorData(error));
+  }
+});
+
+/**
+ * @operation import_board
+ * @tag Boards
+ * @summary Import a whole board (with its lists, cards, swimlanes, custom fields
+ * and automation rules) from a WeKan board export
+ *
+ * @description Accepts a WeKan board export JSON (the body returned by
+ * `GET /api/boards/:boardId/export`) and recreates the board — including its
+ * **rules / triggers / actions (workflows)** and other data — in the
+ * authenticated user's account. Combined with the export endpoint, this allows
+ * migrating all boards (and their workflows) from another WeKan instance over the
+ * REST API: list the remote boards, export each, then POST each here. An optional
+ * `membersMapping` ({ sourceUserId: localUserId }) maps members; unmapped members
+ * are simply not added.
+ *
+ * @param {object} board the WeKan board export object
+ * @param {object} [membersMapping] map of source user id -> local user id
+ * @return_type {_id: string}
+ */
+WebApp.handlers.post('/api/boards/import', async function(req, res) {
+  try {
+    Authentication.checkLoggedIn(req.userId);
+    const board = req.body && req.body.board;
+    if (!board || typeof board !== 'object') {
+      sendJsonResult(res, { code: 400, data: { error: 'Missing board export object' } });
+      return;
+    }
+    const additionalData = {};
+    if (req.body.membersMapping && typeof req.body.membersMapping === 'object') {
+      additionalData.membersMapping = req.body.membersMapping;
+    }
+    // Use the same method as UI imports: one authorization, validation,
+    // sanitization and timeout boundary for every transport.
+    const boardId = await DDP._CurrentMethodInvocation.withValue(
+      { userId: req.userId },
+      async () => Meteor.callAsync('importBoard', board, additionalData, 'wekan', null),
+    );
+    sendJsonResult(res, { code: 200, data: { _id: boardId } });
+  } catch (error) {
+    sendJsonResult(res, publicErrorData(error));
+  }
+});
+
+/**
+ * @operation import_board_from
+ * @tag Boards
+ * @summary Import a board from another tool's export
+ *
+ * @description Generalized import: `:source` is one of `trello`, `wekan`, `csv`,
+ * `jira`, `kanboard`, `excel`, `deck` (NextCloud Deck), `openproject`, `github`,
+ * `gitlab`, `gitea`, `forgejo`, `asana`, `zenkit`. The request body is that
+ * tool's export JSON (sent directly, or wrapped as `{ "board": <export> }`);
+ * an optional `membersMapping` maps members. Reuses the same import engine as
+ * the UI.
+ *
+ * @param {string} source the import source
+ * @param {object} board the source export object (or send it as the body)
+ * @param {object} [membersMapping] map of source user id -> local user id
+ * @param {string} [splitBy] "swimlane": one board per project (per swimlane)
+ * @param {object} [csvMapping] CSV/TSV and Excel only: which column holds
+ *   which card field, `{ columns: { title: 0, list: 2, ... }, listName,
+ *   customFieldColumns: [5] }` (column numbers from 0); without it the
+ *   columns are read by their header names
+ * @return_type {_id: string}
+ */
+WebApp.handlers.post('/api/boards/import/:source', async function(req, res) {
+  try {
+    Authentication.checkLoggedIn(req.userId);
+    const source = req.params.source;
+    const body = req.body || {};
+    const board = body.board !== undefined ? body.board : body;
+    const additionalData = {};
+    if (body.membersMapping && typeof body.membersMapping === 'object') {
+      additionalData.membersMapping = body.membersMapping;
+    }
+    // "One board per project" (models/lib/importSplit.js).
+    if (body.splitBy === 'swimlane') additionalData.splitBy = 'swimlane';
+    // Who the file's people become: map, placeholder or me (models/lib/importMembersMode.js).
+    if (['map', 'placeholder', 'me'].includes(body.membersMode)) additionalData.membersMode = body.membersMode;
+    // The column mapping of a CSV/TSV or Excel import
+    // (models/lib/csvImportMapping.js); importBoard checks it again.
+    if (body.csvMapping !== undefined) {
+      if (!isCsvMappingShape(body.csvMapping)) {
+        throw new Meteor.Error('invalid-import-mapping', 'csvMapping is not a valid column mapping');
+      }
+      additionalData.csvMapping = body.csvMapping;
+    }
+    // The sign-in for the attachment files of a Jira, Deck, OpenProject, Asana
+    // or GitLab import (models/lib/importAttachmentAuth.js), for this call only.
+    if (body.attachmentAuth !== undefined) {
+      if (!isAttachmentAuthShape(body.attachmentAuth)) {
+        throw new Meteor.Error('invalid-import-format', 'attachmentAuth is { url, username, token } strings');
+      }
+      additionalData.attachmentAuth = body.attachmentAuth;
+    }
+    const boardId = await DDP._CurrentMethodInvocation.withValue(
+      { userId: req.userId },
+      async () => Meteor.callAsync('importBoard', board, additionalData, source, null),
+    );
+    sendJsonResult(res, { code: 200, data: { _id: boardId } });
+  } catch (error) {
+    // A mapping that does not fit the file is the caller's mistake, not the server's.
+    if (error && error.error === 'invalid-import-mapping') error.statusCode = 400;
+    sendJsonResult(res, publicErrorData(error));
   }
 });
 
 WebApp.handlers.delete('/api/boards/:boardId', async function(req, res) {
   try {
-    await Authentication.checkUserId(req.userId);
     const id = req.params.boardId;
+    await Authentication.checkBoardAdmin(req.userId, id);
     await Boards.removeAsync({ _id: id });
     sendJsonResult(res, {
       code: 200,
@@ -611,17 +1222,14 @@ WebApp.handlers.delete('/api/boards/:boardId', async function(req, res) {
       },
     });
   } catch (error) {
-    sendJsonResult(res, {
-      code: 200,
-      data: error,
-    });
+    sendJsonResult(res, publicErrorData(error));
   }
 });
 
 WebApp.handlers.put('/api/boards/:boardId/title', async function(req, res) {
   try {
     const boardId = req.params.boardId;
-    await Authentication.checkBoardWriteAccess(req.userId, boardId);
+    await Authentication.checkBoardAdmin(req.userId, boardId);
     const title = req.body.title;
 
     await Boards.direct.updateAsync({ _id: boardId }, { $set: { title } });
@@ -634,10 +1242,7 @@ WebApp.handlers.put('/api/boards/:boardId/title', async function(req, res) {
       },
     });
   } catch (error) {
-    sendJsonResult(res, {
-      code: 200,
-      data: error,
-    });
+    sendJsonResult(res, publicErrorData(error));
   }
 });
 
@@ -653,6 +1258,10 @@ WebApp.handlers.put('/api/boards/:boardId/labels', async function(req, res) {
     sendJsonResult(res, { code: 401, data: { error: 'Unauthorized' } });
     return;
   }
+  if (!board) {
+    sendJsonResult(res, { code: 404, data: { error: 'Board not found' } });
+    return;
+  }
   const isBoardAdmin = allowIsBoardAdmin(req.userId, board);
   const isSiteAdmin = isBoardAdmin
     ? true
@@ -662,29 +1271,38 @@ WebApp.handlers.put('/api/boards/:boardId/labels', async function(req, res) {
     return;
   }
   try {
-    if (Object.prototype.hasOwnProperty.call(req.body, 'label')) {
-      const color = req.body.label.color;
-      const name = req.body.label.name;
-      const labelId = Random.id(6);
-      if (!board.getLabel(name, color)) {
-        await Boards.direct.updateAsync(
-          { _id: id },
-          { $push: { labels: { _id: labelId, name, color } } },
-        );
-        sendJsonResult(res, {
-          code: 200,
-          data: labelId,
-        });
-      } else {
-        sendJsonResult(res, {
-          code: 200,
-        });
-      }
+    // Issue #5510: always return a JSON response. buildBoardLabel normalizes the
+    // accepted request shapes and rejects bad input with a 4xx (rather than pushing
+    // a schema-invalid label or, when `label` was absent, never responding at all so
+    // the request hung until the client timed out).
+    const built = buildBoardLabel((req.body || {}).label, LABEL_COLORS);
+    if (!built.ok) {
+      sendJsonResult(res, {
+        code: built.status || 400,
+        data: { error: built.error },
+      });
+      return;
     }
-  } catch (error) {
+    const { name, color } = built;
+    const existing = board.getLabel(name, color);
+    if (existing) {
+      sendJsonResult(res, {
+        code: 200,
+        data: existing._id,
+      });
+      return;
+    }
+    const labelId = Random.id(6);
+    await Boards.direct.updateAsync(
+      { _id: id },
+      { $push: { labels: { _id: labelId, name, color } } },
+    );
     sendJsonResult(res, {
-      data: error,
+      code: 200,
+      data: labelId,
     });
+  } catch (error) {
+    sendJsonResult(res, publicErrorData(error));
   }
 });
 
@@ -692,12 +1310,27 @@ WebApp.handlers.put('/api/boards/:boardId/labels', async function(req, res) {
 // shown under Board Settings that control which fields/badges appear on cards and
 // minicards). Board-level only — per-user presentation settings are out of scope.
 const BOARD_CARD_SETTING_KEYS = [
+  'allowsSwimlaneDragging',
+  'allowsListDragging',
+  'allowsCardDragging',
+  'allowsChecklistDragging',
+  'allowsChecklistItemDragging',
+  'allowsSubtaskDragging',
+
+  'allowsMinicardCollapse',
+  'labelsAboveTitleOnMinicard',
+  'allowsChecklistDueDate',
+  'allowsChecklistTitle',
+
   'allowsCardCounterList',
+  'cardAging',
+  'askForMoveReason',
   'allowsBoardMemberList',
   'allowsShowLists',
   'allowsAttachments',
   'allowsChecklists',
   'allowsComments',
+  'allowsCommentsOnMinicard',
   'allowsDescriptionTitle',
   'allowsDescriptionText',
   'allowsActivities',
@@ -710,6 +1343,7 @@ const BOARD_CARD_SETTING_KEYS = [
   'allowsCardNumber',
   'allowsAssignedBy',
   'allowsReceivedDate',
+  'allowsSpentTime',
   'allowsStartDate',
   'allowsEndDate',
   'allowsDueDate',
@@ -730,13 +1364,95 @@ const BOARD_CARD_SETTING_KEYS = [
   'allowsRequestedByOnMinicard',
   'allowsAssignedByOnMinicard',
   'allowsReceivedDateOnMinicard',
+  'allowsSpentTimeOnMinicard',
   'allowsStartDateOnMinicard',
   'allowsEndDateOnMinicard',
   'allowsDueDateOnMinicard',
   'allowsSubtasksOnMinicard',
   'allowsShowListsOnMinicard',
+  'allowsSwimlaneNameOnMinicard',
+  'showLabelText',
+  // #6688: the sections/badges that had no toggle.
+  'allowsStickers',
+  'allowsStickersOnMinicard',
+  'allowsLocation',
+  'allowsDependencies',
+  'allowsDependenciesOnMinicard',
+  'allowsFlowtime',
+  'allowsPomodoro',
+  'allowsVote',
+  'allowsVoteOnMinicard',
+  'allowsPoker',
+  'allowsPokerOnMinicard',
+  'allowsTextNotes',
+  'allowsCommentCountOnMinicard',
+  // "Scrum settings: Work item type", Show on Minicard (2026-10-02).
+  'allowsIssueTypeOnMinicard',
+  // The sides every row gained on 2026-10-02.
+  'allowsCardColorOnCard',
+  'allowsCardColorOnMinicard',
+  'allowsParentCardOnCard',
+  'allowsParentCardOnMinicard',
+  'allowsLinkedCardOnCard',
+  'allowsLinkedCardOnMinicard',
+  'allowsCardButtonsOnCard',
+  'allowsDescriptionBadgeOnMinicard',
+  'allowsUnreadCommentsOnMinicard',
+  'allowsCardButtonsOnMinicard',
+  'allowsDescriptionBadgeOnCard',
+  'allowsUnreadCommentsOnCard',
+  // Helpers that need no AI (docs/Features/General/Assistants/Assistants.md).
+  'allowsDueFromTitleOnCard',
+  'allowsDueFromTitleOnMinicard',
+  'allowsSimilarCardsOnCard',
+  'allowsSimilarCardsOnMinicard',
+  'allowsAtRiskOnCard',
+  'allowsAtRiskOnMinicard',
+  'allowsSuggestedMembersOnCard',
+  'allowsForecastOnCard',
+  'allowsForecastOnMinicard',
+  'allowsChecklistFromDescriptionOnCard',
+  'allowsActionItemsOnCard',
+  'allowsWhiteboardOnCard',
+  'allowsAttachmentPreviewsOnCard',
+  'allowsAttachmentDetailsOnCard',
+  'allowsCardCollapse',
+  'allowsChecklistTitleOnMinicard',
+  'allowsLabelTextOnCard',
+  'labelsAboveTitleOnCard',
+  'allowsChecklistDueDateOnMinicard',
+  'allowsLocationOnMinicard',
+  'allowsSwimlaneNameOnCard',
+  'allowsFlowtimeOnMinicard',
+  'allowsPomodoroOnMinicard',
+  'allowsAttachmentListOnMinicard',
+  'allowsTextNotesOnMinicard',
+  'allowsCommentCountOnCard',
+  'allowsActivitiesOnMinicard',
 ];
 
+// #3984: numeric card-settings keys (parsed as integers, not booleans). These are
+// the board-configurable card-aging day thresholds for the three fade tiers.
+const BOARD_CARD_NUMERIC_SETTING_KEYS = [
+  'cardAgingDays1',
+  'cardAgingDays2',
+  'cardAgingDays3',
+];
+
+/**
+ * @operation get_board_card_settings
+ * @tag Boards
+ * @summary Get the Board Settings / Card Settings of a board
+ *
+ * @description The card feature toggles of Board Settings / Card Settings -
+ * which card fields and features this board offers (`allowsDescriptionTitle`,
+ * `allowsLabels`, `allowsChecklists`, `allowsAttachments`, `allowsComments`,
+ * `allowsActivities`, …, each `true`/`false`) - and the three card-aging day
+ * thresholds (`cardAgingDays1`..`cardAgingDays3`). Requires board access.
+ *
+ * @param {string} boardId the board ID
+ * @return_type {allowsDescriptionTitle: boolean, allowsLabels: boolean, allowsChecklists: boolean, allowsAttachments: boolean, allowsComments: boolean, allowsActivities: boolean, cardAgingDays1: number, cardAgingDays2: number, cardAgingDays3: number}
+ */
 WebApp.handlers.get('/api/boards/:boardId/cardSettings', async function(req, res) {
   const id = req.params.boardId;
   await Authentication.checkBoardAccess(req.userId, id);
@@ -749,12 +1465,40 @@ WebApp.handlers.get('/api/boards/:boardId/cardSettings', async function(req, res
   BOARD_CARD_SETTING_KEYS.forEach(key => {
     data[key] = board[key];
   });
+  BOARD_CARD_NUMERIC_SETTING_KEYS.forEach(key => {
+    data[key] = board[key];
+  });
   sendJsonResult(res, { code: 200, data });
 });
 
+/**
+ * @operation update_board_card_settings
+ * @tag Boards
+ * @summary Set the Board Settings / Card Settings of a board
+ *
+ * @description Sets any subset of the card feature toggles (any `allows*`
+ * key of the board, as `true`/`false`) and of the card-aging thresholds
+ * (`cardAgingDays1`..`cardAgingDays3`, non-negative integers). Keys not in
+ * the body are left as they are; a body with no recognised key is a 400.
+ * Requires board administrator access. Returns the settings in effect, in the same
+ * shape as GET.
+ *
+ * @param {string} boardId the board ID
+ * @param {boolean} [allowsDescriptionTitle] show the description title on cards
+ * @param {boolean} [allowsLabels] offer labels on cards
+ * @param {boolean} [allowsChecklists] offer checklists on cards
+ * @param {boolean} [allowsAttachments] offer attachments on cards
+ * @param {boolean} [allowsComments] offer comments on cards
+ * @param {boolean} [allowsActivities] show activities on cards
+ * @param {boolean} [cardAging] fade idle cards (card aging)
+ * @param {number} [cardAgingDays1] days until the first card-aging fade
+ * @param {number} [cardAgingDays2] days until the second card-aging fade
+ * @param {number} [cardAgingDays3] days until the third card-aging fade
+ * @return_type {allowsDescriptionTitle: boolean, allowsLabels: boolean, allowsChecklists: boolean, allowsAttachments: boolean, allowsComments: boolean, allowsActivities: boolean, cardAgingDays1: number, cardAgingDays2: number, cardAgingDays3: number}
+ */
 WebApp.handlers.put('/api/boards/:boardId/cardSettings', async function(req, res) {
   const id = req.params.boardId;
-  await Authentication.checkBoardWriteAccess(req.userId, id);
+  await Authentication.checkBoardAdmin(req.userId, id);
   const board = await ReactiveCache.getBoard(id);
   if (!board) {
     sendJsonResult(res, { code: 404, data: { error: 'Board not found' } });
@@ -767,6 +1511,12 @@ WebApp.handlers.put('/api/boards/:boardId/cardSettings', async function(req, res
       $set[key] = toBool(req.body[key]);
     }
   });
+  BOARD_CARD_NUMERIC_SETTING_KEYS.forEach(key => {
+    if (Object.prototype.hasOwnProperty.call(req.body, key)) {
+      const n = parseInt(req.body[key], 10);
+      if (!Number.isNaN(n) && n >= 0) $set[key] = n;
+    }
+  });
   if (Object.keys($set).length === 0) {
     sendJsonResult(res, { code: 400, data: { error: 'no recognized card settings in body' } });
     return;
@@ -777,25 +1527,40 @@ WebApp.handlers.put('/api/boards/:boardId/cardSettings', async function(req, res
   BOARD_CARD_SETTING_KEYS.forEach(key => {
     data[key] = updated[key];
   });
+  BOARD_CARD_NUMERIC_SETTING_KEYS.forEach(key => {
+    data[key] = updated[key];
+  });
   sendJsonResult(res, { code: 200, data });
 });
 
 WebApp.handlers.post('/api/boards/:boardId/copy', async function(req, res) {
   try {
     const id = req.params.boardId;
+    // ManageBoardBleed sibling (2026-10-02): the shared board-admin check -
+    // the hand-written one here had no isActive, so a REMOVED former admin
+    // could still copy the board, and an unknown id answered 500.
+    await Authentication.checkBoardAdmin(req.userId, id);
     const board = await ReactiveCache.getBoard(id);
-    const adminAccess = board.members.some(e => e.userId === req.userId && e.isAdmin);
-    await Authentication.checkAdminOrCondition(req.userId, adminAccess);
-    board.title = req.body.title || await Boards.uniqueTitle(board.title);
-    const ret = await board.copy();
+    // CreateBleed: a copy is a new board of the source's type.
+    await assertMayCreateBoard(req.userId, { source: 'rest:POST /api/boards/:boardId/copy', type: board && board.type });
+    // Only a string title is taken from the request, and it is applied to a
+    // separate object so the cached source board is not changed.
+    const title = typeof req.body?.title === 'string' && req.body.title ? req.body.title : await Boards.uniqueTitle(board.title);
+    const copy = Object.assign(Object.create(Object.getPrototypeOf(board)), board, { title });
+    const ret = await copy.copy();
     sendJsonResult(res, {
       code: 200,
       data: ret,
     });
   } catch (error) {
-    sendJsonResult(res, {
-      data: error,
-    });
+    // An exception must NOT be reported as HTTP 200: sendJsonResult defaults the
+    // status to 200 when no `code` is given, so `catch { data: error }` returned
+    // 200 with the error object as the body — a failed copy looked like a success
+    // whose response happened to be an error (the copy REST test then saw an
+    // object, not the new board id). Return a sanitized failure, and log the
+    // stack server-side so a failing copy is diagnosable instead of swallowed.
+    console.error('POST /api/boards/:boardId/copy failed:', error);
+    sendJsonResult(res, publicErrorData(error));
   }
 });
 
@@ -872,37 +1637,354 @@ WebApp.handlers.post('/api/boards/:boardId/members/:memberId', async function(re
       data: query,
     });
   } catch (error) {
-    sendJsonResult(res, {
-      code: 200,
-      data: error,
-    });
+    sendJsonResult(res, publicErrorData(error));
+  }
+});
+
+/**
+ * @operation get_board_domains
+ * @tag Boards
+ * @summary Get the email domains a board is shared with
+ *
+ * @description #5850: returns the `domains` array of a board. Each entry is an
+ * object `{ domain: "example.com", isActive: true }`. Requires a site admin
+ * (Authentication.checkUserId); a board's own members get the same list as
+ * part of GET /api/boards/:boardId.
+ *
+ * @param {string} boardId the board ID
+ * @return_type [{domain: string, isActive: boolean}]
+ */
+WebApp.handlers.get('/api/boards/:boardId/domains', async function(req, res) {
+  try {
+    await Authentication.checkUserId(req.userId);
+    const boardId = req.params.boardId;
+    const board = await ReactiveCache.getBoard(boardId);
+    if (!board) {
+      sendJsonResult(res, { code: 404, data: { error: 'Board not found' } });
+      return;
+    }
+    sendJsonResult(res, { code: 200, data: board.domains || [] });
+  } catch (error) {
+    sendJsonResult(res, publicErrorData(error));
+  }
+});
+
+/**
+ * @operation add_board_domain
+ * @tag Boards
+ * @summary Share a board with an email domain
+ *
+ * @description #5850: add a single email domain to a board's `domains` array
+ * with `isActive: true`, leaving any existing domains in place. The domain is
+ * trimmed and lowercased and must look like a domain (contain a '.', no '@' and
+ * no whitespace); it is added only if not already present. Requires the caller
+ * to be a board admin (or site admin). Returns the updated domains array.
+ *
+ * @param {string} boardId the board ID
+ * @param {string} domain the email domain to add, e.g. "example.com"
+ * @return_type [{domain: string, isActive: boolean}]
+ */
+WebApp.handlers.post('/api/boards/:boardId/domains', async function(req, res) {
+  try {
+    if (!req.userId) {
+      sendJsonResult(res, { code: 401, data: { error: 'Unauthorized' } });
+      return;
+    }
+    const boardId = req.params.boardId;
+    const authBoard = await ReactiveCache.getBoard(boardId);
+    if (!authBoard) {
+      sendJsonResult(res, { code: 404, data: { error: 'Board not found' } });
+      return;
+    }
+    const isBoardAdmin = allowIsBoardAdmin(req.userId, authBoard);
+    const isSiteAdmin = isBoardAdmin
+      ? true
+      : !!(await ReactiveCache.getUser({ _id: req.userId, isAdmin: true }));
+    if (!isBoardAdmin && !isSiteAdmin) {
+      sendJsonResult(res, { code: 403, data: { error: 'Only a board admin can change board domains' } });
+      return;
+    }
+    // #5850: normalise and validate the same way as setBoardDomains so the
+    // stored value is consistent however a domain is added.
+    const rawDomain = req.body && req.body.domain;
+    if (typeof rawDomain !== 'string') {
+      sendJsonResult(res, { code: 400, data: { error: 'Missing domain' } });
+      return;
+    }
+    const domain = rawDomain.trim().toLowerCase();
+    if (
+      domain.length === 0 ||
+      domain.indexOf('.') < 0 ||
+      domain.indexOf('@') >= 0 ||
+      /\s/.test(domain)
+    ) {
+      sendJsonResult(res, { code: 400, data: { error: `Invalid domain: ${rawDomain}` } });
+      return;
+    }
+    const domains = (authBoard.domains || []).slice();
+    if (!domains.some(d => d.domain === domain)) {
+      domains.push({ domain, isActive: true });
+    }
+    // Reuse the existing setBoardDomains method (same auth + validation).
+    await Meteor.callAsync('setBoardDomains', domains, boardId);
+    const updated = await ReactiveCache.getBoard(boardId);
+    sendJsonResult(res, { code: 200, data: updated.domains || [] });
+  } catch (error) {
+    sendJsonResult(res, publicErrorData(error));
+  }
+});
+
+/**
+ * @operation delete_board_domain
+ * @tag Boards
+ * @summary Stop sharing a board with an email domain
+ *
+ * @description #5850: remove a single email domain from a board's `domains`
+ * array. The domain in the path is trimmed and lowercased before matching.
+ * Requires the caller to be a board admin (or site admin). Returns the updated
+ * domains array.
+ *
+ * @param {string} boardId the board ID
+ * @param {string} domain the email domain to remove, e.g. "example.com"
+ * @return_type [{domain: string, isActive: boolean}]
+ */
+WebApp.handlers.delete('/api/boards/:boardId/domains/:domain', async function(req, res) {
+  try {
+    if (!req.userId) {
+      sendJsonResult(res, { code: 401, data: { error: 'Unauthorized' } });
+      return;
+    }
+    const boardId = req.params.boardId;
+    const authBoard = await ReactiveCache.getBoard(boardId);
+    if (!authBoard) {
+      sendJsonResult(res, { code: 404, data: { error: 'Board not found' } });
+      return;
+    }
+    const isBoardAdmin = allowIsBoardAdmin(req.userId, authBoard);
+    const isSiteAdmin = isBoardAdmin
+      ? true
+      : !!(await ReactiveCache.getUser({ _id: req.userId, isAdmin: true }));
+    if (!isBoardAdmin && !isSiteAdmin) {
+      sendJsonResult(res, { code: 403, data: { error: 'Only a board admin can change board domains' } });
+      return;
+    }
+    const normalized = String(req.params.domain || '').trim().toLowerCase();
+    const filtered = (authBoard.domains || []).filter(d => d.domain !== normalized);
+    // Reuse the existing setBoardDomains method (same auth + validation).
+    await Meteor.callAsync('setBoardDomains', filtered, boardId);
+    const updated = await ReactiveCache.getBoard(boardId);
+    sendJsonResult(res, { code: 200, data: updated.domains || [] });
+  } catch (error) {
+    sendJsonResult(res, publicErrorData(error));
   }
 });
 
 WebApp.handlers.get('/api/boards/:boardId/attachments', async function(req, res) {
-  const paramBoardId = req.params.boardId;
-  await Authentication.checkBoardAccess(req.userId, paramBoardId);
-  const attachments = await ReactiveCache.getAttachments(
-    { 'meta.boardId': paramBoardId },
-  );
-  sendJsonResult(res, {
-    code: 200,
-    data: attachments.map(attachment => ({
-      attachmentId: attachment._id,
-      attachmentName: attachment.name,
-      attachmentType: attachment.type,
-      url: (() => {
-        const attachmentUrl = attachment && typeof attachment.link === 'function' ? attachment.link() : '';
-        return attachmentUrl;
-      })(),
-      urlDownload: (() => {
-        const attachmentUrl = attachment && typeof attachment.link === 'function' ? attachment.link() : '';
-        return attachmentUrl ? `${attachmentUrl}?download=true&token=` : '';
-      })(),
-      boardId: attachment.meta.boardId,
-      swimlaneId: attachment.meta.swimlaneId,
-      listId: attachment.meta.listId,
-      cardId: attachment.meta.cardId,
-    })),
-  });
+  // A refusal (assigned-only members are refused board-wide reads) answers
+  // with its status, not the app page an unhandled rejection fell through to.
+  try {
+    const paramBoardId = req.params.boardId;
+    await Authentication.checkBoardAccess(req.userId, paramBoardId);
+    const attachments = await ReactiveCache.getAttachments(
+      liveAttachments({ 'meta.boardId': paramBoardId }),
+    );
+    sendJsonResult(res, {
+      code: 200,
+      data: attachments.map(attachment => ({
+        attachmentId: attachment._id,
+        attachmentName: attachment.name,
+        attachmentType: attachment.type,
+        url: (() => {
+          const attachmentUrl = attachment && typeof attachment.link === 'function' ? attachment.link() : '';
+          return attachmentUrl;
+        })(),
+        urlDownload: (() => {
+          const attachmentUrl = attachment && typeof attachment.link === 'function' ? attachment.link() : '';
+          return attachmentUrl ? `${attachmentUrl}?download=true&token=` : '';
+        })(),
+        boardId: attachment.meta.boardId,
+        swimlaneId: attachment.meta.swimlaneId,
+        listId: attachment.meta.listId,
+        cardId: attachment.meta.cardId,
+      })),
+    });
+  } catch (error) {
+    sendJsonResult(res, publicErrorData(error));
+  }
+});
+
+/**
+ * @operation get_board_card_field_order
+ * @tag Boards
+ * @summary Get the order of the opened card's sections
+ *
+ * @description The Board Settings "card field order": the sequence in which
+ * the opened card draws its Labels, Dates, Members, Custom Fields and
+ * Description sections. Always returns every one of the five keys exactly
+ * once, in effect - a board that never changed the setting gets the default
+ * `labels, dates, members, customFields, description`. Requires board access.
+ *
+ * @param {string} boardId the board ID
+ * @return_type {cardFieldOrder: [string], keys: [string]}
+ */
+WebApp.handlers.get('/api/boards/:boardId/cardFieldOrder', async function(req, res) {
+  try {
+    const paramBoardId = req.params.boardId;
+    await Authentication.checkBoardAccess(req.userId, paramBoardId);
+    const board = await ReactiveCache.getBoard(paramBoardId);
+    if (!board) {
+      sendJsonResult(res, { code: 404, data: { error: 'Board not found' } });
+      return;
+    }
+    const { applyCardFieldOrder, CARD_FIELD_ORDER_KEYS } = require('/models/lib/cardFieldOrder');
+    sendJsonResult(res, {
+      code: 200,
+      data: {
+        cardFieldOrder: applyCardFieldOrder(board.cardFieldOrder),
+        keys: CARD_FIELD_ORDER_KEYS.slice(),
+      },
+    });
+  } catch (error) {
+    sendJsonResult(res, publicErrorData(error));
+  }
+});
+
+/**
+ * @operation update_board_card_field_order
+ * @tag Boards
+ * @summary Set the order of the opened card's sections
+ *
+ * @description Stores a new card field order for the board. The order is
+ * normalised the way the card renders it: unknown keys are dropped,
+ * duplicates keep their first position, and any of the five keys left out is
+ * appended in its default position - so the card always draws every section
+ * exactly once. Requires the caller to be a board admin (or site admin).
+ * Returns the order in effect.
+ *
+ * @param {string} boardId the board ID
+ * @param {string} cardFieldOrder JSON array of section keys, e.g. ["description", "labels", "dates", "members", "customFields"]
+ * @return_type {cardFieldOrder: [string], keys: [string]}
+ */
+WebApp.handlers.put('/api/boards/:boardId/cardFieldOrder', async function(req, res) {
+  try {
+    const paramBoardId = req.params.boardId;
+    await Authentication.checkBoardAdmin(req.userId, paramBoardId);
+    let order = req.body ? req.body.cardFieldOrder : undefined;
+    if (typeof order === 'string') {
+      try {
+        order = JSON.parse(order);
+      } catch (e) {
+        order = order.split(',').map(s => s.trim());
+      }
+    }
+    if (!Array.isArray(order)) {
+      sendJsonResult(res, { code: 400, data: { error: 'cardFieldOrder must be an array of section keys' } });
+      return;
+    }
+    const { applyCardFieldOrder, CARD_FIELD_ORDER_KEYS } = require('/models/lib/cardFieldOrder');
+    const cardFieldOrder = applyCardFieldOrder(order);
+    await Boards.updateAsync(paramBoardId, { $set: { cardFieldOrder } });
+    sendJsonResult(res, {
+      code: 200,
+      data: { cardFieldOrder, keys: CARD_FIELD_ORDER_KEYS.slice() },
+    });
+  } catch (error) {
+    sendJsonResult(res, publicErrorData(error));
+  }
+});
+
+/**
+ * @operation get_board_view_settings
+ * @tag Boards
+ * @summary Get the Board Settings / Board View of a board
+ *
+ * @description Which entries of the Board View menu this board offers and
+ * which one it opens in, separately for when the board is public and when it
+ * is private, and the order the menu lists them in. `boardViewSettings` has
+ * every view key exactly once with both `showOnPublic` and `showOnPrivate`
+ * made explicit (a board that never opened the popup shows every view), the
+ * two defaults are resolved (missing or unknown reads as
+ * `board-view-swimlanes`), and `boardViewOrder` is made whole: every view
+ * exactly once, unknown keys dropped, missing ones appended in default order.
+ * `keys` lists the known view keys. Requires board access.
+ *
+ * @param {string} boardId the board ID
+ * @return_type {boardViewSettings: object, defaultPublicBoardView: string, defaultPrivateBoardView: string, boardViewOrder: [string], keys: [string]}
+ */
+WebApp.handlers.get('/api/boards/:boardId/boardViewSettings', async function(req, res) {
+  try {
+    const paramBoardId = req.params.boardId;
+    await Authentication.checkBoardAccess(req.userId, paramBoardId);
+    const board = await ReactiveCache.getBoard(paramBoardId);
+    if (!board) {
+      sendJsonResult(res, { code: 404, data: { error: 'Board not found' } });
+      return;
+    }
+    const { boardViewSettingsSnapshot } = require('/models/lib/boardViewSettings');
+    sendJsonResult(res, { code: 200, data: boardViewSettingsSnapshot(board) });
+  } catch (error) {
+    sendJsonResult(res, publicErrorData(error));
+  }
+});
+
+/**
+ * @operation update_board_view_settings
+ * @tag Boards
+ * @summary Set the Board Settings / Board View of a board
+ *
+ * @description Sets any subset of `boardViewSettings` (an object of
+ * `"<view>": { showOnPublic, showOnPrivate }`, each side optional),
+ * `defaultPublicBoardView`, `defaultPrivateBoardView` and `boardViewOrder`
+ * (an array of view keys), with the rules the Board View popup applies: a
+ * default is always shown on its side (setting a default also shows it, and
+ * hiding a side's current default is refused with 400 - set another default
+ * first), an unknown view key anywhere in the body is a 400, and the order is
+ * normalised so the menu lists every view exactly once. Defaults are applied
+ * before the show flags, so one request can move the default and hide the
+ * old one. Requires the caller to be a board admin (or site admin). Returns
+ * the settings in effect, in the same shape as GET.
+ *
+ * @param {string} boardId the board ID
+ * @param {object} [boardViewSettings] e.g. {"board-view-table": {"showOnPublic": false}}
+ * @param {string} [defaultPublicBoardView] the view a public board opens in, e.g. board-view-roadmap
+ * @param {string} [defaultPrivateBoardView] the view a private board opens in, e.g. board-view-swimlanes
+ * @param {string} [boardViewOrder] JSON array of view keys in menu order, e.g. ["board-view-lists", "board-view-swimlanes"]
+ * @return_type {boardViewSettings: object, defaultPublicBoardView: string, defaultPrivateBoardView: string, boardViewOrder: [string], keys: [string]}
+ */
+WebApp.handlers.put('/api/boards/:boardId/boardViewSettings', async function(req, res) {
+  try {
+    const paramBoardId = req.params.boardId;
+    await Authentication.checkBoardAdmin(req.userId, paramBoardId);
+    const board = await ReactiveCache.getBoard(paramBoardId);
+    if (!board) {
+      sendJsonResult(res, { code: 404, data: { error: 'Board not found' } });
+      return;
+    }
+    const input = Object.assign({}, req.body || {});
+    // Form-encoded callers send JSON text for the structured fields.
+    for (const key of ['boardViewSettings', 'boardViewOrder']) {
+      if (typeof input[key] === 'string') {
+        try {
+          input[key] = JSON.parse(input[key]);
+        } catch (e) {
+          if (key === 'boardViewOrder') input[key] = input[key].split(',').map(s => s.trim());
+        }
+      }
+    }
+    const { boardViewSettingsRequest, boardViewSettingsSnapshot } = require('/models/lib/boardViewSettings');
+    const result = boardViewSettingsRequest(board, input);
+    if (result.error) {
+      sendJsonResult(res, { code: 400, data: { error: result.error } });
+      return;
+    }
+    if (Object.keys(result.$set).length === 0) {
+      sendJsonResult(res, { code: 400, data: { error: 'no recognized board view settings in body' } });
+      return;
+    }
+    await Boards.updateAsync(paramBoardId, { $set: result.$set });
+    const updated = await ReactiveCache.getBoard(paramBoardId);
+    sendJsonResult(res, { code: 200, data: boardViewSettingsSnapshot(updated) });
+  } catch (error) {
+    sendJsonResult(res, publicErrorData(error));
+  }
 });

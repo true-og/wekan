@@ -1,31 +1,31 @@
 template(name="boardTriggers")
-  div.trigger-item#trigger-two
+  div.trigger-item#trigger-two(data-editor-scope)
     div.trigger-content
       div.trigger-text
         | {{_'r-when-a-card'}}
       div.trigger-inline-button.js-open-card-title-popup
         i.fa.fa-search
       div.trigger-text
-        | {{_'r-is'}}
+        | {{ruleTriggerCopula}}
       div.trigger-text
         | {{_'r-added-to'}}
       div.trigger-text
         | {{_'r-list'}}
       div.trigger-dropdown
-        input(id="create-list-name",type=text,placeholder="{{_'r-list-name'}}")
+        textarea(rows="2" data-editor-submit=".js-goto-action, .js-goto-rules" id="create-list-name",placeholder="{{_'r-list-name'}}")
       div.trigger-text
         | {{_'r-in-swimlane'}}
       div.trigger-dropdown
-        input(id="create-swimlane-name",type=text,placeholder="{{_'r-swimlane-name'}}")
-      div.trigger-button.trigger-button-person.js-show-user-field
-        i.fa.fa-user
+        textarea(rows="2" data-editor-submit=".js-goto-action, .js-goto-rules" id="create-swimlane-name",placeholder="{{_'r-swimlane-name'}}")
+      button.trigger-button.trigger-button-person.js-show-user-field(type="button" aria-label="{{_ 'username'}}")
+        i.fa.fa-user(aria-hidden="true")
       div.user-details.hide-element
         div.trigger-text
           | {{_'r-by'}}
         div.trigger-dropdown
           input(class="user-name",type=text,placeholder="{{_'username'}}")
-    div.trigger-button.js-add-create-trigger.js-goto-action
-      i.fa.fa-plus
+    button.trigger-button.js-add-create-trigger.js-goto-action(type="button" aria-label="{{_ 'r-add-trigger'}}")
+      i.fa.fa-plus(aria-hidden="true")
 
   div.trigger-item#trigger-three
     div.trigger-content
@@ -35,24 +35,24 @@ template(name="boardTriggers")
         i.fa.fa-search
       div.trigger-text
         | {{_'r-is-moved'}}
-      div.trigger-button.trigger-button-person.js-show-user-field
-        i.fa.fa-user
+      button.trigger-button.trigger-button-person.js-show-user-field(type="button" aria-label="{{_ 'username'}}")
+        i.fa.fa-user(aria-hidden="true")
       div.user-details.hide-element
         div.trigger-text
           | {{_'r-by'}}
         div.trigger-dropdown
           input(class="user-name",type=text,placeholder="{{_'username'}}")
-    div.trigger-button.js-add-gen-moved-trigger.js-goto-action
-      i.fa.fa-plus
+    button.trigger-button.js-add-gen-moved-trigger.js-goto-action(type="button" aria-label="{{_ 'r-add-trigger'}}")
+      i.fa.fa-plus(aria-hidden="true")
 
-  div.trigger-item#trigger-four
+  div.trigger-item#trigger-four(data-editor-scope)
     div.trigger-content
       div.trigger-text
         | {{_'r-when-a-card'}}
       div.trigger-inline-button.js-open-card-title-popup
         i.fa.fa-search
       div.trigger-text
-        | {{_'r-is'}}
+        | {{ruleTriggerCopula}}
       div.trigger-dropdown
         select(id="move-action")
           option(value="moved-to") {{_'r-moved-to'}}
@@ -60,20 +60,35 @@ template(name="boardTriggers")
       div.trigger-text
         | {{_'r-list'}}
       div.trigger-dropdown
-        input(id="move-list-name",type=text,placeholder="{{_'r-list-name'}}")
+        textarea(rows="2" data-editor-submit=".js-goto-action, .js-goto-rules" id="move-list-name",placeholder="{{_'r-list-name'}}")
       div.trigger-text
         | {{_'r-in-swimlane'}}
       div.trigger-dropdown
-        input(id="create-swimlane-name-2",type=text,placeholder="{{_'r-swimlane-name'}}")
-      div.trigger-button.trigger-button-person.js-show-user-field
-        i.fa.fa-user
+        textarea(rows="2" data-editor-submit=".js-goto-action, .js-goto-rules" id="create-swimlane-name-2",placeholder="{{_'r-swimlane-name'}}")
+      button.trigger-button.trigger-button-person.js-show-user-field(type="button" aria-label="{{_ 'username'}}")
+        i.fa.fa-user(aria-hidden="true")
       div.user-details.hide-element
         div.trigger-text
           | {{_'r-by'}}
         div.trigger-dropdown
           input(class="user-name",type=text,placeholder="{{_'username'}}")
-    div.trigger-button.js-add-moved-trigger.js-goto-action
-      i.fa.fa-plus
+    button.trigger-button.js-add-moved-trigger.js-goto-action(type="button" aria-label="{{_ 'r-add-trigger'}}")
+      i.fa.fa-plus(aria-hidden="true")
+
+  //- #2076: a card moved forward (to a later list) or back (to an earlier
+    one), in the board's list order (models/lib/ruleMoveDirection.js).
+  div.trigger-item#trigger-move-direction
+    div.trigger-content
+      div.trigger-text
+        | {{_'r-when-a-card'}}
+      div.trigger-text
+        | {{ruleTriggerCopula}}
+      div.trigger-dropdown
+        select(id="move-direction")
+          option(value="forward") {{_'r-moved-forward'}}
+          option(value="back") {{_'r-moved-back'}}
+    button.trigger-button.js-add-move-direction-trigger.js-goto-action(type="button" aria-label="{{_ 'r-add-trigger'}}")
+      i.fa.fa-plus(aria-hidden="true")
 
   div.trigger-item#trigger-five
     div.trigger-content
@@ -82,20 +97,21 @@ template(name="boardTriggers")
       div.trigger-inline-button.js-open-card-title-popup
         i.fa.fa-search
       div.trigger-text
-        | {{_'r-is'}}
+        | {{ruleTriggerCopula}}
       div.trigger-dropdown
         select(id="arch-action")
           option(value="archived") {{_'r-archived'}}
           option(value="unarchived") {{_'r-unarchived'}}
-      div.trigger-button.trigger-button-person.js-show-user-field
-        i.fa.fa-user
+          option(value="commented") {{_'r-commented'}}
+      button.trigger-button.trigger-button-person.js-show-user-field(type="button" aria-label="{{_ 'username'}}")
+        i.fa.fa-user(aria-hidden="true")
       div.user-details.hide-element
         div.trigger-text
           | {{_'r-by'}}
         div.trigger-dropdown
           input(class="user-name",type=text,placeholder="{{_'username'}}")
-    div.trigger-button.js-add-arch-trigger.js-goto-action
-      i.fa.fa-plus
+    button.trigger-button.js-add-arch-trigger.js-goto-action(type="button" aria-label="{{_ 'r-add-trigger'}}")
+      i.fa.fa-plus(aria-hidden="true")
 
   div.trigger-item
       div.trigger-content
@@ -106,6 +122,9 @@ template(name="boardCardTitlePopup")
     form
       label
         | {{_ 'boardCardTitlePopup-title'}}
-        input.js-card-filter-name(type="text" value=title autofocus)
+        //- #2345: cardTitleFilter is passed as the popup's data context by the
+        //- js-open-card-title-popup handler so reopening the popup shows the
+        //- filter that is already set (it used to always render empty).
+        input.js-card-filter-name(type="text" value=cardTitleFilter autofocus)
       input.js-card-filter-button.primary.wide(type="submit" value="{{_ 'set-filter'}}")
 

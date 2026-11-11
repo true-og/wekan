@@ -1,0 +1,103 @@
+const { test, expect } = require('../fixtures');
+const db = require('../helpers/db');
+const BoardPage = require('../pages/BoardPage');
+const CardPage = require('../pages/CardPage');
+
+test.describe.configure({ mode: 'serial' });
+for (const [language, policy] of [['en', 'formatted'], ['en', 'plain-links'], ['en', 'plain-source'], ['st', 'formatted']]) {
+  test(`card and sidebar activities obey ${policy} in ${language}`, async ({ boardPage, board, user }) => {
+    if (policy === 'plain-source') test.setTimeout(90_000);
+    await boardPage.evaluate(language => Meteor.callAsync('setLanguage', language), language);
+    const setting = db.findOne('settings', {});
+    const activityId = db.uid('activity-viewer');
+    const title = '# Demo :thumbsup: <strong>allowed</strong> [link](https://example.com/) <img src="x" onerror="window.activityViewerAttack=1">';
+    db.updateOne('settings', { _id: setting._id }, { $set: {
+      renderLinksAsPlainText: policy === 'plain-links',
+      alwaysShowCodeAsText: policy === 'plain-source',
+    } });
+    try {
+      db.insertOne('activities', {
+        _id: activityId, activityType: 'a-changedTitle', value: title,
+        boardId: board.boardId, userId: user.id,
+        cardId: db.findCardIdByTitle({ boardId: board.boardId, title: 'Alpha Card' }),
+        listId: board.listIds[0], createdAt: new Date(),
+      });
+      await boardPage.reload();
+      if (policy === 'plain-source') await expect.poll(() => boardPage.evaluate(() => Meteor.connection._stores.settings?._getCollection?.().findOne()?.alwaysShowCodeAsText), { timeout: 65_000 }).toBe(true);
+      const bp = new BoardPage(boardPage);
+      await bp.openSidebar();
+      if (!(await boardPage.locator(`.board-sidebar .activity[data-id="${activityId}"]`).count())) {
+        await boardPage.locator('.js-toggle-show-activities').first().click();
+      }
+      await bp.clickCard(board.listIds[0], 'Alpha Card');
+      const cp = new CardPage(boardPage);
+      await cp.waitForOpen();
+      await cp.root.locator('.js-toggle-card-section[data-section="activities"]').click();
+      for (const root of [boardPage.locator('.board-sidebar'), cp.root]) {
+        const activity = root.locator(`.activity[data-id="${activityId}"]`);
+        await expect(activity).toBeVisible();
+        await expect(activity.locator('.activity-desc')).not.toContainText('%s');
+        if (language === 'st') {
+          await expect(activity.locator('.activity-desc')).toContainText('o fetotse sehlooho ho');
+          await expect(activity.locator('.activity-desc')).toContainText('bakeng sa Alpha Card');
+          await expect(activity.locator('.activity-desc')).not.toContainText('o fetotse sehlooho sa');
+        }
+        await expect(activity.locator('[onerror], script')).toHaveCount(0);
+        expect(await boardPage.evaluate(() => window.activityViewerAttack)).toBeUndefined();
+        if (policy === 'plain-source') {
+          await expect(activity.locator('pre').first()).toHaveText(title);
+          await expect(activity.locator('strong')).toHaveCount(0);
+        } else {
+          await expect(activity.locator('strong').first()).toHaveText('allowed');
+          await expect(activity).toContainText('👍');
+          await expect(activity.locator('a[href="https://example.com/"]')).toHaveCount(policy === 'plain-links' ? 0 : 1);
+        }
+      }
+    } finally {
+      db.deleteOne('activities', { _id: activityId });
+      db.updateOne('settings', { _id: setting._id }, { $set: {
+        renderLinksAsPlainText: !!setting.renderLinksAsPlainText,
+        alwaysShowCodeAsText: !!setting.alwaysShowCodeAsText,
+      } });
+    }
+  });
+}
+
+test('card and sidebar activity labels use the card badge palette', async ({ boardPage, board, user }) => {
+  const activityId = db.uid('label-activity');
+  const labelId = db.uid('activity-label');
+  const original = db.findOne('boards', { _id: board.boardId });
+  const cardId = db.findCardIdByTitle({ boardId: board.boardId, title: 'Alpha Card' });
+  try {
+    db.updateOne('boards', { _id: board.boardId }, { $push: { labels: {
+      _id: labelId, name: 'Feature :thumbsup:', color: '#ffdab9',
+    } } });
+    db.insertOne('activities', {
+      _id: activityId, activityType: 'addedLabel', labelId,
+      boardId: board.boardId, userId: user.id, cardId,
+      listId: board.listIds[0], createdAt: new Date(),
+    });
+    await boardPage.reload();
+    const bp = new BoardPage(boardPage);
+    await bp.openSidebar();
+    if (!(await boardPage.locator(`.board-sidebar .activity[data-id="${activityId}"]`).count())) {
+      await boardPage.locator('.js-toggle-show-activities').first().click();
+    }
+    await bp.clickCard(board.listIds[0], 'Alpha Card');
+    const cp = new CardPage(boardPage);
+    await cp.waitForOpen();
+    await cp.root.locator('.js-toggle-card-section[data-section="activities"]').click();
+    for (const root of [boardPage.locator('.board-sidebar'), cp.root]) {
+      const badge = root.locator(`.activity[data-id="${activityId}"] .activity-label`);
+      await expect(badge).toBeVisible();
+      const style = await badge.evaluate(el => {
+        const css = getComputedStyle(el);
+        return { background: css.backgroundColor, color: css.color, radius: css.borderRadius };
+      });
+      expect(style).toEqual({ background: 'rgb(255, 218, 185)', color: 'rgb(0, 0, 0)', radius: '4px' });
+    }
+  } finally {
+    db.deleteOne('activities', { _id: activityId });
+    db.updateOne('boards', { _id: board.boardId }, { $set: { labels: original.labels || [] } });
+  }
+});

@@ -1,0 +1,28 @@
+# Admin Panel / People
+
+Who may sign in, who they belong to, and what they may do — in menu order.
+
+| Menu path | URL slug | Page | What it is |
+| --- | --- | --- | --- |
+| People / Login | `login` | [Login.md](Login.md) | What is allowed at sign-in, and the authentication method. |
+| People / SAML | `saml` | [Login.md](Login.md#provider-settings) | SAML provider overrides and service URLs. |
+| People / LDAP | `ldap` | [Login.md](Login.md#provider-settings) | Every LDAP_* setting, and a connection test. |
+| People / OAuth2 | `oidc` | [Login.md](Login.md#provider-settings) | Every OAUTH2_* (OpenID Connect) setting, Oracle OIM included. |
+| People / CAS | `cas` | [Login.md](Login.md#provider-settings) | Every CAS_* setting. |
+| People / Header login | `header-login` | [Login.md](Login.md#provider-settings) | Every HEADER_LOGIN_* setting, read-only: header login is environment-only. |
+| People / OAuth login providers | `oauth` | [Login.md](Login.md#provider-settings) | OAuth provider configuration. |
+| People / Passwordless login | `passwordless` | [Login.md](Login.md#provider-settings) | Passwordless authentication settings. |
+| People / E-mail | `email` | [E-mail.md](E-mail.md) | SMTP, the invite domain, and whether users may change their address. |
+| People / Notifications | `notifications` | [Notifications.md](Notifications.md) | The site-wide notification default, overridable per board and per member. |
+| People / Domains | `domains` | [Domains.md](Domains.md) | The e-mail domains in use, with a user count each. |
+| People / Organizations | `organizations` | [Organizations.md](Organizations.md) | Organizations, their per-organization switches, and the same-Organization board restriction. |
+| People / Teams | `teams` | [Teams.md](Teams.md) | Teams, their per-team switches, and the same-Team board restriction. |
+| People / People | `people` | [People.md](People.md) | Every user: e-mail, admin flag, active state, lockout, created date. |
+| People / Locked Users | `locked-users` | [Locked-Users.md](Locked-Users.md) | Brute-force protection settings and who is locked out. |
+| People / Audit log | `audit-log` | [Audit-Log.md](Audit-Log.md) | What site administrators did, newest first; kept for a year. |
+| People / Roles | `roles` | [Roles.md](Roles.md) | Which board roles may invite people to a board. |
+| People / Shared templates | `shared-templates` | [Shared-Templates.md](Shared-Templates.md) | Which scopes may share template boards. |
+
+Domains, Organizations, Teams and People are [table pages](../../General/Table.md):
+search on Enter, a total, `page X / N`, prev/next, and one page of rows fetched at a
+time. Locked users, Roles and Shared templates are forms, not tables.

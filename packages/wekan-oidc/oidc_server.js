@@ -1,40 +1,112 @@
-import {addGroupsWithAttributes, addEmail, changeFullname, changeUsername} from './loginHandler';
+import {addGroupsWithAttributes, addEmail, changeFullname, changeUsername, oauth2AdminStatusFromGroups} from './loginHandler';
 import { fetch, Headers } from 'meteor/fetch';
 import { URLSearchParams } from 'meteor/url';
 import { Buffer } from 'node:buffer';
 import https from 'https';
 import fs from 'fs';
+import { resolveOidcEndpoint } from './endpoint';
+const { mergeWhitelistedClaims } = require('./serviceDataClaims');
+const { maybeGenerateOauth2ClientSecretJwt } = require('./oauth2ClientSecretJwt');
+const { isEmailDomainAllowed } = require('./emailDomainPolicy');
+
+// Every OAUTH2_*/ORACLE_OIM_ENABLED/PROPAGATE_OIDC_DATA setting: the Admin
+// Panel / People / OAuth2 override when one is stored, otherwise the
+// environment variable. The app installs the resolver
+// (server/lib/authConfig.js); a package cannot import it. Read per login, so a
+// change applies to the next login without a restart.
+function authEnv(name) {
+  const resolve = globalThis.__wekanAuthEnv;
+  return typeof resolve === 'function' ? resolve(name) : process.env[name];
+}
+const authEnvObject = new Proxy(process.env, {
+  get(target, name) {
+    return typeof name === 'string' ? authEnv(name) : undefined;
+  },
+});
+const isOracleOim = () => authEnv('ORACLE_OIM_ENABLED') === 'true';
+
+// #2458 (Sign in with Apple): Apple's "client secret" is not a static string
+// like every other generic-OAuth2 provider's - it is a short-lived JWT the
+// server must sign itself with a private key from Apple's developer portal.
+// When OAUTH2_SECRET_JWT_KEY_PATH is set, mint a fresh one for this request;
+// otherwise fall back to the static OAUTH2_SECRET exactly as before, so
+// every provider that does not set these new env vars is unaffected.
+function resolveClientSecret(config) {
+  const jwtSecret = maybeGenerateOauth2ClientSecretJwt(authEnvObject, config.clientId);
+  return jwtSecret || OAuth.openSecret(config.secret);
+}
 
 Oidc = {};
-httpCa = false;
 
-if (process.env.OAUTH2_CA_CERT !== undefined) {
+// OAUTH2_CA_CERT, read when a request needs it so Admin Panel / People / OAuth2
+// can change it without a restart. The file is re-read only when the path
+// changes. A path that cannot be read logs once and means "no extra CA".
+let caPath = null;
+let caContent = false;
+function oidcHttpCa() {
+  const configured = authEnv('OAUTH2_CA_CERT');
+  if (configured === caPath) return caContent;
+  caPath = configured;
+  caContent = false;
+  if (configured !== undefined && configured !== '') {
     try {
-        if (fs.existsSync(process.env.OAUTH2_CA_CERT)) {
-          httpCa = fs.readFileSync(process.env.OAUTH2_CA_CERT);
-        }
-    } catch(e) {
-	console.log('WARNING: failed loading: ' + process.env.OAUTH2_CA_CERT);
-	console.log(e);
+      if (fs.existsSync(configured)) {
+        caContent = fs.readFileSync(configured);
+      }
+    } catch (e) {
+      console.log('WARNING: failed loading: ' + configured);
+      console.log(e);
     }
+  }
+  return caContent;
 }
-var profile = {};
-var serviceData = {};
-var userinfo = {};
-
 OAuth.registerService('oidc', 2, null, async function (query) {
   var debug = process.env.DEBUG === 'true';
+
+  // #4897: these MUST be fresh per-login objects. They used to be module-level
+  // (`var serviceData = {}` etc. shared by every login of every user), so:
+  //   * fields a login did not overwrite leaked in from the PREVIOUS login of a
+  //     DIFFERENT user (e.g. refreshToken is only set when the provider sends
+  //     one, and idTokenWhitelistFields were Object.assign-ed cumulatively), and
+  //   * two logins running concurrently (this handler awaits the token,
+  //     userinfo and two Meteor.callAsync calls) interleaved writes to the SAME
+  //     object, so a user could intermittently be created/updated with another
+  //     user's id/email/username — the "web interface shows different data than
+  //     MongoDB" reports.
+  var profile = {};
+  var serviceData = {};
+  var userinfo = {};
 
   var token = await getToken(query);
   if (debug) console.log('XXX: register token:', token);
 
-  var accessToken = token.access_token || token.id_token;
-  var expiresAt = (+new Date) + (1000 * parseInt(token.expires_in, 10));
+  // #5174: everything below reads fields off the provider's answer, so the
+  // answer has to BE something first. When it is not, the failure has to name
+  // the provider's own complaint rather than surface as a TypeError three lines
+  // later - the reported case was a scope mismatch, and what the admin saw was
+  // "Cannot read property 'ocs' of null".
+  if (!token || typeof token !== 'object') {
+    throw new Error('OIDC: the token endpoint returned no usable response. '
+      + 'Check the provider log for the authorization code exchange.');
+  }
 
-  var claimsInAccessToken = (process.env.OAUTH2_ADFS_ENABLED === 'true'  ||
-                             process.env.OAUTH2_ADFS_ENABLED === true    ||
-                             process.env.OAUTH2_B2C_ENABLED  === 'true'  ||
-                             process.env.OAUTH2_B2C_ENABLED  === true)   || false;
+  var accessToken = token.access_token || token.id_token;
+  if (!accessToken) {
+    // A 200 with neither token in it: the provider answered, and what it
+    // answered with is the useful part. Keys only - the values are secrets.
+    throw new Error('OIDC: the token endpoint returned neither access_token nor '
+      + 'id_token. It returned these fields: ' + Object.keys(token).join(', ')
+      + (token.error_description ? ' (' + token.error_description + ')' : ''));
+  }
+
+  // parseInt(undefined) is NaN, and NaN propagates into the account's expiry
+  // silently. A provider that sends no expires_in gets the OAuth2 default hour.
+  var expiresIn = parseInt(token.expires_in, 10);
+  if (!Number.isFinite(expiresIn)) expiresIn = 3600;
+  var expiresAt = (+new Date) + (1000 * expiresIn);
+
+  var claimsInAccessToken = authEnv('OAUTH2_ADFS_ENABLED') === 'true' ||
+                            authEnv('OAUTH2_B2C_ENABLED') === 'true';
 
   if(claimsInAccessToken)
   {
@@ -47,31 +119,62 @@ OAuth.registerService('oidc', 2, null, async function (query) {
     userinfo = await getUserInfo(accessToken);
   }
 
-  if (userinfo.ocs) userinfo = userinfo.ocs.data; // Nextcloud hack
-  if (userinfo.metadata) userinfo = userinfo.metadata // Openshift hack
+  // #5174: getTokenContent() returns NULL for a token it cannot parse, and the
+  // ADFS/B2C branch above assigns that straight into userinfo - so this line was
+  // `null.ocs` and threw "Cannot read property 'ocs' of null", which says
+  // nothing about what actually went wrong. Both branches are checked here, once,
+  // before anything reads a claim.
+  if (!userinfo || typeof userinfo !== 'object') {
+    throw new Error('OIDC: no user information came back from the provider ('
+      + (claimsInAccessToken
+        ? 'claims were expected inside the access token, which could not be parsed'
+        : 'the userinfo endpoint returned nothing usable')
+      + '). Check the provider log, and that the scopes WeKan requests '
+      + '(OAUTH2_REQUEST_PERMISSIONS) are the ones the provider allows.');
+  }
+
+  // Both hacks re-point userinfo at a nested object, so both need that object to
+  // exist: a Nextcloud response with `ocs` but no `ocs.data` used to replace
+  // userinfo with undefined and fail on the next line instead of this one.
+  if (userinfo.ocs && userinfo.ocs.data) userinfo = userinfo.ocs.data; // Nextcloud hack
+  if (userinfo.metadata) userinfo = userinfo.metadata; // Openshift hack
+  if (!userinfo || typeof userinfo !== 'object') {
+    throw new Error('OIDC: the provider response unwrapped to nothing usable '
+      + '(ocs/metadata). Check the provider log.');
+  }
   if (debug) console.log('XXX: userinfo:', userinfo);
 
-  serviceData.id = userinfo[process.env.OAUTH2_ID_MAP]; // || userinfo["id"];
-  serviceData.username = userinfo[process.env.OAUTH2_USERNAME_MAP]; // || userinfo["uid"];
-  serviceData.fullname = userinfo[process.env.OAUTH2_FULLNAME_MAP]; // || userinfo["displayName"];
+  serviceData.id = userinfo[authEnv('OAUTH2_ID_MAP')]; // || userinfo["id"];
+  serviceData.username = userinfo[authEnv('OAUTH2_USERNAME_MAP')]; // || userinfo["uid"];
+  serviceData.fullname = userinfo[authEnv('OAUTH2_FULLNAME_MAP')]; // || userinfo["displayName"];
+  // Capture the provider's avatar. `picture` is a standard OpenID Connect claim (a URL);
+  // allow an override map for providers that use a different key. WeKan then localizes it
+  // into files/avatars (app board-open trigger) so it shows and is carried by export.
+  serviceData.picture = userinfo[authEnv('OAUTH2_AVATAR_MAP') || 'picture'] || userinfo['picture'] || null;
   serviceData.accessToken = accessToken;
   serviceData.expiresAt = expiresAt;
 
 
   // If on Oracle OIM email is empty or null, get info from username
-  if (process.env.ORACLE_OIM_ENABLED === 'true' || process.env.ORACLE_OIM_ENABLED === true) {
-    if (userinfo[process.env.OAUTH2_EMAIL_MAP]) {
-      serviceData.email = userinfo[process.env.OAUTH2_EMAIL_MAP];
+  if (isOracleOim()) {
+    if (userinfo[authEnv('OAUTH2_EMAIL_MAP')]) {
+      serviceData.email = userinfo[authEnv('OAUTH2_EMAIL_MAP')];
     } else {
-      serviceData.email = userinfo[process.env.OAUTH2_USERNAME_MAP];
+      serviceData.email = userinfo[authEnv('OAUTH2_USERNAME_MAP')];
     }
   }
 
-  if (process.env.ORACLE_OIM_ENABLED !== 'true' && process.env.ORACLE_OIM_ENABLED !== true) {
-    serviceData.email = userinfo[process.env.OAUTH2_EMAIL_MAP]; // || userinfo["email"];
+  if (!isOracleOim()) {
+    serviceData.email = userinfo[authEnv('OAUTH2_EMAIL_MAP')]; // || userinfo["email"];
   }
 
-  if (process.env.OAUTH2_B2C_ENABLED  === 'true'  || process.env.OAUTH2_B2C_ENABLED  === true) {
+  if (authEnv('OAUTH2_B2C_ENABLED') === 'true') {
+    // #5174: an Azure AD B2C token without the `emails` claim - which is what a
+    // scope the tenant did not grant produces - made this `undefined[0]`.
+    if (!Array.isArray(userinfo.emails) || !userinfo.emails.length) {
+      throw new Error('OIDC (B2C): the token carries no "emails" claim. The '
+        + 'tenant must be configured to release it for the requested scopes.');
+    }
     serviceData.email = userinfo["emails"][0];
   }
 
@@ -86,10 +189,11 @@ OAuth.registerService('oidc', 2, null, async function (query) {
     var tokenContent = getTokenContent(accessToken);
     var config = await getConfiguration();
     if (tokenContent) {
-      var fields = Object.fromEntries(
-        Object.entries(tokenContent).filter(([k]) => (config.idTokenWhitelistFields || []).includes(k))
+      mergeWhitelistedClaims(
+        serviceData,
+        tokenContent,
+        config.idTokenWhitelistFields,
       );
-      Object.assign(serviceData, fields);
     }
   }
 
@@ -97,10 +201,17 @@ OAuth.registerService('oidc', 2, null, async function (query) {
     serviceData.refreshToken = token.refresh_token;
   if (debug) console.log('XXX: serviceData:', serviceData);
 
-  profile.name = userinfo[process.env.OAUTH2_FULLNAME_MAP]; // || userinfo["displayName"];
-  profile.email = userinfo[process.env.OAUTH2_EMAIL_MAP]; // || userinfo["email"];
+  // Apply to every handshake, including existing users, before group/board
+  // routines can change memberships or Meteor can create or merge an account.
+  if (!isEmailDomainAllowed(serviceData.email, authEnv('OAUTH2_ALLOWED_EMAIL_DOMAINS'))) {
+    throw new Meteor.Error(403, 'Login forbidden');
+  }
 
-  if (process.env.OAUTH2_B2C_ENABLED  === 'true'  || process.env.OAUTH2_B2C_ENABLED  === true) {
+  profile.name = userinfo[authEnv('OAUTH2_FULLNAME_MAP')]; // || userinfo["displayName"];
+  profile.email = userinfo[authEnv('OAUTH2_EMAIL_MAP')]; // || userinfo["email"];
+  if (serviceData.picture) profile.avatarUrl = serviceData.picture; // localized on board open
+
+  if (authEnv('OAUTH2_B2C_ENABLED') === 'true') {
     profile.email = userinfo["emails"][0];
   }
 
@@ -116,7 +227,8 @@ OAuth.registerService('oidc', 2, null, async function (query) {
   //    therefore: keep admin privileges for wekan as before
   if(Array.isArray(serviceData.groups) && serviceData.groups.length && typeof serviceData.groups[0] === "string" )
   {
-    user = await Meteor.users.findOneAsync({'_id':  serviceData.id});
+    // #4897: `user` was an implicit global shared by concurrent logins.
+    const user = await Meteor.users.findOneAsync({'_id':  serviceData.id});
 
     serviceData.groups.forEach(function(groupName, i)
     {
@@ -149,22 +261,26 @@ if (Meteor.release) {
   userAgent += "/" + Meteor.release;
 }
 
-if (process.env.ORACLE_OIM_ENABLED !== 'true' && process.env.ORACLE_OIM_ENABLED !== true) {
-  var getToken = async function (query) {
+// The token exchange: standard OIDC, or Oracle OIM's (client credentials in a
+// Basic header). Chosen per login from ORACLE_OIM_ENABLED.
+var getToken = function (query) {
+  return isOracleOim() ? getTokenOracleOim(query) : getTokenOidc(query);
+};
+
+{
+  var getTokenOidc = async function (query) {
     var debug = process.env.DEBUG === 'true';
     var config = await getConfiguration();
-    var serverTokenEndpoint;
-    if(config.tokenEndpoint.includes('https://')){
-      serverTokenEndpoint = config.tokenEndpoint;
-    }else{
-      serverTokenEndpoint = config.serverUrl + config.tokenEndpoint;
-    }
+    var serverTokenEndpoint = resolveOidcEndpoint(
+      config.serverUrl,
+      config.tokenEndpoint,
+    );
 
     try {
       var body = new URLSearchParams({
         code: query.code,
         client_id: config.clientId,
-        client_secret: OAuth.openSecret(config.secret),
+        client_secret: resolveClientSecret(config),
         redirect_uri: OAuth._redirectUri('oidc', config),
         grant_type: 'authorization_code',
         state: query.state
@@ -180,6 +296,7 @@ if (process.env.ORACLE_OIM_ENABLED !== 'true' && process.env.ORACLE_OIM_ENABLED 
         body: body.toString()
       };
 
+      const httpCa = oidcHttpCa();
       if (httpCa) {
         fetchOptions.agent = new https.Agent({ ca: httpCa });
       }
@@ -203,20 +320,18 @@ if (process.env.ORACLE_OIM_ENABLED !== 'true' && process.env.ORACLE_OIM_ENABLED 
   };
 }
 
-if (process.env.ORACLE_OIM_ENABLED === 'true' || process.env.ORACLE_OIM_ENABLED === true) {
+{
 
-  var getToken = async function (query) {
+  var getTokenOracleOim = async function (query) {
     var debug = process.env.DEBUG === 'true';
     var config = await getConfiguration();
-    var serverTokenEndpoint;
-    if(config.tokenEndpoint.includes('https://')){
-      serverTokenEndpoint = config.tokenEndpoint;
-    }else{
-      serverTokenEndpoint = config.serverUrl + config.tokenEndpoint;
-    }
+    var serverTokenEndpoint = resolveOidcEndpoint(
+      config.serverUrl,
+      config.tokenEndpoint,
+    );
 
     // OIM needs basic Authentication token in the header - ClientID + SECRET in base64
-    var dataToken = process.env.OAUTH2_CLIENT_ID + ':' + process.env.OAUTH2_SECRET;
+    var dataToken = authEnv('OAUTH2_CLIENT_ID') + ':' + authEnv('OAUTH2_SECRET');
     var strBasicToken64 = Buffer.from(dataToken).toString('base64');
 
     // eslint-disable-next-line no-console
@@ -226,7 +341,7 @@ if (process.env.ORACLE_OIM_ENABLED === 'true' || process.env.ORACLE_OIM_ENABLED 
       var body = new URLSearchParams({
         code: query.code,
         client_id: config.clientId,
-        client_secret: OAuth.openSecret(config.secret),
+        client_secret: resolveClientSecret(config),
         redirect_uri: OAuth._redirectUri('oidc', config),
         grant_type: 'authorization_code',
         state: query.state
@@ -243,6 +358,7 @@ if (process.env.ORACLE_OIM_ENABLED === 'true' || process.env.ORACLE_OIM_ENABLED 
         body: body.toString()
       };
 
+      const httpCa = oidcHttpCa();
       if (httpCa) {
         fetchOptions.agent = new https.Agent({ ca: httpCa });
       }
@@ -273,12 +389,10 @@ var getUserInfo = async function (accessToken) {
   var config = await getConfiguration();
   // Some userinfo endpoints use a different base URL than the authorization or token endpoints.
   // This logic allows the end user to override the setting by providing the full URL to userinfo in their config.
-  var serverUserinfoEndpoint;
-  if (config.userinfoEndpoint.includes("https://")) {
-    serverUserinfoEndpoint = config.userinfoEndpoint;
-  } else {
-    serverUserinfoEndpoint = config.serverUrl + config.userinfoEndpoint;
-  }
+  var serverUserinfoEndpoint = resolveOidcEndpoint(
+    config.serverUrl,
+    config.userinfoEndpoint,
+  );
 
   try {
     var fetchOptions = {
@@ -289,6 +403,7 @@ var getUserInfo = async function (accessToken) {
       })
     };
 
+    const httpCa = oidcHttpCa();
     if (httpCa) {
       fetchOptions.agent = new https.Agent({ ca: httpCa });
     }
@@ -332,7 +447,7 @@ var getTokenContent = function (token) {
     }
   }
   return content;
-}
+};
 Meteor.methods({
   'groupRoutineOnLogin': async function(info, userId)
   {
@@ -345,14 +460,48 @@ Meteor.methods({
     // this.connection === null; a direct client call has a non-null
     // connection. Reject the latter.
     if (this.connection !== null) {
+      // No legitimate client calls this, so a direct call is an attempt
+      // (OIDCBleed): summarized in Admin Panel -> Problems through the package
+      // bridge (server/lib/canary.js), since a package cannot import app code.
+      try {
+        if (typeof global.__wekanTripCanary === 'function') {
+          global.__wekanTripCanary('oidc.internal-method-direct', {
+            userId: this.userId || undefined,
+            ip: this.connection && this.connection.clientAddress,
+          });
+        }
+      } catch (e) { /* logging must never break the guard */ }
       throw new Meteor.Error('not-authorized');
     }
     check(info, Object);
     check(userId, String);
-    var propagateOidcData = process.env.PROPAGATE_OIDC_DATA || false;
+
+    // #5876: optional OAUTH2_ADMIN_GROUPS. When set (comma/whitespace separated
+    // list of group names), grant/revoke Wekan admin for the logging-in OIDC
+    // user based on whether their OIDC `groups` claim intersects that list.
+    // This mirrors LDAP_SYNC_ADMIN_GROUPS and is independent of
+    // PROPAGATE_OIDC_DATA. When OAUTH2_ADMIN_GROUPS is empty/unset (default),
+    // isAdmin is left untouched, so existing behavior is unchanged.
+    {
+      const adminStatus = oauth2AdminStatusFromGroups(info.groups);
+      if (adminStatus.manage) {
+        const adminUser = await Meteor.users.findOneAsync({'services.oidc.id': userId});
+        if (adminUser) {
+          await Meteor.users.updateAsync({_id: adminUser._id}, {$set: {isAdmin: adminStatus.isAdmin}});
+        }
+      }
+    }
+
+    // Any non-empty value turned this on, 'false' included; 'false' - which
+    // is also what the Admin Panel's "No" stores - now means off.
+    var propagateValue = authEnv('PROPAGATE_OIDC_DATA');
+    var propagateOidcData = !!propagateValue && propagateValue !== 'false';
     if (propagateOidcData) {
-      users= Meteor.users;
-      user = await users.findOneAsync({'services.oidc.id':  userId});
+      // #4897: `users`/`user` were implicit globals shared by concurrent
+      // logins; between the awaits below another login could reassign `user`,
+      // so this login's email/fullname/username got written onto ANOTHER
+      // user's document. loginHandler.js now uses Meteor.users directly.
+      const user = await Meteor.users.findOneAsync({'services.oidc.id':  userId});
 
       if(user) {
         //updates/creates Groups and user admin privileges accordingly if not undefined
@@ -377,29 +526,44 @@ Meteor.methods({
     // as board admin) with no per-user authorization, so reject direct
     // client/DDP calls (this.connection non-null).
     if (this.connection !== null) {
+      // No legitimate client calls this, so a direct call is an attempt
+      // (OIDCBleed): summarized in Admin Panel -> Problems through the package
+      // bridge (server/lib/canary.js), since a package cannot import app code.
+      try {
+        if (typeof global.__wekanTripCanary === 'function') {
+          global.__wekanTripCanary('oidc.internal-method-direct', {
+            userId: this.userId || undefined,
+            ip: this.connection && this.connection.clientAddress,
+          });
+        }
+      } catch (e) { /* logging must never break the guard */ }
       throw new Meteor.Error('not-authorized');
     }
     check(info, Object);
     check(oidcUserId, String);
 
     const defaultBoardParams = (process.env.DEFAULT_BOARD_ID || '').split(':');
-    const defaultBoardId = defaultBoardParams.shift()
-    if (!defaultBoardId) return
+    const defaultBoardId = defaultBoardParams.shift();
+    if (!defaultBoardId) return;
 
-    const board = await Boards.findOneAsync(defaultBoardId)
-    const user = await Users.findOneAsync({ 'services.oidc.id': oidcUserId })
-    const userId = user?._id
+    const board = await Boards.findOneAsync(defaultBoardId);
+    const user = await Users.findOneAsync({ 'services.oidc.id': oidcUserId });
+    const userId = user?._id;
     const memberIndex = (board?.members || []).map(m => m.userId).indexOf(userId);
-    if(!board || !userId || memberIndex > -1) return
+    if(!board || !userId || memberIndex > -1) return;
 
-    await board.addMember(userId)
+    await board.addMember(userId);
+    // DEFAULT_BOARD_ID=<id>:isAdmin:isWorker... - Array has no .contains, so
+    // this threw and the user got the default role whatever was configured.
+    // isCommentsOnly is the spelling that has always been documented here;
+    // isCommentOnly, the flag's real name, works too.
     await board.setMemberPermission(
       userId,
-      defaultBoardParams.contains("isAdmin"),
-      defaultBoardParams.contains("isNoComments"),
-      defaultBoardParams.contains("isCommentsOnly"),
-      defaultBoardParams.contains("isWorker")
-    )
+      defaultBoardParams.includes("isAdmin"),
+      defaultBoardParams.includes("isNoComments"),
+      defaultBoardParams.includes("isCommentOnly") || defaultBoardParams.includes("isCommentsOnly"),
+      defaultBoardParams.includes("isWorker")
+    );
   }
 });
 

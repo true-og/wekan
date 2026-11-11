@@ -9,6 +9,34 @@ function acceptedIpAddress(ipAddress) {
   );
 }
 
+// Resolve the client IP used for the METRICS_ACCEPTED_IP_ADDRESS allowlist.
+//
+// Security fix (reported by meifukun): the endpoint previously trusted the
+// client-supplied `X-Forwarded-For` header UNCONDITIONALLY, so anyone who could
+// reach /metrics directly could send `X-Forwarded-For: <whitelisted-ip>` and pass
+// the allowlist. By default we now use ONLY the real socket peer address.
+//
+// Operators genuinely behind reverse proxies can opt back in with
+// METRICS_TRUST_PROXY set to the number of trusted proxy hops (e.g. `1`). The
+// client IP is then read from the Nth position from the RIGHT of the XFF chain —
+// the address your own proxy appended, which a client cannot forge — so a forged
+// left-most entry is ignored.
+function metricsClientIp(req) {
+  const remote = req.socket.remoteAddress;
+  const trust = process.env.METRICS_TRUST_PROXY;
+  if (!trust || trust === 'false' || trust === '0') {
+    return remote;
+  }
+  const xff = req.headers['x-forwarded-for'];
+  if (!xff) return remote;
+  const list = String(xff).split(',').map(s => s.trim()).filter(Boolean);
+  if (!list.length) return remote;
+  const hops = parseInt(trust, 10);
+  const n = Number.isInteger(hops) && hops > 0 ? hops : 1;
+  const idx = list.length - n;
+  return idx >= 0 ? list[idx] : remote;
+}
+
 function accessToken(req) {
   const valid_token = process.env.METRICS_ACCESS_TOKEN;
   let token;
@@ -27,11 +55,14 @@ function accessToken(req) {
   if (!token && req.query && req.query.access_token) {
     token = req.query.access_token;
   }
-  return (
-    token !== undefined &&
-    valid_token !== undefined &&
-    token == valid_token
-  );
+  // An unset or EMPTY METRICS_ACCESS_TOKEN is no token: `?access_token=` would
+  // otherwise equal ''. Compare digests in constant time, so the response time
+  // does not tell a guesser how much of the token was right.
+  if (typeof token !== 'string' || typeof valid_token !== 'string' || valid_token === '') {
+    return false;
+  }
+  const digest = value => require('crypto').createHash('sha256').update(value).digest();
+  return require('crypto').timingSafeEqual(digest(token), digest(valid_token));
 }
 
 const getBoardTitleWithMostActivities = async (dateWithXdaysAgo, nbLimit) => {
@@ -64,14 +95,10 @@ const getBoards = async (boardIds) => {
 Meteor.startup(() => {
   WebApp.handlers.use('/metrics', async (req, res, next) => {
     try {
-      const ipAddress =
-        req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-      // if(process.env.TRUST_PROXY_FORXARD)
-      // {
-      //   const ipAddress = req.headers['x-forwarded-for'] || req.socket.remoteAddress
-      // }else{
-      //   const ipAddress = req.socket.remoteAddress
-      // }
+      // Client-supplied X-Forwarded-For is trusted ONLY when METRICS_TRUST_PROXY
+      // is set (see metricsClientIp); by default the real socket address is used
+      // so a forged XFF cannot bypass METRICS_ACCEPTED_IP_ADDRESS.
+      const ipAddress = metricsClientIp(req);
 
       // List of trusted ip adress will be found in environment variable "METRICS_ACCEPTED_IP_ADDRESS" (separeted with commas)
       if (acceptedIpAddress(ipAddress) || (accessToken(req))) {
@@ -212,14 +239,72 @@ Meteor.startup(() => {
             }` + '\n';
         });
 
+        // Backup health (models/lib/backupRuns.js), so monitoring can alert on
+        // a failed or missing backup. Its own try: a problem reading the backup
+        // history must not take the other metrics down with it.
+        try {
+          const { backupHealthNow } = require('/server/methods/backup');
+          const { backupMetricsLines } = require('/models/lib/backupRuns');
+          metricsRes += backupMetricsLines(await backupHealthNow());
+        } catch (e) {
+          metricsRes += '# backup metrics unavailable\n';
+        }
+
         res.writeHead(200); // HTTP status
         res.end(metricsRes);
       } else {
+        // A denied request that carried an X-Forwarded-For header MIGHT be a
+        // forged-whitelisted-IP attempt (MetricsBleed) — but only if the header
+        // claimed an address that is actually on the allowlist.
+        //
+        // "Nothing legitimate sends a forwarded-for header here" turned out to
+        // be wrong, and an admin's Security Report is where it showed: every
+        // reverse proxy adds X-Forwarded-For to everything it forwards. A
+        // Prometheus scrape through a local proxy, on a server whose allowlist
+        // simply does not cover it, was recorded as a medium-severity spoofing
+        // attempt from 127.0.0.1, over and over. A report full of the proxy
+        // doing its job is a report nobody reads.
+        //
+        // The spoof has a signature, so ask for it: the header names an
+        // allowlisted address while the connection itself is not from one. That
+        // is somebody claiming to be a whitelisted host. Anything else is an
+        // ordinary refusal, and the 401 is the whole of the answer.
+        const forwardedFor = req.headers['x-forwarded-for'];
+        if (forwardedFor) {
+          try {
+            const claimed = String(forwardedFor)
+              .split(',')
+              .map(s => s.trim())
+              .filter(Boolean);
+            const impersonating =
+              claimed.some(addr => acceptedIpAddress(addr)) &&
+              !acceptedIpAddress(req.socket.remoteAddress);
+            if (impersonating) {
+              // A canary, with the REQUEST in hand. The 401 below is unchanged
+              // (docs/Security/Remediation/WeKan.md §12).
+              require('/server/lib/canary').tripCanary('spoof.forwarded-header', {
+                req,
+                detail: 'denied /metrics with a forwarded-for header naming an allowed address',
+              });
+            }
+          } catch (e) { /* logging must never break the endpoint */ }
+        }
         res.writeHead(401); // HTTP status
         res.end(
           'IpAddress: ' +
             ipAddress +
-            ' is not authorized to perform this action !!\n',
+            ' is not authorized to perform this action !!\n' +
+            // The address above is the SOCKET peer unless METRICS_TRUST_PROXY
+            // says how many proxies to trust, so behind a reverse proxy this is
+            // the proxy and never the scraper. Somebody staring at a 401 from
+            // their own Prometheus deserves to be told that here, in the answer
+            // they are actually looking at, rather than in the server log.
+            (forwardedFor && !process.env.METRICS_TRUST_PROXY
+              ? 'This request came through a proxy (X-Forwarded-For present) and the ' +
+                'address above is the proxy. Add it to METRICS_ACCEPTED_IP_ADDRESS, or ' +
+                'set METRICS_TRUST_PROXY to the number of trusted proxy hops so the ' +
+                "scraper's own address is used.\n"
+              : ''),
         );
       }
     } catch (e) {

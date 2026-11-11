@@ -1,6 +1,9 @@
 import { ReactiveCache } from '/imports/reactiveCache';
 import Settings from '/models/settings';
 import Integrations from '/models/integrations';
+import { tenantForConnection, tenancyEnabled } from '/server/lib/tenantResolver';
+
+import * as tenants from '/models/lib/tenants';
 
 Meteor.publish('globalwebhooks', async function() {
   if (!this.userId) {
@@ -26,47 +29,230 @@ Meteor.publish('globalwebhooks', async function() {
   );
   return ret;
 });
-Meteor.publish('setting', () => {
-  const ret = Settings.find(
-    {},
-    {
-      fields: {
-        disableRegistration: 1,
-        disableForgotPassword: 1,
-        productName: 1,
-        hideLogo: 1,
-        hideCardCounterList: 1,
-        hideBoardMemberList: 1,
-        customLoginLogoImageUrl: 1,
-        customLoginLogoLinkUrl: 1,
-        customHelpLinkUrl: 1,
-        textBelowCustomLoginLogo: 1,
-        automaticLinkedUrlSchemes: 1,
-        customTopLeftCornerLogoImageUrl: 1,
-        customTopLeftCornerLogoLinkUrl: 1,
-        customTopLeftCornerLogoHeight: 1,
-        customHTMLafterBodyStart: 1,
-        customHTMLbeforeBodyEnd: 1,
-        displayAuthenticationMethod: 1,
-        defaultAuthenticationMethod: 1,
-        spinnerName: 1,
-        oidcBtnText: 1,
-        mailDomainName: 1,
-        legalNotice: 1,
-        customHeadEnabled: 1,
-        customHeadMetaTags: 1,
-        customHeadLinkTags: 1,
-        customManifestEnabled: 1,
-        customManifestContent: 1,
-        customAssetLinksEnabled: 1,
-        customAssetLinksContent: 1,
-        accessibilityPageEnabled: 1,
-        accessibilityTitle: 1,
-        accessibilityContent: 1,
-      },
+// Multitenancy option D (docs/Design/Multitenancy/Multitenancy.md, D.9): per-tenant
+// branding is the instance settings document with this Organization's own
+// `org`-prefixed fields written over it. Doing the override HERE is what let
+// per-tenant branding ship without touching a single template - the client reads the
+// same `currentSetting` fields it always did, and only what is published differs per
+// host.
+const SETTING_FIELDS = {
+  disableRegistration: 1,
+  disableForgotPassword: 1,
+  renderLinksAsPlainText: 1,
+  alwaysShowCodeAsText: 1,
+  disableActivities: 1,
+  disableNotifications: 1,
+  disableWatch: 1,
+  // 3-tier Notification Settings admin defaults (models/lib/notificationSettings.js).
+  notifyDefaultTray: 1,
+  notifyDefaultEmail: 1,
+  // #3695 / #5171: the Admin Panel default notification delivery per channel.
+  // Board, webhook and member settings show what they inherit from it; no secret.
+  notificationDelivery: 1,
+  // Admin Panel / Problems / Delete reads this field back after writing it.
+  // Without publishing it, the optimistic checkmark is immediately redrawn from
+  // `undefined` even though the server saved the new value.
+  enablePermanentDelete: 1,
+  disableAllExport: 1,
+  disableAllImport: 1,
+  disableExportAvatars: 1,
+  disableImportAvatars: 1,
+  anonymizeExportUsers: 1,
+  anonymizeImportUsers: 1,
+  productName: 1,
+  // The site theme (docs/Theme/Theme.md, layer 2). On a multitenancy host the
+  // Organization's own value is published in its place.
+  themeColor: 1,
+  themeCustomColors: 1,
+  hideLogo: 1,
+  hideCardCounterList: 1,
+  // #6736: which optional features the instance offers. Every client needs
+  // them to hide what is disabled; they hold no secret.
+  featureStates: 1,
+  featureApprovalRequired: 1,
+  featureKnownKeys: 1,
+  featurePreviewAdmins: 1,
+  // The card fields every board shows (models/lib/cardFieldVisibility.js):
+  // every client hides the unticked ones; no secret.
+  cardFieldStates: 1,
+  // Which optional compatible APIs are on (models/lib/optionalApis.js): the
+  // Admin Panel shows the ticks; whether one is on is no secret.
+  optionalApis: 1,
+  // #2217: whether boards may show their Rules to members; no secret.
+  rulesReadOnlyForMembers: 1,
+  // #4198: whether public boards are on the fediverse; no secret.
+  activityPubEnabled: 1,
+  // #2460: whether the sign-in page offers SQRL; no secret.
+  sqrlEnabled: 1,
+  hideBoardMemberList: 1,
+  hideDateFormat: 1,
+  globalDateFormat: 1,
+  cardsLoading: 1,
+  customLoginLogoImageUrl: 1,
+  customLoginLogoLinkUrl: 1,
+  customHelpLinkUrl: 1,
+  customPrivateBoardDesc: 1,
+  customPublicBoardDesc: 1,
+  textBelowCustomLoginLogo: 1,
+  loginBackgroundColor: 1,
+  automaticLinkedUrlSchemes: 1,
+  externalLinkPatternPrefix: 1,
+  externalLinkPatternUrl: 1,
+  externalLinkRules: 1,
+  externalLinkIdentifierAliases: 1,
+  customTopLeftCornerLogoImageUrl: 1,
+  customTopLeftCornerLogoLinkUrl: 1,
+  customTopLeftCornerLogoHeight: 1,
+  customHTMLafterBodyStart: 1,
+  customHTMLbeforeBodyEnd: 1,
+  displayAuthenticationMethod: 1,
+  defaultAuthenticationMethod: 1,
+  spinnerName: 1,
+  oidcBtnText: 1,
+  mailDomainName: 1,
+  // #2022: admin-customizable transactional-email templates (Admin Panel ->
+  // Email -> Email Templates). Unset is the default and means "use the
+  // current hardcoded/i18n content" - see server/models/settings.js and
+  // server/notifications/email.js.
+  inviteEmailSubjectTemplate: 1,
+  inviteEmailBodyTemplate: 1,
+  activityEmailSubjectTemplate: 1,
+  activityEmailBodyTemplate: 1,
+  legalNotice: 1,
+  customHeadEnabled: 1,
+  customHeadMetaTags: 1,
+  customHeadLinkTags: 1,
+  customManifestEnabled: 1,
+  customManifestContent: 1,
+  customAssetLinksEnabled: 1,
+  customAssetLinksContent: 1,
+  accessibilityPageEnabled: 1,
+  accessibilityTitle: 1,
+  accessibilityContent: 1,
+  // The Support page and its text. NOT publishing these was a real bug, not an
+  // omission of convenience: Admin Panel / Settings / Visibility renders the
+  // "Support page enabled" checkbox from `currentSetting.supportPageEnabled`, so
+  // with the field absent the box drew unchecked, ticking it wrote the setting -
+  // and the next re-render drew it unchecked again. The setting was saved and the
+  // checkbox said it was not, which reads as "I cannot tick this".
+  supportPageEnabled: 1,
+  supportPagePublic: 1,
+  supportTitle: 1,
+  supportPageText: 1,
+  supportPopupText: 1,
+  // Same story: the All Boards group's "Board activities" checkbox.
+  hideBoardActivitiesOnAllBoards: 1,
+  // …and the two board-member restrictions shown in Admin Panel / People /
+  // Organizations and / Teams.
+  boardMembersFromSameOrgOnly: 1,
+  boardMembersFromSameTeamOnly: 1,
+  // Admin Panel / LDAP override fields (models/lib/configResolver.js). NOTE:
+  // 'ldap.bindPassword' is deliberately absent from this allowlist - it must
+  // NEVER reach the client. Only 'ldap.bindPasswordSet' (a boolean) is
+  // published, so the UI can show "a password is configured" without ever
+  // transmitting the password itself.
+  // The rest of the LDAP block is in ADMIN_SETTING_FIELDS below.
+  'ldap.enabled': 1,
+  // Admin Panel / OAuth login providers (Meteor accounts-google/-github/...,
+  // models/lib/oauthProviders.js) and passwordless login. Per provider ONLY
+  // `enabled`, `id`, `loginStyle` and the boolean `secretSet` are published;
+  // 'oauthProviders.<key>.secret' is deliberately absent from this allowlist
+  // for the same reason 'ldap.bindPassword' is - it must NEVER reach the
+  // client. Field-by-field for the same reason as `ldap` (a bare
+  // `oauthProviders: 1` would carry every secret).
+  'oauthProviders.google.enabled': 1,
+  'oauthProviders.google.id': 1,
+  'oauthProviders.google.loginStyle': 1,
+  'oauthProviders.google.secretSet': 1,
+  'oauthProviders.github.enabled': 1,
+  'oauthProviders.github.id': 1,
+  'oauthProviders.github.loginStyle': 1,
+  'oauthProviders.github.secretSet': 1,
+  'oauthProviders.facebook.enabled': 1,
+  'oauthProviders.facebook.id': 1,
+  'oauthProviders.facebook.loginStyle': 1,
+  'oauthProviders.facebook.secretSet': 1,
+  'oauthProviders.twitter.enabled': 1,
+  'oauthProviders.twitter.id': 1,
+  'oauthProviders.twitter.loginStyle': 1,
+  'oauthProviders.twitter.secretSet': 1,
+  'oauthProviders.meteor-developer.enabled': 1,
+  'oauthProviders.meteor-developer.id': 1,
+  'oauthProviders.meteor-developer.loginStyle': 1,
+  'oauthProviders.meteor-developer.secretSet': 1,
+  'oauthProviders.weibo.enabled': 1,
+  'oauthProviders.weibo.id': 1,
+  'oauthProviders.weibo.loginStyle': 1,
+  'oauthProviders.weibo.secretSet': 1,
+  'oauthProviders.meetup.enabled': 1,
+  'oauthProviders.meetup.id': 1,
+  'oauthProviders.meetup.loginStyle': 1,
+  'oauthProviders.meetup.secretSet': 1,
+  oauthProvidersLoginStyle: 1,
+  oauthProvidersMergeExistingUsers: 1,
+  oauthProvidersAllowedEmailDomains: 1,
+  passwordlessEnabled: 1,
+};
+
+// Published to site administrators only. 'setting' is subscribed by every
+// visitor, signed in or not, and these describe the directory server - its
+// host, port, bind account and search filter - which is reconnaissance for
+// whoever wants to attack it and is read only by Admin Panel -> LDAP.
+const ADMIN_SETTING_FIELDS = {
+  'ldap.host': 1,
+  'ldap.port': 1,
+  'ldap.baseDN': 1,
+  'ldap.authentificationUserDN': 1,
+  'ldap.bindPasswordSet': 1,
+  'ldap.userSearchFilter': 1,
+  'ldap.userSearchField': 1,
+  'ldap.encryption': 1,
+};
+
+Meteor.publish('setting', async function() {
+  const org = tenancyEnabled() ? tenantForConnection(this.connection) : null;
+  const viewer = this.userId ? await ReactiveCache.getUser(this.userId) : null;
+  const fields = viewer && viewer.isAdmin === true && viewer.loginDisabled !== true
+    ? { ...SETTING_FIELDS, ...ADMIN_SETTING_FIELDS }
+    : SETTING_FIELDS;
+  // No tenancy, or a host no Organization claims: byte-for-byte what it always was,
+  // a plain reactive cursor.
+  if (!org) {
+    return Settings.find({}, { fields });
+  }
+
+  // A tenant host: the same document, published through this connection with the
+  // org's branding applied. observeChanges keeps it reactive, so an admin editing
+  // the instance settings still updates every tenant's page - with each tenant's own
+  // overrides still on top.
+  const overrides = tenants.tenantBrandingOverrides(org);
+  const applyOverrides = doc => {
+    const out = { ...doc };
+    Object.keys(overrides).forEach(field => {
+      out[field] = overrides[field];
+    });
+    return out;
+  };
+  const handle = await Settings.find({}, { fields }).observeChanges({
+    added: (id, doc) => {
+      this.added('settings', id, applyOverrides(doc));
     },
-  );
-  return ret;
+    changed: (id, doc) => {
+      // `doc` carries only the fields that changed. An overridden field must not be
+      // allowed back through: the tenant's value wins whatever the instance sets.
+      const patch = { ...doc };
+      Object.keys(patch).forEach(field => {
+        if (overrides[field] !== undefined) patch[field] = overrides[field];
+      });
+      this.changed('settings', id, patch);
+    },
+    removed: id => {
+      this.removed('settings', id);
+    },
+  });
+  this.ready();
+  this.onStop(() => handle.stop());
+  return undefined;
 });
 
 Meteor.publish('mailServer', async function() {
@@ -83,6 +269,10 @@ Meteor.publish('mailServer', async function() {
           'mailServer.username': 1,
           'mailServer.enableTLS': 1,
           'mailServer.from': 1,
+          'mailServer.enabled': 1,
+          'mailServer.service': 1,
+          'mailServer.configurations': 1,
+          'mailServer.passwordSet': 1,
         },
       },
     );

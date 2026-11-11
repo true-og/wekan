@@ -1,8 +1,13 @@
 import { ReactiveVar } from 'meteor/reactive-var';
+import { Session } from 'meteor/session';
 import { ReactiveCache } from '/imports/reactiveCache';
 import { Filter } from '/client/lib/filter';
 import { EscapeActions } from '/client/lib/escapeActions';
 import { Utils } from '/client/lib/utils';
+import {
+  boardScopedSelectionSelector,
+  cardIdsOnBoard,
+} from '/models/lib/boardScopedSelection';
 
 // Late-bind Sidebar to avoid circular dependency (sidebar.js needs its template first)
 let _Sidebar;
@@ -66,6 +71,28 @@ export const MultiSelection = {
   sidebarView: 'multiselection',
 
   _selectedCards: new ReactiveVar([]),
+  _selectedObjects: new ReactiveVar([]),
+
+  objectSelection() {
+    const boardId = Session.get('currentBoard');
+    return this._selectedObjects.get().filter(entry => entry.boardId === boardId);
+  },
+  hasObjects() { return this.objectSelection().length > 0; },
+  isObjectSelected(kind, id) {
+    return this.objectSelection().some(entry => entry.kind === kind && entry.id === id);
+  },
+  toggleObject(kind, id, boardId) {
+    if (!this.isActive()) this.activate();
+    const entries = this.objectSelection();
+    const index = entries.findIndex(entry => entry.kind === kind && entry.id === id);
+    if (index >= 0) entries.splice(index, 1);
+    else entries.push({ kind, id, boardId });
+    this._selectedObjects.set(entries);
+  },
+  mixedSelection() {
+    return [...this.objectSelection().map(({ kind, id }) => ({ kind, id })),
+      ...ReactiveCache.getCards(this.getMongoSelector()).map(card => ({ kind: 'card', id: card._id }))];
+  },
 
   _isActive: new ReactiveVar(false),
 
@@ -75,12 +102,19 @@ export const MultiSelection = {
 
   reset() {
     this._selectedCards.set([]);
+    this._selectedObjects.set([]);
   },
 
   getMongoSelector() {
-    return Filter.mongoSelector({
-      _id: { $in: this._selectedCards.get() },
-    });
+    // #2306: scope the selection to the board currently being viewed so bulk
+    // actions (archive, move, label, ...) never touch cards that were
+    // selected on a previously visited board.
+    return Filter.mongoSelector(
+      boardScopedSelectionSelector(
+        this._selectedCards.get(),
+        Session.get('currentBoard'),
+      ),
+    );
   },
 
   isActive() {
@@ -136,7 +170,7 @@ export const MultiSelection = {
 
   toggleRange(cardId) {
     const selectedCards = this._selectedCards.get();
-    this.reset();
+    this._selectedCards.set([]);
     if (!this.isActive() || selectedCards.length === 0) {
       this.toggle(cardId);
     } else {
@@ -147,6 +181,12 @@ export const MultiSelection = {
 
   toggle(cardIds, options = {}) {
     cardIds = typeof cardIds === 'string' ? [cardIds] : cardIds;
+    // #2306: never let cards that verifiably live on ANOTHER board enter the
+    // selection (e.g. handed over by a caller that queried the client card
+    // cache without a board scope).
+    cardIds = cardIdsOnBoard(cardIds, Session.get('currentBoard'), id =>
+      ReactiveCache.getCard(id),
+    );
     options = {
       add: true,
       remove: true,
@@ -187,6 +227,6 @@ EscapeActions.register(
     return MultiSelection.isActive();
   },
   {
-    noClickEscapeOn: '.js-minicard,.js-board-sidebar-content',
+    noClickEscapeOn: '.js-minicard,.js-board-sidebar-content,.js-list-header,.js-swimlane-header,.js-structural-selection',
   },
 );

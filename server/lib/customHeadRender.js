@@ -1,6 +1,7 @@
 import { WebApp } from 'meteor/webapp';
 import { WebAppInternals } from 'meteor/webapp';
 import Settings from '/models/settings';
+const { safeMetaTags } = require('/models/lib/customHeadMetaTags');
 
 // Cache the setting since the boilerplate callback is synchronous
 let cachedSetting = null;
@@ -30,12 +31,35 @@ Meteor.startup(async () => {
       const productName = (setting && setting.productName) ? setting.productName : 'Wekan';
       data.head += `\n  <title>${productName}</title>\n`;
 
+      // #6419: ensure a responsive viewport meta tag. Without it, mobile browsers
+      // lay the page out at their default ~980px virtual width and scale it down,
+      // so the whole UI looks tiny ("icons too small to tap"), window.innerWidth
+      // reports 980 on a 390px phone, and the `@media (max-width: 800px)` rules
+      // never match. Declaring width=device-width makes WeKan responsive on phones.
+      // User zoom is left enabled (no user-scalable=no) for accessibility.
+      if (!/name=["']?viewport/i.test(data.head)) {
+        data.head +=
+          '  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">\n';
+      }
+
+      // #1040: where LibreJS finds the license of every script on the page
+      // (server/jsWebLabels.js).
+      if (!/rel=["']?jslicense/i.test(data.head)) {
+        const { jsLicenseLink } = require('/models/lib/jsWebLabels');
+        data.head += `  ${jsLicenseLink((typeof __meteor_runtime_config__ !== 'undefined' && __meteor_runtime_config__.ROOT_URL_PATH_PREFIX) || '')}\n`;
+      }
+
       // Only add custom head tags if enabled
       if (!setting || !setting.customHeadEnabled) {
         return data;
       }
 
       let injection = '';
+      // #4042: the custom meta tags - <meta> elements only, see
+      // models/lib/customHeadMetaTags.js.
+      for (const tag of safeMetaTags(setting.customHeadMetaTags)) {
+        injection += `  ${tag}\n`;
+      }
       // Add custom link tags (except manifest if custom manifest is enabled)
       if (setting.customHeadLinkTags && setting.customHeadLinkTags.trim()) {
         let linkTags = setting.customHeadLinkTags;

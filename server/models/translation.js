@@ -1,5 +1,6 @@
 import { Meteor } from 'meteor/meteor';
 import Translation from '/models/translation';
+import { safeSelector } from '/server/lib/selectorGuard';
 import { ensureIndex } from '/server/lib/mongoStartup';
 
 const getReactiveCache = () => require('/imports/reactiveCache').ReactiveCache;
@@ -47,6 +48,19 @@ Meteor.methods({
     }
 
     await Translation.removeAsync(translationId);
+  },
+
+  // The total behind the "page X / N" counter of the Translation table page
+  // (docs/Features/General/Table.md). It counts the whole result set - the page itself
+  // only ever holds 25 rows - so it is a separate call, made when the pane opens
+  // and when the search changes, never on a prev/next click.
+  async getTranslationsCollectionCount(query = {}) {
+    check(query, Match.OneOf(Object, null, undefined));
+    if (!(await getReactiveCache().getCurrentUser())?.isAdmin) {
+      throw new Meteor.Error('not-authorized');
+    }
+    const cursor = await getReactiveCache().getTranslations(safeSelector(query || {}, 'getTranslationsCollectionCount'), {}, true);
+    return typeof cursor.countAsync === 'function' ? await cursor.countAsync() : cursor.count();
   },
 });
 

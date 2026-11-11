@@ -1,0 +1,24 @@
+template(name="cardButtons")
+  if hasCardButtons
+    .card-details-item.card-details-item-buttons
+      h3.card-details-item-title
+        i.fa.fa-hand-pointer-o
+        | {{_ 'r-card-button'}}
+      .card-details-item-content.card-buttons
+        each cardButtonRules
+          button.primary.js-run-card-button(data-rule-id="{{ruleId}}")
+            i.fa.fa-magic
+            = ' '
+            = label
+
+//- Card buttons, Show on Minicard (Board Settings / Card): the same buttons,
+  small, under a minicard's badges. A click runs the rule without opening the
+  card.
+template(name="minicardCardButtons")
+  if hasCardButtons
+    .minicard-card-buttons
+      each cardButtonRules
+        button.js-run-minicard-card-button(type="button" data-rule-id="{{ruleId}}" title="{{label}}")
+          i.fa.fa-magic
+          = ' '
+          = label

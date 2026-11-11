@@ -6,30 +6,49 @@ import { ReactiveCache } from '/imports/reactiveCache';
 import Integrations from '/models/integrations';
 import { validateAttachmentUrl } from '/models/lib/attachmentUrlValidation';
 import { ensureIndex } from '/server/lib/mongoStartup';
+const { normalizeDeliverySettings } = require('/models/lib/notificationDelivery');
+// ErrorBleed: refusals answer with their real status and a safe message.
+const { publicErrorData } = require('/server/lib/apiResponseHelpers');
 
 Meteor.startup(async () => {
   await ensureIndex(Integrations, { modifiedAt: -1 });
   await ensureIndex(Integrations, { boardId: 1 });
 });
 
+// HookUrlBleed, REST sibling (IntegrationBleed area): the board publication
+// sends an integration's URL to the board's admins only, because a
+// Slack/Mattermost/Teams incoming-webhook URL carries its secret in the path
+// (tests/webhookUrlPublication.test.cjs). These two REST reads let any member
+// who reads the whole board - read-only and comment-only members included -
+// receive that same URL. Board admins and site admins still get everything but
+// the token; everybody else gets exactly what the publication gives them. Not
+// recorded in Admin Panel -> Problems: an API client of an ordinary member
+// reaches this in normal use, so it is not an attempt.
+async function integrationFieldsFor(userId, boardId) {
+  const board = await ReactiveCache.getBoard(boardId);
+  const boardAdmin = ((board && board.members) || []).some(
+    m => m.userId === userId && m.isActive && m.isAdmin,
+  );
+  const siteAdmin = !boardAdmin && !!(await ReactiveCache.getUser({ _id: userId, isAdmin: true }));
+  return boardAdmin || siteAdmin ? { token: 0 } : { boardId: 1, enabled: 1, activities: 1 };
+}
+
 WebApp.handlers.get('/api/boards/:boardId/integrations', async function(req, res) {
   try {
     const paramBoardId = req.params.boardId;
     await Authentication.checkBoardAccess(req.userId, paramBoardId);
+    const fields = await integrationFieldsFor(req.userId, paramBoardId);
 
     const data = (await ReactiveCache.getIntegrations(
       { boardId: paramBoardId },
-      { fields: { token: 0 } },
+      { fields },
     )).map(function(doc) {
       return doc;
     });
 
     sendJsonResult(res, { code: 200, data });
   } catch (error) {
-    sendJsonResult(res, {
-      code: 200,
-      data: error,
-    });
+    sendJsonResult(res, publicErrorData(error));
   }
 });
 
@@ -38,19 +57,20 @@ WebApp.handlers.get('/api/boards/:boardId/integrations/:intId', async function(r
     const paramBoardId = req.params.boardId;
     const paramIntId = req.params.intId;
     await Authentication.checkBoardAccess(req.userId, paramBoardId);
+    const fields = await integrationFieldsFor(req.userId, paramBoardId);
 
-    sendJsonResult(res, {
-      code: 200,
-      data: await ReactiveCache.getIntegration(
-        { _id: paramIntId, boardId: paramBoardId },
-        { fields: { token: 0 } },
-      ),
-    });
+    const integration = await ReactiveCache.getIntegration(
+      { _id: paramIntId, boardId: paramBoardId },
+      { fields },
+    );
+    // 404, not a 200 with an empty body (#6862).
+    if (!integration) {
+      sendJsonResult(res, { code: 404, data: { error: 'Integration not found' } });
+      return;
+    }
+    sendJsonResult(res, { code: 200, data: integration });
   } catch (error) {
-    sendJsonResult(res, {
-      code: 200,
-      data: error,
-    });
+    sendJsonResult(res, publicErrorData(error));
   }
 });
 
@@ -62,7 +82,9 @@ WebApp.handlers.post('/api/boards/:boardId/integrations', async function(req, re
     // SSRF protection: block webhook URLs that resolve to private/loopback/
     // link-local addresses (e.g. cloud metadata at 169.254.169.254) before the
     // URL is ever stored and delivered server-side. See GHSA-hc3x-hq3m-663q.
-    const validation = await validateAttachmentUrl(req.body.url);
+    // ...unless a site admin listed it as an internal destination.
+    const validation = (await require('/server/webhookInternalHosts').webhookHostIsInternalAllowed(req.body.url))
+      ? { valid: true } : await validateAttachmentUrl(req.body.url);
     if (!validation.valid) {
       sendJsonResult(res, {
         code: 400,
@@ -84,18 +106,50 @@ WebApp.handlers.post('/api/boards/:boardId/integrations', async function(req, re
       },
     });
   } catch (error) {
-    sendJsonResult(res, {
-      code: 200,
-      data: error,
-    });
+    sendJsonResult(res, publicErrorData(error));
   }
 });
+
+// An integration that is not on THIS board (a wrong id, or the id of another board's
+// integration) answers 404, as GET does (#6862). The write routes used to answer 200 -
+// PUT with the requested id, the activities routes with `data: null` - for an update
+// that changed nothing, so a client could not tell it from a success. Checked after
+// board-admin authorization, so it tells nobody without that right anything.
+async function integrationOr404(res, boardId, intId) {
+  const integration = await ReactiveCache.getIntegration(
+    { _id: intId, boardId },
+    { fields: { _id: 1 } },
+  );
+  if (!integration) {
+    sendJsonResult(res, { code: 404, data: { error: 'Integration not found' } });
+    return null;
+  }
+  return integration;
+}
 
 WebApp.handlers.put('/api/boards/:boardId/integrations/:intId', async function(req, res) {
   try {
     const paramBoardId = req.params.boardId;
     const paramIntId = req.params.intId;
     await Authentication.checkBoardAdmin(req.userId, paramBoardId);
+    if (!(await integrationOr404(res, paramBoardId, paramIntId))) return;
+
+    // #3695: how this webhook delivers - { webhook: { text, fields, grouping,
+    // schedule, ... } }, or null to inherit the board / Admin Panel default
+    // (models/lib/notificationDelivery.js). Validated before ANY field is
+    // written, so a refused request changes nothing.
+    let notificationDelivery;
+    if (req.body.hasOwnProperty('notificationDelivery')) {
+      try {
+        notificationDelivery = normalizeDeliverySettings(req.body.notificationDelivery, ['webhook']);
+      } catch (e) {
+        sendJsonResult(res, {
+          code: 400,
+          data: { error: 'invalid-notification-delivery', reason: e.message },
+        });
+        return;
+      }
+    }
 
     if (req.body.hasOwnProperty('enabled')) {
       await Integrations.direct.updateAsync(
@@ -113,7 +167,8 @@ WebApp.handlers.put('/api/boards/:boardId/integrations/:intId', async function(r
       // SSRF protection: this update path uses Integrations.direct, which
       // bypasses the schema's url validator, so validate explicitly here.
       // See GHSA-hc3x-hq3m-663q.
-      const validation = await validateAttachmentUrl(req.body.url);
+      const validation = (await require('/server/webhookInternalHosts').webhookHostIsInternalAllowed(req.body.url))
+        ? { valid: true } : await validateAttachmentUrl(req.body.url);
       if (!validation.valid) {
         sendJsonResult(res, {
           code: 400,
@@ -132,6 +187,12 @@ WebApp.handlers.put('/api/boards/:boardId/integrations/:intId', async function(r
         { $set: { token: req.body.token } },
       );
     }
+    if (req.body.hasOwnProperty('notificationDelivery')) {
+      await Integrations.direct.updateAsync(
+        { _id: paramIntId, boardId: paramBoardId },
+        notificationDelivery ? { $set: { notificationDelivery } } : { $unset: { notificationDelivery: '' } },
+      );
+    }
     if (req.body.hasOwnProperty('activities')) {
       await Integrations.direct.updateAsync(
         { _id: paramIntId, boardId: paramBoardId },
@@ -146,10 +207,7 @@ WebApp.handlers.put('/api/boards/:boardId/integrations/:intId', async function(r
       },
     });
   } catch (error) {
-    sendJsonResult(res, {
-      code: 200,
-      data: error,
-    });
+    sendJsonResult(res, publicErrorData(error));
   }
 });
 
@@ -161,6 +219,7 @@ WebApp.handlers.delete(
       const paramIntId = req.params.intId;
       const newActivities = req.body.activities;
       await Authentication.checkBoardAdmin(req.userId, paramBoardId);
+      if (!(await integrationOr404(res, paramBoardId, paramIntId))) return;
 
       await Integrations.direct.updateAsync(
         { _id: paramIntId, boardId: paramBoardId },
@@ -175,10 +234,7 @@ WebApp.handlers.delete(
         ),
       });
     } catch (error) {
-      sendJsonResult(res, {
-        code: 200,
-        data: error,
-      });
+      sendJsonResult(res, publicErrorData(error));
     }
   },
 );
@@ -191,6 +247,7 @@ WebApp.handlers.post(
       const paramIntId = req.params.intId;
       const newActivities = req.body.activities;
       await Authentication.checkBoardAdmin(req.userId, paramBoardId);
+      if (!(await integrationOr404(res, paramBoardId, paramIntId))) return;
 
       await Integrations.direct.updateAsync(
         { _id: paramIntId, boardId: paramBoardId },
@@ -205,10 +262,7 @@ WebApp.handlers.post(
         ),
       });
     } catch (error) {
-      sendJsonResult(res, {
-        code: 200,
-        data: error,
-      });
+      sendJsonResult(res, publicErrorData(error));
     }
   },
 );
@@ -227,9 +281,6 @@ WebApp.handlers.delete('/api/boards/:boardId/integrations/:intId', async functio
       },
     });
   } catch (error) {
-    sendJsonResult(res, {
-      code: 200,
-      data: error,
-    });
+    sendJsonResult(res, publicErrorData(error));
   }
 });

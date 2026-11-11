@@ -1,9 +1,19 @@
 import { ReactiveCache } from '/imports/reactiveCache';
+import { getFeatureFlags } from '/models/lib/featureFlags';
+
+const { isAssignedOnlyMember, mayCopyFromBoard } = require('/models/lib/boardCardScope');
 
 // We use activities fields at two different places:
 // 1. The board sidebar
 // 2. The card activity tab
 // We use this publication to paginate for these two publications.
+//
+// #2539 ("Load only visible activities etc"): this is already satisfied. Like the
+// visible-cards infinite scroll (#2144), activities are loaded progressively: the
+// client passes an increasing `limit` (page * activitiesPerPage) via loadNextPage,
+// and the publication below only ships the most-recent `limit` activities
+// (sort createdAt:-1). So a board with tens of thousands of activities never loads
+// them all at once, and no manual cleanup is required to keep the board fast.
 
 Meteor.publish('activities', async function(kind, id, limit, showActivities) {
   check(
@@ -15,6 +25,13 @@ Meteor.publish('activities', async function(kind, id, limit, showActivities) {
   check(id, Match.Maybe(String));
   check(limit, Number);
   check(showActivities, Boolean);
+
+  // Admin Panel / Features / Notifications (#5820): hide all activity-feed
+  // entries (existing and new) when activities are disabled. After check() so the
+  // argument-checks audit is satisfied.
+  if (getFeatureFlags().disableActivities) {
+    return this.ready();
+  }
 
   // Return empty cursor if id is null or undefined
   if (!id) {
@@ -30,12 +47,16 @@ Meteor.publish('activities', async function(kind, id, limit, showActivities) {
 
   let linkedElmtId = [id];
   let board;
+  // The boards whose activities a board feed shows: this one and its visible
+  // linked boards, each read by the user's role on THAT board.
+  const feedBoards = [];
 
   if (kind === 'board') {
     board = await ReactiveCache.getBoard(id);
     if (!board || !board.isVisibleBy(userForVisibility)) {
       return this.ready();
     }
+    feedBoards.push(board);
 
     // Get linked boards, but only those visible to the user
     const linkedCards = await ReactiveCache.getCards({
@@ -46,6 +67,7 @@ Meteor.publish('activities', async function(kind, id, limit, showActivities) {
       const linkedBoard = await ReactiveCache.getBoard(card.linkedId);
       if (linkedBoard && linkedBoard.isVisibleBy(userForVisibility)) {
         linkedElmtId.push(card.linkedId);
+        feedBoards.push(linkedBoard);
       }
     }
   } else if (kind === 'card') {
@@ -57,11 +79,30 @@ Meteor.publish('activities', async function(kind, id, limit, showActivities) {
     if (!board || !board.isVisibleBy(userForVisibility)) {
       return this.ready();
     }
+    // An assigned-only member sees only their assigned cards' history.
+    if (!mayCopyFromBoard(board, this.userId, card)) {
+      return this.ready();
+    }
   }
 
-  const selector = showActivities
-    ? { [`${kind}Id`]: { $in: linkedElmtId } }
-    : { $and: [{ activityType: 'addComment' }, { [`${kind}Id`]: { $in: linkedElmtId } }] };
+  const clauses = [{ [`${kind}Id`]: { $in: linkedElmtId } }];
+  if (!showActivities) clauses.push({ activityType: 'addComment' });
+  // On a board an assigned-only member reads the board's own activities that
+  // concern no card, and those of the cards assigned to them - on this board
+  // and on every linked board where they are assigned-only too: a linked
+  // board's activities passed whole before (GHSA-r4gm-mjj9-g3x8).
+  const restricted = kind === 'board' ? feedBoards.filter(b => isAssignedOnlyMember(b, this.userId)) : [];
+  if (restricted.length) {
+    const restrictedIds = restricted.map(b => b._id);
+    const assigned = await ReactiveCache.getCards({ boardId: { $in: restrictedIds }, assignees: this.userId }, { fields: { _id: 1 } });
+    clauses.push({ $or: [
+      { boardId: { $nin: restrictedIds } },
+      { cardId: { $exists: false } },
+      { cardId: null },
+      { cardId: { $in: (assigned || []).map(c => c._id) } },
+    ] });
+  }
+  const selector = clauses.length === 1 ? clauses[0] : { $and: clauses };
 
   const ret = await ReactiveCache.getActivities(selector,
     {
