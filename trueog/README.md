@@ -25,6 +25,11 @@ a secret: values that are secret on the server appear as `<placeholders>`. The w
 - **Straight to Staff-Auth.** `OIDC_REDIRECTION_ENABLED=true`: a signed-out visit goes to Staff-Auth (one automatic
   try per browser tab). WeKan only redirects after its own sign-in page has drawn, so nginx injects a style that keeps
   that page (`.auth-layout`) invisible for 3 seconds; if the redirect did not happen, the button appears.
+- **Sign Out signs out everywhere** (since 2026-11-18). `OAUTH2_LOGOUT_ENDPOINT=/oauth2/sessions/logout`: WeKan's
+  Sign Out (also "Log out everywhere" and deleting your own account) ends the WeKan session, then sends the browser
+  to Staff-Auth's logout, like Gitea's Sign Out. Staff-Auth then signs the person out of itself and every app and shows
+  "Logged out". Sign-outs by `trueog-wekan-authwatch` do not redirect (WeKan runs that hook only for its own
+  sign-out actions). Before, WeKan's Sign Out ended only WeKan and opened the Staff-Auth panel.
 - **"Signed out of Staff-Auth" message.** nginx also loads `/trueog-signed-out.js` on every page. It remembers that
   the browser was signed in; the first time the sign-in page shows after the sign-in ended, it explains why (same
   text as Gitea's page) with "Sign in with Staff-Auth" and "Continue without signing in". Once per sign-out; after
