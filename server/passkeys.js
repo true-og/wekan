@@ -19,6 +19,16 @@ const {
 const { relyingParty, base64urlToBytes, bytesToBase64url, passkeyName, MAX_PASSKEYS } = require('/models/lib/passkeys');
 
 const CHALLENGE_MS = 5 * 60 * 1000;
+
+// TrueOG: sign-in is through Staff-Auth only, so passkey sign-in and adding
+// passkeys are refused (a passkey would let a person back in after a
+// Staff-Auth logout). Listing and removing stay. TrueOG's nginx also hides the
+// sign-in button and the Passkeys menu item. Same change as
+// trueog/upgrade/wekan-patch-13.06.py's noPasskey* patches.
+const PASSKEYS_DISABLED = true;
+function refuseIfDisabled() {
+  if (PASSKEYS_DISABLED) throw new Meteor.Error(403, 'passkeys-disabled');
+}
 export const PasskeyChallenges = new Mongo.Collection('passkeyChallenges');
 PasskeyChallenges.deny({ insert: () => true, update: () => true, remove: () => true });
 
@@ -52,6 +62,7 @@ Meteor.methods({
   },
 
   async passkeyRegistrationOptions() {
+    refuseIfDisabled();
     if (!this.userId) throw new Meteor.Error('not-logged-in');
     const { rpID } = rp();
     const user = await Meteor.users.findOneAsync(this.userId, { fields: { username: 1, profile: 1, passkeys: 1 } });
@@ -70,6 +81,7 @@ Meteor.methods({
   },
 
   async passkeyRegister(challengeId, response, name) {
+    refuseIfDisabled();
     check(challengeId, String);
     check(response, Object);
     check(name, Match.Optional(String));
@@ -109,6 +121,7 @@ Meteor.methods({
   // Anybody may ask: the options name no account (a discoverable passkey
   // tells the browser which one), so they reveal nothing.
   async passkeyLoginOptions() {
+    refuseIfDisabled();
     const { rpID } = rp();
     const options = await generateAuthenticationOptions({ rpID, userVerification: 'preferred' });
     const challengeId = await saveChallenge('login', options.challenge);
@@ -119,6 +132,7 @@ Meteor.methods({
 // Accounts.callLoginMethod({ methodArguments: [{ passkey: { challengeId, response } }] })
 Accounts.registerLoginHandler('passkey', async options => {
   if (!options || !options.passkey) return undefined;
+  if (PASSKEYS_DISABLED) return { error: new Meteor.Error(403, 'passkeys-disabled') };
   check(options.passkey, { challengeId: String, response: Object });
   const { challengeId, response } = options.passkey;
   const expectedChallenge = await takeChallenge(challengeId, 'login');

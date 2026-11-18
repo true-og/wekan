@@ -9,7 +9,14 @@ oidcSignup (2026-11-11, operator: "staff-auth sign ups only, disable password re
 disabled, Users.after.insert demanded an invitation code for every new OAuth2 account, so a first Staff-Auth
 sign-in created the account and then failed ("error-invitation-code-not-exist"). Accounts created by the OIDC
 service (services.oidc, set only by WeKan's server-side OIDC login) skip that check; Staff-Auth decides who gets
-in. Password registration stays closed. Same change as server/models/users.js in trueog/wekan."""
+in. Password registration stays closed. Same change as server/models/users.js in trueog/wekan.
+
+noPasskey* (2026-11-18, operator: "sign in with a passkey is still an option in https://todo.true-og.net/sign-in when it
+shouldnt be"): WeKan 13.06 offers passkey sign-in whenever the browser supports WebAuthn, with no setting to turn it
+off. A passkey would let a person back into WeKan without Staff-Auth, e.g. after a Staff-Auth logout. The server now
+refuses passkey sign-in (login handler and its options) and adding passkeys (options and register); listing and
+removing stay. The button and the "Passkeys" menu item are hidden by the style nginx injects (wekan.conf).
+No account had a passkey when this was added."""
 import pathlib, shutil, sys
 p = pathlib.Path(sys.argv[1])
 orig = p.with_name("app.js.orig-13.06")
@@ -25,6 +32,23 @@ PATCHES = [
      'if("ldap"!==t.authenticationMethod&&r){let e=null;if("string"==typeof t.authenticationMethod&&"oauth2"===',
      'if("ldap"!==t.authenticationMethod&&r&&!/*trueog-oidcSignup*/(t.services&&t.services.oidc)){let e=null;'
      'if("string"==typeof t.authenticationMethod&&"oauth2"===',
+     "replace"),
+    ("noPasskeyRegistrationOptions",
+     'async passkeyRegistrationOptions(){',
+     'async passkeyRegistrationOptions(){/*trueog-noPasskeyRegistrationOptions*/throw new v.Meteor.Error(403,"passkeys-disabled");',
+     "replace"),
+    ("noPasskeyRegister",
+     'async passkeyRegister(e,t,r){',
+     'async passkeyRegister(e,t,r){/*trueog-noPasskeyRegister*/throw new v.Meteor.Error(403,"passkeys-disabled");',
+     "replace"),
+    ("noPasskeyLoginOptions",
+     'async passkeyLoginOptions(){',
+     'async passkeyLoginOptions(){/*trueog-noPasskeyLoginOptions*/throw new v.Meteor.Error(403,"passkeys-disabled");',
+     "replace"),
+    ("noPasskeyLogin",
+     'registerLoginHandler("passkey",async e=>{let t;if(!e||!e.passkey)return;',
+     'registerLoginHandler("passkey",async e=>{let t;if(!e||!e.passkey)return;'
+     '/*trueog-noPasskeyLogin*/return{error:new v.Meteor.Error(403,"passkeys-disabled")};',
      "replace"),
 ]
 s = p.read_text()
